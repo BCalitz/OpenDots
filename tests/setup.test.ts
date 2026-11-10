@@ -34,6 +34,7 @@ it('requires Intelligence and model setup and disables voice when either is abse
   expect(
     setupStatus({
       ...config,
+      conversationBackend: 'intelligence',
       intelligenceKey: '',
       voiceKey: 'fixture',
       voiceModel: 'fixture',

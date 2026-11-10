@@ -12,6 +12,7 @@ import { Platform } from './platform.js';
 import { PushService, scheduledResultMessage } from './push.js';
 import {
   agentRunTimeoutMsFromEnv,
+  conversationBackendFromEnv,
   intelligenceApiKeyFromEnv,
   intelligenceWsUrlFromEnv,
   type PlatformConfig,
@@ -37,6 +38,7 @@ const workspace = new WorkspaceStore(
   process.env.OWNER_ID ?? 'opendots-owner',
 );
 const config: PlatformConfig = {
+  conversationBackend: conversationBackendFromEnv(process.env),
   intelligenceKey: intelligenceApiKeyFromEnv(process.env),
   intelligenceApiUrl: process.env.INTELLIGENCE_API_URL || undefined,
   intelligenceWsUrl: intelligenceWsUrlFromEnv(process.env),
@@ -66,7 +68,12 @@ const config: PlatformConfig = {
   runtimeUrl: `http://${host === '::1' ? '[::1]' : '127.0.0.1'}:${port}/api/copilotkit`,
   ownerToken,
 };
-const platform = new Platform(store, workspace, config);
+const platform = new Platform(store, workspace, config, {
+  databasePath: database,
+});
+console.log(
+  `Conversations are stored ${platform.backend === 'local' ? `locally in ${database}` : 'in CopilotKit Intelligence'}.`,
+);
 const researchConfig = {
   mode: 'live' as const,
   apiKey: config.apiKey,
@@ -84,9 +91,9 @@ const runner = new Runner(
     const threadId = workspace.taskThread(claim.id);
     if (!threadId)
       throw new Error(
-        'This legacy task has no Intelligence conversation. Create a new scheduled task from a conversation.',
+        'This legacy task has no conversation. Create a new scheduled task from a conversation.',
       );
-    progress('Running this task in its Intelligence conversation.');
+    progress('Running this task in its conversation.');
     const notify = (outcome: { text: string } | { error: string }) => {
       const dotId = workspace
         .conversations()
@@ -112,9 +119,11 @@ const runner = new Runner(
   },
   config.agentRunTimeoutMs,
 );
-const wsOrigin = new URL(
-  config.intelligenceWsUrl ?? 'wss://realtime.intelligence.copilotkit.ai',
-).origin;
+// The browser opens a socket to Intelligence only when it stores conversations.
+const wsOrigin =
+  platform.backend === 'intelligence'
+    ? ` ${new URL(config.intelligenceWsUrl ?? 'wss://realtime.intelligence.copilotkit.ai').origin}`
+    : '';
 const app = createApp({
   store,
   runner,
@@ -129,7 +138,7 @@ app.use('*', async (c, next) => {
   c.header('Referrer-Policy', 'no-referrer');
   c.header(
     'Content-Security-Policy',
-    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ${wsOrigin}; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`,
+    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'${wsOrigin}; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`,
   );
   await next();
 });

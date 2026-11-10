@@ -1,5 +1,6 @@
 import type { WebConfig } from './parallel.js';
 import type { SetupStatus } from '../shared/types.js';
+import type { ConversationBackendKind } from './conversations/backend.js';
 
 // `copilotkit project select` writes the CLI name and deletes the template name.
 const INTELLIGENCE_API_KEY_ENV_NAMES = [
@@ -38,6 +39,30 @@ export function agentRunTimeoutMsFromEnv(
   return value;
 }
 
+/** CONVERSATION_BACKEND=local|intelligence. Unset means "choose from the keys present". */
+export function conversationBackendFromEnv(
+  env: Record<string, string | undefined>,
+): ConversationBackendKind | undefined {
+  const raw = env.CONVERSATION_BACKEND?.trim().toLowerCase();
+  if (!raw) return undefined;
+  if (raw === 'local' || raw === 'intelligence') return raw;
+  throw new Error('CONVERSATION_BACKEND must be "local" or "intelligence".');
+}
+
+/**
+ * Local unless chosen otherwise. Existing installs that already have an
+ * Intelligence key and no explicit choice keep using Intelligence, so their
+ * stored conversations stay reachable after an upgrade.
+ */
+export function conversationBackend(
+  config: Pick<PlatformConfig, 'conversationBackend' | 'intelligenceKey'>,
+): ConversationBackendKind {
+  return (
+    config.conversationBackend ??
+    (config.intelligenceKey ? 'intelligence' : 'local')
+  );
+}
+
 function firstNonEmptyEnvValue(
   env: Record<string, string | undefined>,
   names: readonly string[],
@@ -50,6 +75,7 @@ function firstNonEmptyEnvValue(
 }
 
 export interface PlatformConfig extends WebConfig {
+  conversationBackend?: ConversationBackendKind;
   intelligenceKey?: string;
   intelligenceApiUrl?: string;
   intelligenceWsUrl?: string;
@@ -79,8 +105,11 @@ export function setupStatus(
   slack = 'not_configured',
   activationFailed = false,
 ): SetupStatus {
+  const backend = conversationBackend(config);
   const missing = [
-    !config.intelligenceKey && INTELLIGENCE_KEY_MISSING_LABEL,
+    backend === 'intelligence' &&
+      !config.intelligenceKey &&
+      INTELLIGENCE_KEY_MISSING_LABEL,
     !config.apiKey && 'OPENAI_API_KEY',
     !config.model && 'OPENAI_MODEL',
   ].filter((item): item is string => !!item);
@@ -89,14 +118,18 @@ export function setupStatus(
     config.slackTeam &&
     config.slackUsers.length
   );
+  // Slack Channels run through Intelligence; the local backend has no channel host.
   slack = declaredSlack
-    ? activationFailed && slack !== 'online'
-      ? 'activation_failed'
-      : slack
+    ? backend !== 'intelligence'
+      ? 'setup_required'
+      : activationFailed && slack !== 'online'
+        ? 'activation_failed'
+        : slack
     : config.slackChannel || config.slackTeam || config.slackUsers.length
       ? 'setup_required'
       : 'not_configured';
   return {
+    conversations: backend,
     intelligence: !!config.intelligenceKey,
     model: !!(config.apiKey && config.model),
     browser: !!(config.browserUrl && config.browserSecret),

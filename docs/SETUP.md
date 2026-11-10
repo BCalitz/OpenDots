@@ -27,7 +27,9 @@ Open http://127.0.0.1:4310. Keep the server running for background work.
 
 ## Conversation services
 
-OpenDots requires CopilotKit Intelligence for conversations. Choose local evaluation below, a licensed [self-hosted deployment](https://docs.copilotkit.ai/intelligence/self-hosting), or hosted Intelligence. Pages and workspace metadata remain in SQLite; conversation history is stored separately. See [Data and privacy](../README.md#data-and-privacy).
+By default OpenDots stores conversations itself, in the same SQLite file as pages and workspace metadata (`DATABASE_PATH`). You only need an OpenAI-compatible model key; no CopilotKit account is required. History survives restarts, refreshing during an answer reconnects to it, and scheduled tasks and voice calls write into the same conversation.
+
+To use CopilotKit Intelligence instead, set `CONVERSATION_BACKEND=intelligence` and choose local evaluation below, a licensed [self-hosted deployment](https://docs.copilotkit.ai/intelligence/self-hosting), or hosted Intelligence. Intelligence is required for Slack Channels and Automatic Learning. When `CONVERSATION_BACKEND` is unset, OpenDots uses Intelligence if an Intelligence key is present, so existing installs keep reaching their stored conversations. Conversations are not copied between backends. See [Data and privacy](../README.md#data-and-privacy).
 
 ### Hosted Intelligence
 
@@ -69,7 +71,8 @@ Edit `.env` on the server and restart after changes:
 
 | Variable                                             | Purpose                                                                |
 | ---------------------------------------------------- | ---------------------------------------------------------------------- |
-| `INTELLIGENCE_API_KEY`                               | Project credential for conversation persistence                        |
+| `CONVERSATION_BACKEND`                               | `local` (SQLite, no account) or `intelligence`                         |
+| `INTELLIGENCE_API_KEY`                               | Project credential for Intelligence conversations                      |
 | `INTELLIGENCE_API_URL`                               | API endpoint override for your Intelligence deployment                 |
 | `INTELLIGENCE_GATEWAY_WS_URL`, `INTELLIGENCE_WS_URL` | Gateway WebSocket override (CLI name preferred; legacy name supported) |
 | `OPENAI_API_KEY`, `OPENAI_MODEL`                     | Model credential and model identifier                                  |

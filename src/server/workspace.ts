@@ -291,6 +291,11 @@ export class WorkspaceStore {
       );
     return value;
   }
+  retitleThread(id: string, title: string) {
+    this.db
+      .prepare('UPDATE thread_bindings SET title=? WHERE id=? AND ownerId=?')
+      .run(title, id, this.ownerId);
+  }
   requireThread(id: string, dotId?: string): Conversation {
     const thread = this.conversations().find((thread) => thread.id === id);
     if (!thread || (dotId && thread.dotId !== dotId))

@@ -45,6 +45,7 @@ function fixture() {
       history,
       requireReady() {},
       setup: () => ({
+        conversations: 'intelligence' as const,
         voice: true,
         intelligence: true,
         model: true,

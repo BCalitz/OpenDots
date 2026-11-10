@@ -113,6 +113,8 @@ export interface CallReceipt {
   error: string | null;
 }
 export interface SetupStatus {
+  /** Where conversations are stored. */
+  conversations: 'local' | 'intelligence';
   intelligence: boolean;
   model: boolean;
   browser: boolean;

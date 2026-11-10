@@ -13,12 +13,25 @@ export { slackIdentity } from './slack-channel.js';
 import { Store } from './store.js';
 import { WorkspaceStore } from './workspace.js';
 import { DotAgent } from './dot-agent.js';
-import { runThreadTurn } from './headless.js';
 import {
+  conversationBackend,
   INTELLIGENCE_KEY_MISSING_LABEL,
   setupStatus,
   type PlatformConfig,
 } from './platform-config.js';
+import {
+  IntelligenceConversationBackend,
+  LocalConversationBackend,
+  type ConversationBackend,
+} from './conversations/backend.js';
+import {
+  LocalAgentRunner,
+  type FinishedRun,
+} from './conversations/local-runner.js';
+import {
+  generateThreadName,
+  namingExcerpt,
+} from './conversations/thread-names.js';
 import { validateRuntimeScope } from './runtime-scope.js';
 import { learningSelector } from './learning.js';
 import { SetupTelemetry } from './setup-telemetry.js';
@@ -30,10 +43,20 @@ export class Platform {
   readonly connections: ConnectionService;
   readonly intelligence?: CopilotKitIntelligence;
   readonly handler?: CopilotHonoApp;
+  readonly backend: 'local' | 'intelligence';
+  readonly conversations?: ConversationBackend;
+  /** Set when conversations are stored locally. */
+  readonly localRunner?: LocalAgentRunner;
+  private naming = new Set<string>();
   constructor(
     readonly store: Store,
     readonly workspace: WorkspaceStore,
     readonly config: PlatformConfig,
+    private options: {
+      /** SQLite file for local conversations; in-memory when omitted. */
+      databasePath?: string;
+      fetch?: typeof fetch;
+    } = {},
   ) {
     this.setupTelemetry = new SetupTelemetry(store);
     this.computers = new ComputerService(
@@ -44,8 +67,42 @@ export class Platform {
     this.connections = new ConnectionService(workspace.connections);
     this.pages = new PageService(workspace, () => {
       this.requireReady();
-      return this.intelligence!;
+      return this.conversations!;
     });
+    this.backend = conversationBackend(config);
+    const agent = (dotId: string) =>
+      new DotAgent(store, workspace, config, dotId, false, this.setupTelemetry);
+    const agents = async () =>
+      Object.fromEntries(
+        workspace.dots().map((dot) => [dot.id, agent(dot.id)]),
+      );
+    if (this.backend === 'local') {
+      if (config.slackChannel)
+        console.warn(
+          'Slack Channels need CONVERSATION_BACKEND=intelligence; Slack stays offline with local conversations.',
+        );
+      this.localRunner = new LocalAgentRunner(
+        options.databasePath ?? ':memory:',
+        workspace.ownerId,
+        { onRunFinished: (run) => void this.nameThread(run) },
+      );
+      this.conversations = new LocalConversationBackend(
+        this.localRunner,
+        agent,
+      );
+      const runtime = new CopilotRuntime({
+        runner: this.localRunner,
+        telemetryId: this.setupTelemetry.identity,
+        telemetryProperties: this.setupTelemetry.metadata,
+        agents,
+      });
+      this.handler = createCopilotHonoHandler({
+        runtime,
+        basePath: '/api/copilotkit',
+        cors: { origin: [] },
+      });
+      return;
+    }
     if (!config.intelligenceKey) return;
     this.intelligence = new CopilotKitIntelligence({
       apiKey: config.intelligenceKey,
@@ -86,25 +143,15 @@ export class Platform {
         id: workspace.ownerId,
         name: 'OpenDots owner',
       }),
-      agents: async () =>
-        Object.fromEntries(
-          workspace
-            .dots()
-            .map((dot) => [
-              dot.id,
-              new DotAgent(
-                store,
-                workspace,
-                config,
-                dot.id,
-                false,
-                this.setupTelemetry,
-              ),
-            ]),
-        ),
+      agents,
       channels,
       generateThreadNames: true,
     });
+    this.conversations = new IntelligenceConversationBackend(
+      this.intelligence,
+      workspace.ownerId,
+      { url: config.runtimeUrl, ownerToken: config.ownerToken },
+    );
     this.handler = createCopilotHonoHandler({
       runtime,
       basePath: '/api/copilotkit',
@@ -123,7 +170,7 @@ export class Platform {
     const missing = this.setup().missing;
     if (missing.length)
       throw new Error(
-        `Setup required: ${missing.join(', ')}. Conversations require CopilotKit Intelligence.`,
+        `Setup required: ${missing.join(', ')}.${this.backend === 'intelligence' ? ' Set CONVERSATION_BACKEND=local to keep conversations on this server instead.' : ''}`,
       );
   }
   async start() {
@@ -146,29 +193,23 @@ export class Platform {
   async stop() {
     await this.setupTelemetry.stop();
     await this.handler?.channels?.stop();
+    this.localRunner?.close();
   }
   async createConversation(dotId: string, title: string) {
     this.requireReady();
     if (!this.workspace.dot(dotId)) throw new Error('Dot not found.');
     const id = randomUUID();
-    try {
-      await this.intelligence!.createThread({
-        threadId: id,
-        userId: this.workspace.ownerId,
-        agentId: dotId,
-        name: title,
-      });
-    } catch {
-      throw new Error(
-        'Intelligence could not create this conversation. Check the runtime key and connection.',
-      );
-    }
+    await this.conversations!.createThread({
+      threadId: id,
+      dotId,
+      name: title,
+    });
     return this.workspace.bindThread(id, dotId, title);
   }
   async history(threadId: string): Promise<string> {
     this.requireReady();
     this.workspace.requireThread(threadId);
-    const history = await this.intelligence!.getThreadMessages({
+    const history = await this.conversations!.getThreadMessages({
       threadId,
       userId: this.workspace.ownerId,
     });
@@ -207,7 +248,88 @@ export class Platform {
         { status: 403 },
       );
     }
+    if (this.localRunner) {
+      const local = this.localThreadRoute(request, body);
+      if (local) return local;
+    }
     return this.handler.fetch(request);
+  }
+  /**
+   * Thread rename, archive and delete. The SDK serves these only from
+   * Intelligence, so the local backend answers them here. The route and
+   * thread were already checked by validateRuntimeScope.
+   */
+  private localThreadRoute(request: Request, body: unknown) {
+    const runner = this.localRunner!;
+    const path = new URL(request.url).pathname.slice('/api/copilotkit/'.length);
+    if (path === 'threads/subscribe')
+      return Response.json(
+        { error: 'Live thread updates need the Intelligence backend.' },
+        { status: 422 },
+      );
+    const match = path.match(/^threads\/([^/]+)(\/archive)?$/);
+    if (!match) return undefined;
+    const threadId = decodeURIComponent(match[1]);
+    const data = (body && typeof body === 'object' ? body : {}) as {
+      name?: unknown;
+      archived?: unknown;
+    };
+    if (match[2]) {
+      if (!runner.archiveThread(threadId))
+        return Response.json({ error: 'Thread not found.' }, { status: 404 });
+      return Response.json({ threadId, archived: true });
+    }
+    if (request.method === 'DELETE') {
+      try {
+        runner.deleteThread(threadId);
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : 'Delete failed.' },
+          { status: 409 },
+        );
+      }
+      return Response.json({ threadId, deleted: true });
+    }
+    let thread = runner.thread(threadId);
+    if (!thread)
+      return Response.json({ error: 'Thread not found.' }, { status: 404 });
+    if (typeof data.name === 'string' && data.name.trim()) {
+      const name = data.name.trim().slice(0, 120);
+      thread = runner.renameThread(threadId, name) ?? thread;
+      this.workspace.retitleThread(threadId, name);
+    }
+    if (typeof data.archived === 'boolean')
+      thread = runner.archiveThread(threadId, data.archived) ?? thread;
+    return Response.json({
+      ...thread,
+      createdAt: new Date(thread.createdAt).toISOString(),
+      updatedAt: new Date(thread.updatedAt).toISOString(),
+    });
+  }
+  /** Names a local thread after its first answer, like Intelligence does. */
+  private async nameThread(run: FinishedRun) {
+    const runner = this.localRunner;
+    if (!runner || run.status !== 'finished' || this.naming.has(run.threadId))
+      return;
+    if (runner.thread(run.threadId)?.name) return;
+    const excerpt = namingExcerpt(run.messages);
+    if (!excerpt) return;
+    this.naming.add(run.threadId);
+    try {
+      const name = await generateThreadName(
+        this.config,
+        excerpt,
+        this.options.fetch,
+      );
+      // The owner may have renamed it while the model was answering.
+      if (!name || runner.thread(run.threadId)?.name) return;
+      runner.renameThread(run.threadId, name);
+      this.workspace.retitleThread(run.threadId, name);
+    } catch {
+      // Naming is cosmetic; the database may already be closed on shutdown.
+    } finally {
+      this.naming.delete(run.threadId);
+    }
   }
   async turn(
     threadId: string,
@@ -217,16 +339,12 @@ export class Platform {
   ): Promise<string> {
     this.requireReady();
     const thread = this.workspace.requireThread(threadId);
-    return runThreadTurn(
-      this.config.runtimeUrl,
-      this.config.ownerToken
-        ? { Authorization: `Bearer ${this.config.ownerToken}` }
-        : {},
-      thread.dotId,
+    return this.conversations!.turn({
       threadId,
+      dotId: thread.dotId,
       prompt,
       signal,
       metadata,
-    );
+    });
   }
 }

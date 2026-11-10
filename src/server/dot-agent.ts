@@ -24,6 +24,7 @@ import { z } from 'zod';
 import { Store } from './store.js';
 import { WorkspaceStore } from './workspace.js';
 import {
+  conversationBackend,
   DEFAULT_AGENT_RUN_TIMEOUT_MS,
   type PlatformConfig,
 } from './platform-config.js';
@@ -117,8 +118,10 @@ export class DotAgent extends AbstractAgent {
           input.threadId,
           dot.id,
         );
+        const usesIntelligence =
+          conversationBackend(this.config) === 'intelligence';
         if (
-          !this.config.intelligenceKey ||
+          (usesIntelligence && !this.config.intelligenceKey) ||
           !this.config.apiKey ||
           !this.config.model
         ) {
@@ -128,7 +131,11 @@ export class DotAgent extends AbstractAgent {
             step: 'setup_required',
             error_class: 'configuration_missing',
           });
-          throw new Error('Intelligence and model configuration are required.');
+          throw new Error(
+            usesIntelligence
+              ? 'Intelligence and model configuration are required.'
+              : 'Model configuration is required.',
+          );
         }
         const initialSettings = this.store.settings();
         const initialConnections = this.workspace.connections.fingerprint(
@@ -365,7 +372,10 @@ export class DotAgent extends AbstractAgent {
           this.inner = new BuiltInAgent({
             type: 'tanstack',
             learnedSkills:
-              dot.skillDeliveryEnabled && conversation.learningContainerId
+              usesIntelligence &&
+              this.config.intelligenceKey &&
+              dot.skillDeliveryEnabled &&
+              conversation.learningContainerId
                 ? {
                     containers: [{ id: conversation.learningContainerId }],
                     apiKey: this.config.intelligenceKey,

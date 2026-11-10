@@ -38,6 +38,7 @@ it('blocks unbound cross-Dot run and inspector routes before contacting Intellig
 });
 it('reports setup honestly without a standalone agent fallback', () => {
   const status = setupStatus({
+    conversationBackend: 'intelligence',
     baseUrl: '',
     voiceName: 'marin',
     slackUsers: [],
