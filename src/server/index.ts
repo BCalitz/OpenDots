@@ -9,6 +9,7 @@ import { createApp } from './app.js';
 import { resolveAppOrigins } from './app-origin.js';
 import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
+import { PushService, scheduledResultMessage } from './push.js';
 import {
   agentRunTimeoutMsFromEnv,
   intelligenceApiKeyFromEnv,
@@ -27,6 +28,10 @@ if (
   );
 const database = process.env.DATABASE_PATH ?? 'data/opendots.sqlite';
 const store = new Store(database);
+const push = new PushService(database, {
+  accessToken: process.env.EXPO_ACCESS_TOKEN || undefined,
+  previews: process.env.PUSH_PREVIEWS === 'true',
+});
 const workspace = new WorkspaceStore(
   database,
   process.env.OWNER_ID ?? 'opendots-owner',
@@ -82,10 +87,28 @@ const runner = new Runner(
         'This legacy task has no Intelligence conversation. Create a new scheduled task from a conversation.',
       );
     progress('Running this task in its Intelligence conversation.');
-    const text = await platform.turn(threadId, claim.prompt, signal, {
-      opendotsSource: 'scheduled_task',
-    });
-    return { text, sources: [], sample: false };
+    const notify = (outcome: { text: string } | { error: string }) => {
+      const dotId = workspace
+        .conversations()
+        .find((thread) => thread.id === threadId)?.dotId;
+      const dotName = (dotId && workspace.dot(dotId)?.name) || 'Your Dot';
+      void push.send(scheduledResultMessage(push, dotName, threadId, outcome));
+    };
+    try {
+      const text = await platform.turn(threadId, claim.prompt, signal, {
+        opendotsSource: 'scheduled_task',
+      });
+      notify({ text });
+      return { text, sources: [], sample: false };
+    } catch (error) {
+      // A stopped or cancelled run is the owner's own action; stay quiet.
+      if (!signal.aborted)
+        notify({
+          error:
+            error instanceof Error ? error.message : 'The run did not finish.',
+        });
+      throw error;
+    }
   },
   config.agentRunTimeoutMs,
 );
@@ -99,6 +122,7 @@ const app = createApp({
   ownerToken,
   origin: resolveAppOrigins(process.env.APP_ORIGIN, process.env.NODE_ENV),
   platform,
+  push,
 });
 app.use('*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff');
@@ -110,8 +134,11 @@ app.use('*', async (c, next) => {
   await next();
 });
 app.get('/api/*', (c) => c.json({ error: 'Not found.' }, 404));
-app.use('/*', serveStatic({ root: './dist/client' }));
-app.get('*', serveStatic({ path: './dist/client/index.html' }));
+// In development Vite serves the client; only the built app is served from dist/client.
+if (process.env.NODE_ENV !== 'development') {
+  app.use('/*', serveStatic({ root: './dist/client' }));
+  app.get('*', serveStatic({ path: './dist/client/index.html' }));
+}
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`OpenDots template listening on http://${host}:${info.port}`);
   runner.start();

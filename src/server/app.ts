@@ -10,6 +10,7 @@ import { configured, type Config } from './research.js';
 import type { Platform } from './platform.js';
 import { VoiceService } from './voice.js';
 import { workspaceRoutes } from './workspace-routes.js';
+import { pushDeviceSchema, pushTokenSchema, type PushService } from './push.js';
 const interval = z.number().int().min(60).max(31_536_000).nullable();
 export interface AppOptions {
   store: Store;
@@ -18,6 +19,7 @@ export interface AppOptions {
   ownerToken?: string;
   origin?: string | string[];
   platform?: Platform;
+  push?: PushService;
 }
 export function createApp({
   store,
@@ -26,6 +28,7 @@ export function createApp({
   ownerToken,
   origin,
   platform,
+  push,
 }: AppOptions) {
   const app = new Hono();
   app.use(
@@ -239,6 +242,45 @@ export function createApp({
       ? c.json({ ok: true })
       : c.json({ error: 'Memory not found.' }, 404),
   );
+  if (push) {
+    // Mobile app devices that receive scheduled-task notifications.
+    app.post('/api/push/devices', async (c) => {
+      const parsed = pushDeviceSchema.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsed.success)
+        return c.json({ error: 'Enter a valid Expo push token.' }, 400);
+      push.register(parsed.data);
+      return c.json({ ok: true }, 201);
+    });
+    app.delete('/api/push/devices', async (c) => {
+      const parsed = z
+        .object({ token: pushTokenSchema })
+        .strict()
+        .safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success)
+        return c.json({ error: 'Enter a valid Expo push token.' }, 400);
+      push.remove(parsed.data.token);
+      return c.json({ ok: true });
+    });
+    app.post('/api/push/test', async (c) => {
+      const result = await push.send({
+        title: 'OpenDots',
+        body: 'Notifications are working.',
+        data: {},
+      });
+      return result.sent
+        ? c.json(result)
+        : c.json(
+            {
+              error: result.failed
+                ? 'The push service rejected this notification.'
+                : 'No devices are registered.',
+            },
+            502,
+          );
+    });
+  }
   app.onError((error, c) => {
     console.error('API request failed:', error.name);
     return c.json(
