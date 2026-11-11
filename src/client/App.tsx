@@ -10,6 +10,8 @@ import {
   Clock3,
   Code2,
   Folder,
+  Gauge,
+  Inbox,
   Menu,
   MessageCircle,
   Monitor,
@@ -41,6 +43,8 @@ import {
   type Notices,
 } from './poll-notice';
 import { Mascot } from './Mascot';
+import { InsightsView } from './InsightsView';
+import { InboxView } from './InboxView';
 import { Chat } from './Chat';
 import { ThreadList } from './ThreadList';
 import { ResultPane } from './ResultPane';
@@ -62,9 +66,9 @@ export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>();
   const [selectedDot, setSelectedDot] = useState('');
   const [selectedThread, setSelectedThread] = useState<string>();
-  const [view, rawSetView] = useState<'chat' | 'tasks' | 'memories' | 'space'>(
-    'chat',
-  );
+  const [view, rawSetView] = useState<
+    'chat' | 'tasks' | 'memories' | 'space' | 'insights' | 'inbox'
+  >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
   const [pageId, setPageId] = useState<string>();
@@ -76,12 +80,24 @@ export function App() {
       return;
     dirtyPage.current = false;
     if (next !== 'space')
-      history.replaceState(null, '', location.pathname + location.search);
+      history.replaceState(
+        null,
+        '',
+        location.pathname +
+          location.search +
+          (next === 'inbox' ? '#/inbox' : ''),
+      );
     rawSetView(next);
   };
   useEffect(() => {
     let acceptedHash = location.hash;
     const navigate = () => {
+      // Inbox push notifications link here.
+      if (location.hash === '#/inbox' && !dirtyPage.current) {
+        rawSetView('inbox');
+        setMobile(false);
+        return;
+      }
       const match = location.hash.match(
         /^#\/spaces\/([^/]+)(?:\/pages\/([^/]+))?$/,
       );
@@ -340,6 +356,12 @@ export function App() {
         <button aria-label="Open activity" onClick={() => setView('tasks')}>
           <Clock3 size={18} />
         </button>
+        <button aria-label="Open inbox" onClick={() => setView('inbox')}>
+          <Inbox size={18} />
+        </button>
+        <button aria-label="Open insights" onClick={() => setView('insights')}>
+          <Gauge size={18} />
+        </button>
         <button
           className="rail-settings"
           aria-label="Open settings"
@@ -484,6 +506,26 @@ export function App() {
             {state.tasks.length > 0 && <small>{state.tasks.length}</small>}
           </button>
           <button
+            className={`nav-item ${view === 'inbox' ? 'active' : ''}`}
+            onClick={() => {
+              setView('inbox');
+              setMobile(false);
+            }}
+          >
+            <Inbox size={17} />
+            <span>Inbox</span>
+          </button>
+          <button
+            className={`nav-item ${view === 'insights' ? 'active' : ''}`}
+            onClick={() => {
+              setView('insights');
+              setMobile(false);
+            }}
+          >
+            <Gauge size={17} />
+            <span>Insights</span>
+          </button>
+          <button
             className={`nav-item ${view === 'memories' ? 'active' : ''}`}
             onClick={() => {
               setView('memories');
@@ -541,7 +583,11 @@ export function App() {
                   ? 'Activity'
                   : view === 'space'
                     ? 'Pages'
-                    : 'Memories'}
+                    : view === 'insights'
+                      ? 'Insights'
+                      : view === 'inbox'
+                        ? 'Inbox'
+                        : 'Memories'}
             </strong>
           </div>
           <div className="top-actions">
@@ -589,7 +635,20 @@ export function App() {
             All Dots are paused. Active compute stops and scheduled tasks wait.
           </div>
         )}
-        {view === 'space' ? (
+        {view === 'insights' ? (
+          <InsightsView
+            dots={workspace.dots}
+            onThread={(id) => {
+              const target = workspace.conversations.find((t) => t.id === id);
+              if (!target) return;
+              setSelectedDot(target.dotId);
+              setSelectedThread(id);
+              setView('chat');
+            }}
+          />
+        ) : view === 'inbox' ? (
+          <InboxView dots={workspace.dots} />
+        ) : view === 'space' ? (
           <SpaceWorkspace
             key={spaceId}
             space={

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { voiceReceiptMessagePrefix } from '../shared/voice-receipt.js';
 import { scheduledTaskMessagePrefix } from '../shared/scheduled-message.js';
+import { delegationMessagePrefix } from '../shared/delegation.js';
 
 export function currentTurnText(messages: Message[], error?: Error): string {
   if (error) throw error;
@@ -66,7 +67,9 @@ export async function runThreadTurn(
         ? voiceReceiptMessagePrefix
         : metadata?.opendotsSource === 'scheduled_task'
           ? scheduledTaskMessagePrefix
-          : '';
+          : metadata?.opendotsSource === 'delegation'
+            ? delegationMessagePrefix
+            : '';
     agent.addMessage({
       id: `${idPrefix}${randomUUID()}`,
       role: 'user',

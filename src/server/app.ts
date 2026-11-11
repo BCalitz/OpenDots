@@ -10,6 +10,7 @@ import { configured, type Config } from './research.js';
 import type { Platform } from './platform.js';
 import { VoiceService } from './voice.js';
 import { workspaceRoutes } from './workspace-routes.js';
+import { inboxHookRoute } from './inbox/routes.js';
 import { pushDeviceSchema, pushTokenSchema, type PushService } from './push.js';
 const interval = z.number().int().min(60).max(31_536_000).nullable();
 export interface AppOptions {
@@ -38,6 +39,9 @@ export function createApp({
       onError: (c) => c.json({ error: 'Request is too large.' }, 413),
     }),
   );
+  // Webhook deliveries authenticate with their source's own secret, so they
+  // are answered before the owner-token checks below.
+  if (platform) app.route('/api', inboxHookRoute(platform));
   app.use('/api/*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');

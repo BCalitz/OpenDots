@@ -69,6 +69,14 @@ export function WorkspaceDialog({
   const [skillDelivery, setSkillDelivery] = useState(
     dialog.type === 'dot' ? (dialog.dot?.skillDeliveryEnabled ?? false) : false,
   );
+  const [delegates, setDelegates] = useState<string[]>(
+    dialog.type === 'dot' ? (dialog.dot?.delegateDotIds ?? []) : [],
+  );
+  const [tokenCap, setTokenCap] = useState(
+    dialog.type === 'dot' && dialog.dot?.monthlyTokenCap
+      ? String(dialog.dot.monthlyTokenCap)
+      : '',
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [theme, setTheme] = useState(themePreference);
@@ -164,6 +172,14 @@ export function WorkspaceDialog({
                   .filter(Boolean),
                 learningContainerId: learningContainer.trim() || null,
                 skillDeliveryEnabled: skillDelivery,
+                delegateDotIds: delegates.filter((id) =>
+                  workspace.dots.some(
+                    (other) => other.id === id && other.id !== dialog.dot?.id,
+                  ),
+                ),
+                monthlyTokenCap: tokenCap.trim()
+                  ? Math.round(Number(tokenCap))
+                  : null,
               };
             }
             if (dialog.type === 'settings') {
@@ -346,6 +362,63 @@ export function WorkspaceDialog({
               <p className="muted" id="composio-toolkits-help">
                 Optional comma-separated Composio toolkit slugs. Leave blank to
                 let the Dot search all available toolkits.
+              </p>
+            </fieldset>
+          )}
+          {dialog.type === 'dot' &&
+            workspace.dots.some((other) => other.id !== dialog.dot?.id) && (
+              <fieldset className="space-access-fields">
+                <legend>Other Dots it can direct</legend>
+                <p className="muted">
+                  This Dot can hand work to the Dots you tick and use their
+                  answers. Each one keeps its own permissions and limits, and
+                  works in its own conversation you can open.
+                </p>
+                {workspace.dots
+                  .filter((other) => other.id !== dialog.dot?.id)
+                  .map((other) => (
+                    <label className="permission-row" key={other.id}>
+                      <input
+                        type="checkbox"
+                        checked={delegates.includes(other.id)}
+                        onChange={(event) =>
+                          setDelegates(
+                            event.target.checked
+                              ? [...delegates, other.id]
+                              : delegates.filter((id) => id !== other.id),
+                          )
+                        }
+                      />
+                      <span>
+                        <strong>{other.name}</strong>
+                        <small>{other.instructions.slice(0, 120)}</small>
+                      </span>
+                    </label>
+                  ))}
+              </fieldset>
+            )}
+          {dialog.type === 'dot' && (
+            <fieldset className="space-access-fields">
+              <legend>Cost limit</legend>
+              <label className="field-label" htmlFor="token-cap">
+                Monthly token limit
+              </label>
+              <input
+                id="token-cap"
+                type="number"
+                inputMode="numeric"
+                min={1000}
+                step={1000}
+                value={tokenCap}
+                placeholder="No limit"
+                aria-describedby="token-cap-help"
+                onChange={(event) => setTokenCap(event.target.value)}
+              />
+              <p className="muted" id="token-cap-help">
+                Input plus output tokens per calendar month (UTC). When this Dot
+                reaches the limit it stops starting new turns, including
+                scheduled ones, until next month or until you raise it. Leave
+                blank for no limit. Usage is under Insights.
               </p>
             </fieldset>
           )}

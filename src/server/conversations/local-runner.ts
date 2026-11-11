@@ -19,6 +19,7 @@ import {
   type AgentRunnerStopRequest,
   type LocalThreadEndpointRecord,
 } from '@copilotkit/runtime/v2';
+import type { RunSummary } from '../../shared/insight-types.js';
 
 type RunStatus = 'running' | 'finished' | 'error' | 'stopped' | 'interrupted';
 export interface LocalThread {
@@ -54,6 +55,51 @@ interface ActiveRun {
   stopRequested: boolean;
 }
 type ThreadRow = Omit<LocalThread, 'archived'> & { archived: number };
+
+/** Token usage the SDK reports on RUN_FINISHED, summed across models. */
+export function runTokens(events: BaseEvent[]) {
+  let found = false;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  for (const event of events) {
+    if (event.type !== EventType.RUN_FINISHED) continue;
+    const usage = (event as { usage?: unknown }).usage;
+    if (!Array.isArray(usage)) continue;
+    for (const entry of usage as {
+      inputTokens?: unknown;
+      outputTokens?: unknown;
+    }[]) {
+      if (typeof entry?.inputTokens === 'number') {
+        inputTokens += entry.inputTokens;
+        found = true;
+      }
+      if (typeof entry?.outputTokens === 'number') {
+        outputTokens += entry.outputTokens;
+        found = true;
+      }
+    }
+  }
+  return found ? { inputTokens, outputTokens } : undefined;
+}
+/** The text of the last user message a run started with. */
+function promptOf(event: BaseEvent & { input?: RunAgentInput }) {
+  const content = event.input?.messages
+    ?.filter((message) => message.role === 'user')
+    .at(-1)?.content;
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((part) =>
+              typeof part === 'object' && part && 'text' in part
+                ? String((part as { text?: unknown }).text ?? '')
+                : '',
+            )
+            .join(' ')
+        : '';
+  return text.trim() ? text.trim().slice(0, 300) : null;
+}
 
 const INTERRUPTED_MESSAGE =
   'OpenDots stopped before this answer finished. Send your message again to continue.';
@@ -140,6 +186,73 @@ export class LocalAgentRunner extends AgentRunner {
         'SELECT id, threadId, parentRunId, agentId, status, startedAt, finishedAt, error FROM conv_runs WHERE threadId=? ORDER BY startedAt, rowid',
       )
       .all(threadId) as unknown as LocalRun[];
+  }
+
+  /** Runs newest first, for the run inspector. */
+  listRuns(
+    filter: { agentId?: string; threadId?: string; limit?: number } = {},
+  ): RunSummary[] {
+    const where = ['t.ownerId=?'];
+    const values: string[] = [this.ownerId];
+    if (filter.agentId) {
+      where.push('r.agentId=?');
+      values.push(filter.agentId);
+    }
+    if (filter.threadId) {
+      where.push('r.threadId=?');
+      values.push(filter.threadId);
+    }
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+    const rows = this.db
+      .prepare(
+        `SELECT r.id, r.threadId, r.parentRunId, r.agentId, r.status, r.startedAt, r.finishedAt, r.error, r.inputTokens, r.outputTokens, t.name AS threadName,
+          (SELECT payload FROM conv_events e WHERE e.runId=r.id AND e.type='RUN_STARTED' ORDER BY seq LIMIT 1) AS started,
+          (SELECT COUNT(*) FROM conv_events e WHERE e.runId=r.id AND e.type='TOOL_CALL_START') AS toolCalls
+        FROM conv_runs r JOIN conv_threads t ON t.id=r.threadId
+        WHERE ${where.join(' AND ')} ORDER BY r.startedAt DESC, r.rowid DESC LIMIT ${limit}`,
+      )
+      .all(...values) as unknown as (LocalRun & {
+      threadName: string | null;
+      inputTokens: number | null;
+      outputTokens: number | null;
+      started: string | null;
+      toolCalls: number;
+    })[];
+    return rows.map(({ started, ...row }) => ({
+      ...row,
+      prompt: started
+        ? promptOf(JSON.parse(started) as BaseEvent & { input?: RunAgentInput })
+        : null,
+    }));
+  }
+  /** One run with its stored events, if it belongs to this owner. */
+  runDetail(runId: string) {
+    const run = this.db
+      .prepare(
+        'SELECT r.id, r.threadId, r.parentRunId, r.agentId, r.status, r.startedAt, r.finishedAt, r.error, r.inputTokens, r.outputTokens FROM conv_runs r JOIN conv_threads t ON t.id=r.threadId WHERE r.id=? AND t.ownerId=?',
+      )
+      .get(runId, this.ownerId) as unknown as
+      | (LocalRun & {
+          inputTokens: number | null;
+          outputTokens: number | null;
+        })
+      | undefined;
+    if (!run) return undefined;
+    const rows = this.db
+      .prepare(
+        'SELECT payload, createdAt FROM conv_events WHERE runId=? ORDER BY seq',
+      )
+      .all(runId) as { payload: string; createdAt: number }[];
+    return {
+      run,
+      threadName: this.thread(run.threadId)?.name ?? null,
+      events: rows.map((row) => {
+        const event = JSON.parse(row.payload) as BaseEvent;
+        // Events stored before timestamps existed fall back to the write time.
+        event.timestamp ??= row.createdAt;
+        return event;
+      }),
+    };
   }
 
   // LocalThreadEndpointRunner ------------------------------------------
@@ -232,6 +345,8 @@ export class LocalAgentRunner extends AgentRunner {
     };
     this.active.set(threadId, active);
     const record = (event: BaseEvent) => {
+      // Stored events keep their own time so the run inspector can show timings.
+      event.timestamp ??= Date.now();
       active.events.push(event);
       this.appendEvent(threadId, runId, event);
       active.subject.next(event);
@@ -353,11 +468,19 @@ export class LocalAgentRunner extends AgentRunner {
         if (keep)
           for (const event of compactEvents(active.events))
             this.appendEvent(threadId, active.runId, event);
+        const tokens = runTokens(active.events);
         this.db
           .prepare(
-            'UPDATE conv_runs SET status=?, finishedAt=?, error=? WHERE id=?',
+            'UPDATE conv_runs SET status=?, finishedAt=?, error=?, inputTokens=?, outputTokens=? WHERE id=?',
           )
-          .run(status, Date.now(), error, active.runId);
+          .run(
+            status,
+            Date.now(),
+            error,
+            tokens?.inputTokens ?? null,
+            tokens?.outputTokens ?? null,
+            active.runId,
+          );
         if (keep)
           this.db
             .prepare(

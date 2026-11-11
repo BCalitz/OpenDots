@@ -22,6 +22,12 @@ Approval cards appear only in the web app. Through Slack or in scheduled runs, a
 
 Changing a Dot's connections or tool settings stops that Dot's active turn.
 
+## Watching a connection from the Inbox
+
+A read-only list tool, such as "tasks assigned to me" on your ticket system's MCP server, can feed the **Inbox**. Open **Inbox**, choose **Add source**, then **Connection tool**, and pick the Dot, the tool and its arguments. OpenDots calls the tool on a timer (every 5 minutes by default) and adds any record it has not seen before. Put `"{{since}}"` in an argument to pass the time of the last check. Only tools that run without **Ask first** can be used, because nobody is there to approve a timed call. Every call appears in **Insights > Audit**.
+
+Services that can send webhooks can post to a **Webhook** source instead. Its address and secret are shown once when you create it, and you can make a new secret at any time. Webhook deliveries do not use the owner token, so the server must be reachable from the sending service.
+
 ## Security notes
 
 - Tokens are stored in the server's SQLite database and are never sent to the browser. Protect `DATABASE_PATH` the way you protect `.env`.

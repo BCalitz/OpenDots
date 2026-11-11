@@ -6,6 +6,7 @@ import { lastValueFrom, tap } from 'rxjs';
 import { runThreadTurn } from '../headless.js';
 import { voiceReceiptMessagePrefix } from '../../shared/voice-receipt.js';
 import { scheduledTaskMessagePrefix } from '../../shared/scheduled-message.js';
+import { delegationMessagePrefix } from '../../shared/delegation.js';
 import type { LocalAgentRunner } from './local-runner.js';
 
 export type ConversationBackendKind = 'local' | 'intelligence';
@@ -49,7 +50,9 @@ function messageIdPrefix(metadata?: Record<string, unknown>) {
     ? voiceReceiptMessagePrefix
     : metadata?.opendotsSource === 'scheduled_task'
       ? scheduledTaskMessagePrefix
-      : '';
+      : metadata?.opendotsSource === 'delegation'
+        ? delegationMessagePrefix
+        : '';
 }
 
 export class LocalConversationBackend implements ConversationBackend {

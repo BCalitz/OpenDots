@@ -10,6 +10,7 @@ import { resolveAppOrigins } from './app-origin.js';
 import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
 import { PushService, scheduledResultMessage } from './push.js';
+import { pushNotifier } from './inbox/notify.js';
 import {
   agentRunTimeoutMsFromEnv,
   conversationBackendFromEnv,
@@ -151,6 +152,8 @@ if (process.env.NODE_ENV !== 'development') {
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`OpenDots template listening on http://${host}:${info.port}`);
   runner.start();
+  platform.inbox.onEvents(pushNotifier(push));
+  platform.inbox.start();
   void platform
     .start()
     .catch((error) =>

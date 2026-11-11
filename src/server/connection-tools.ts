@@ -1,6 +1,7 @@
 import { toolDefinition } from '@tanstack/ai';
 import { connectionActionTool } from '../shared/connection-types.js';
 import type { ConnectionService } from './connections.js';
+import type { UsageStore } from './usage-store.js';
 // Connected MCP tools for one Dot. Tools that need approval never execute
 // here: the model is told to request owner approval, and only the owner's
 // approval route runs them.
@@ -11,6 +12,7 @@ export function connectionTools(
   check: () => void,
   signal: AbortSignal,
   approvals: boolean,
+  log?: UsageStore,
 ) {
   return connections.tools(dotId).map((exposed) =>
     toolDefinition({
@@ -44,7 +46,18 @@ export function connectionTools(
               message:
                 'This action needs owner approval in the OpenDots web app. Ask the owner to continue there.',
             };
+      // Approved actions keep their own receipts; ungated calls are logged here.
+      const entry = log?.beginAction({
+        dotId,
+        threadId,
+        kind: 'mcp',
+        target: current.connection.name,
+        action: current.tool.name,
+        readOnly: current.tool.readOnly,
+      });
       const result = await connections.call(current, input, signal);
+      if (entry)
+        log!.finishAction(entry, result.isError ? 'failed' : 'succeeded');
       check();
       return result;
     }),

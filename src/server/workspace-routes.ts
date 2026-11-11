@@ -1,5 +1,7 @@
 import { setupInputSchema } from './setup-telemetry.js';
 import { pageRoutes } from './page-routes.js';
+import { insightRoutes } from './insight-routes.js';
+import { inboxRoutes } from './inbox/routes.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { Platform } from './platform.js';
@@ -23,11 +25,21 @@ const dotSchema = z
     skillDeliveryEnabled: z.boolean().optional(),
     spaceIds: z.array(z.string().min(1)).min(1).max(100).optional(),
     spaceId: z.string().min(1).optional(),
+    delegateDotIds: z.array(z.string().min(1).max(200)).max(50).optional(),
+    monthlyTokenCap: z
+      .number()
+      .int()
+      .min(1000)
+      .max(1_000_000_000_000)
+      .nullable()
+      .optional(),
   })
   .strict();
 export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   const app = new Hono();
   app.route('/', pageRoutes(platform));
+  app.route('/', insightRoutes(platform));
+  app.route('/', inboxRoutes(platform));
   app.post('/setup-telemetry', async (c) => {
     const parsed = setupInputSchema.safeParse(
       await c.req.json().catch(() => null),
@@ -71,6 +83,20 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       201,
     );
   });
+  // Settings stored outside updateDot: the token cap and which Dots it directs.
+  const applyLimits = (
+    id: string,
+    data: { monthlyTokenCap?: number | null; delegateDotIds?: string[] },
+  ) => {
+    if (data.monthlyTokenCap !== undefined)
+      platform.workspace.setMonthlyTokenCap(id, data.monthlyTokenCap);
+    if (data.delegateDotIds !== undefined)
+      platform.workspace.setDelegates(id, data.delegateDotIds);
+    return platform.workspace.dot(id)!;
+  };
+  const badDelegates = (id: string | undefined, ids?: string[]) =>
+    ids !== undefined &&
+    ids.some((other) => other === id || !platform.workspace.dot(other));
   app.post('/dots', async (c) => {
     const data = dotSchema
       .extend({ spaceId: z.string() })
@@ -83,6 +109,8 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         },
         400,
       );
+    if (badDelegates(undefined, data.data.delegateDotIds))
+      return c.json({ error: 'Choose existing Dots for it to direct.' }, 400);
     try {
       validateLearningSettings(
         data.data.learningContainerId ?? null,
@@ -99,21 +127,19 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         400,
       );
     }
-    return c.json(
-      platform.workspace.createDot(
-        data.data.spaceId,
-        data.data.name,
-        data.data.instructions,
-        data.data.researchAllowed,
-        data.data.memoryAllowed,
-        data.data.spaceIds,
-        data.data.learningContainerId,
-        data.data.skillDeliveryEnabled,
-        data.data.appsAllowed,
-        data.data.composioToolkits,
-      ),
-      201,
+    const dot = platform.workspace.createDot(
+      data.data.spaceId,
+      data.data.name,
+      data.data.instructions,
+      data.data.researchAllowed,
+      data.data.memoryAllowed,
+      data.data.spaceIds,
+      data.data.learningContainerId,
+      data.data.skillDeliveryEnabled,
+      data.data.appsAllowed,
+      data.data.composioToolkits,
     );
+    return c.json(applyLimits(dot.id, data.data), 201);
   });
   app.put('/dots/:id', async (c) => {
     const data = dotSchema.safeParse(await c.req.json().catch(() => null));
@@ -121,6 +147,11 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       return c.json({ error: 'Invalid specialist settings.' }, 400);
     const current = platform.workspace.dot(c.req.param('id'));
     if (!current) return c.json({ error: 'Dot not found.' }, 404);
+    if (badDelegates(current.id, data.data.delegateDotIds))
+      return c.json(
+        { error: 'A Dot can direct other existing Dots, not itself.' },
+        400,
+      );
     try {
       validateLearningSettings(
         data.data.learningContainerId === undefined
@@ -139,7 +170,8 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         400,
       );
     }
-    return c.json(platform.workspace.updateDot(c.req.param('id'), data.data));
+    const dot = platform.workspace.updateDot(c.req.param('id'), data.data);
+    return c.json(applyLimits(dot.id, data.data));
   });
   app.post('/conversations', async (c) => {
     const data = z

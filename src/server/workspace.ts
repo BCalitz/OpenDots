@@ -1,6 +1,8 @@
 import { ComputerStore } from './computer-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { Pages } from './pages.js';
+import { UsageStore } from './usage-store.js';
+import { InboxStore } from './inbox/store.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -12,6 +14,8 @@ export class WorkspaceStore {
   readonly pages: Pages;
   readonly computers: ComputerStore;
   readonly connections: ConnectionStore;
+  readonly usage: UsageStore;
+  readonly inbox: InboxStore;
   constructor(
     path: string,
     readonly ownerId: string,
@@ -24,7 +28,8 @@ export class WorkspaceStore {
       CREATE TABLE IF NOT EXISTS thread_bindings(id TEXT PRIMARY KEY, dotId TEXT NOT NULL, ownerId TEXT NOT NULL, title TEXT NOT NULL, createdAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS task_threads(taskId TEXT PRIMARY KEY, threadId TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, startedAt INTEGER NOT NULL, endedAt INTEGER, status TEXT NOT NULL, transcript TEXT NOT NULL, error TEXT);
-      CREATE TABLE IF NOT EXISTS captures(threadId TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS captures(threadId TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS delegate_threads(parentThreadId TEXT NOT NULL, dotId TEXT NOT NULL, threadId TEXT NOT NULL UNIQUE, PRIMARY KEY(parentThreadId, dotId));`);
     for (const [table, column, definition] of [
       ['dots', 'learningContainerId', 'TEXT'],
       ['dots', 'skillDeliveryEnabled', 'INTEGER NOT NULL DEFAULT 0'],
@@ -32,6 +37,8 @@ export class WorkspaceStore {
       ['dots', 'composioToolkits', "TEXT NOT NULL DEFAULT '[]'"],
       ['dots', 'composioSessionId', 'TEXT'],
       ['dots', 'composioPolicyHash', 'TEXT'],
+      ['dots', 'monthlyTokenCap', 'INTEGER'],
+      ['dots', 'delegateDotIds', "TEXT NOT NULL DEFAULT '[]'"],
       ['thread_bindings', 'learningContainerId', 'TEXT'],
     ]) {
       if (
@@ -57,6 +64,8 @@ export class WorkspaceStore {
     }
     this.computers = new ComputerStore(this.db);
     this.connections = new ConnectionStore(this.db);
+    this.usage = new UsageStore(this.db);
+    this.inbox = new InboxStore(this.db);
     this.pages = new Pages(this.db, (id) =>
       this.spaces().some((space) => space.id === id),
     );
@@ -118,6 +127,9 @@ export class WorkspaceStore {
         appsAllowed: !!row.appsAllowed,
         composioToolkits: JSON.parse(String(row.composioToolkits ?? '[]')),
         skillDeliveryEnabled: !!row.skillDeliveryEnabled,
+        monthlyTokenCap:
+          row.monthlyTokenCap == null ? null : Number(row.monthlyTokenCap),
+        delegateDotIds: JSON.parse(String(row.delegateDotIds ?? '[]')),
       })) as unknown as Dot[];
   }
   dot(id: string) {
@@ -251,6 +263,46 @@ export class WorkspaceStore {
       throw error;
     }
     return this.dot(id)!;
+  }
+  /** Tokens per UTC month before the Dot stops starting new turns; null removes it. */
+  setMonthlyTokenCap(id: string, cap: number | null) {
+    if (!this.dot(id)) throw new Error('Dot not found.');
+    this.db
+      .prepare('UPDATE dots SET monthlyTokenCap=? WHERE id=?')
+      .run(cap, id);
+    return this.dot(id)!;
+  }
+  /** Which other Dots this one may direct. */
+  setDelegates(id: string, dotIds: string[]) {
+    if (!this.dot(id)) throw new Error('Dot not found.');
+    const unique = [...new Set(dotIds)];
+    if (unique.includes(id)) throw new Error('Dot cannot direct itself.');
+    if (unique.some((other) => !this.dot(other)))
+      throw new Error('Dot not found.');
+    this.db
+      .prepare('UPDATE dots SET delegateDotIds=? WHERE id=?')
+      .run(JSON.stringify(unique.sort()), id);
+    return this.dot(id)!;
+  }
+  /** The thread a Dot uses for requests from one coordinator conversation. */
+  delegateThread(parentThreadId: string, dotId: string) {
+    const row = this.db
+      .prepare(
+        'SELECT threadId FROM delegate_threads WHERE parentThreadId=? AND dotId=?',
+      )
+      .get(parentThreadId, dotId);
+    return typeof row?.threadId === 'string' ? row.threadId : undefined;
+  }
+  bindDelegate(parentThreadId: string, dotId: string, threadId: string) {
+    this.db
+      .prepare('INSERT INTO delegate_threads VALUES (?, ?, ?)')
+      .run(parentThreadId, dotId, threadId);
+  }
+  /** True for threads that exist to answer another Dot. */
+  isDelegateThread(threadId: string) {
+    return !!this.db
+      .prepare('SELECT 1 FROM delegate_threads WHERE threadId=?')
+      .get(threadId);
   }
   saveComposioSession(id: string, sessionId: string, policyHash: string) {
     this.db

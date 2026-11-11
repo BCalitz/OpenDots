@@ -1,6 +1,7 @@
 import { defineTool, type ToolDefinition } from '@copilotkit/runtime/v2';
 import type { composioSession } from './composio.js';
 import { safeFailure } from './slack-channel.js';
+import type { UsageStore } from './usage-store.js';
 
 type Session = Awaited<ReturnType<typeof composioSession>>;
 type CancellableSession = Session & {
@@ -20,6 +21,7 @@ export async function composioTools(
   session: Session,
   check: () => void,
   signal?: AbortSignal,
+  log?: { store: UsageStore; dotId: string; threadId: string },
 ) {
   check();
   // @composio/core 0.22 supports request options at runtime but omits them
@@ -35,6 +37,14 @@ export async function composioTools(
         parameters: fn.parameters as unknown as ToolDefinition['parameters'],
         execute: async (input: unknown) => {
           check();
+          // Composio slugs start with the toolkit, e.g. GMAIL_SEND_EMAIL.
+          const entry = log?.store.beginAction({
+            dotId: log.dotId,
+            threadId: log.threadId,
+            kind: 'app',
+            target: fn.name.split('_')[0]?.toLowerCase() || 'composio',
+            action: fn.name,
+          });
           try {
             const { data, error } = await cancellable.execute(
               fn.name,
@@ -42,8 +52,11 @@ export async function composioTools(
               undefined,
               { signal },
             );
+            if (entry)
+              log!.store.finishAction(entry, error ? 'failed' : 'succeeded');
             return { data, error };
           } catch (error) {
+            if (entry) log!.store.finishAction(entry, 'failed');
             return {
               data: {},
               error: `Composio tool failed: ${safeFailure(error)}.`,

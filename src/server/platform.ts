@@ -12,7 +12,7 @@ import { createSlackChannel } from './slack-channel.js';
 export { slackIdentity } from './slack-channel.js';
 import { Store } from './store.js';
 import { WorkspaceStore } from './workspace.js';
-import { DotAgent } from './dot-agent.js';
+import { DotAgent, type Delegate } from './dot-agent.js';
 import {
   conversationBackend,
   INTELLIGENCE_KEY_MISSING_LABEL,
@@ -35,12 +35,15 @@ import {
 import { validateRuntimeScope } from './runtime-scope.js';
 import { learningSelector } from './learning.js';
 import { SetupTelemetry } from './setup-telemetry.js';
+import { InboxEngine } from './inbox/engine.js';
 export class Platform {
   private channelStartupFailed = false;
   readonly setupTelemetry: SetupTelemetry;
   readonly pages: PageService;
   readonly computers: ComputerService;
   readonly connections: ConnectionService;
+  /** Event engine: sources, the event log and the poller. */
+  readonly inbox: InboxEngine;
   readonly intelligence?: CopilotKitIntelligence;
   readonly handler?: CopilotHonoApp;
   readonly backend: 'local' | 'intelligence';
@@ -48,6 +51,9 @@ export class Platform {
   /** Set when conversations are stored locally. */
   readonly localRunner?: LocalAgentRunner;
   private naming = new Set<string>();
+  /** One request at a time per specialist thread. */
+  private delegations = new Map<string, Promise<unknown>>();
+  readonly delegate: Delegate = (input) => this.runDelegation(input);
   constructor(
     readonly store: Store,
     readonly workspace: WorkspaceStore,
@@ -65,13 +71,24 @@ export class Platform {
       () => store.settings().paused,
     );
     this.connections = new ConnectionService(workspace.connections);
+    this.inbox = new InboxEngine(workspace.inbox, this.connections, {
+      paused: () => store.settings().paused,
+    });
     this.pages = new PageService(workspace, () => {
       this.requireReady();
       return this.conversations!;
     });
     this.backend = conversationBackend(config);
     const agent = (dotId: string) =>
-      new DotAgent(store, workspace, config, dotId, false, this.setupTelemetry);
+      new DotAgent(
+        store,
+        workspace,
+        config,
+        dotId,
+        false,
+        this.setupTelemetry,
+        this.delegate,
+      );
     const agents = async () =>
       Object.fromEntries(
         workspace.dots().map((dot) => [dot.id, agent(dot.id)]),
@@ -131,6 +148,7 @@ export class Platform {
             dotId,
             true,
             this.setupTelemetry,
+            this.delegate,
           ),
       });
       channels.push(slack);
@@ -191,6 +209,7 @@ export class Platform {
     }
   }
   async stop() {
+    this.inbox.stop();
     await this.setupTelemetry.stop();
     await this.handler?.channels?.stop();
     this.localRunner?.close();
@@ -329,6 +348,55 @@ export class Platform {
       // Naming is cosmetic; the database may already be closed on shutdown.
     } finally {
       this.naming.delete(run.threadId);
+    }
+  }
+  /**
+   * Hands a request from one Dot to another it is allowed to direct, in a
+   * thread kept per coordinator conversation so the owner can open it. The
+   * specialist answers with its own permissions and limits, and cannot pass
+   * the work on again.
+   */
+  private async runDelegation({
+    fromDotId,
+    parentThreadId,
+    toDotId,
+    request,
+    signal,
+  }: Parameters<Delegate>[0]) {
+    const from = this.workspace.dot(fromDotId);
+    const to = this.workspace.dot(toDotId);
+    if (!from || !to || !(from.delegateDotIds ?? []).includes(to.id))
+      throw new Error('This Dot is not allowed to direct that Dot.');
+    if (this.workspace.isDelegateThread(parentThreadId))
+      throw new Error(
+        'A Dot answering another Dot cannot pass the work on again.',
+      );
+    let threadId = this.workspace.delegateThread(parentThreadId, to.id);
+    if (!threadId) {
+      const conversation = await this.createConversation(
+        to.id,
+        `From ${from.name}: ${request.replace(/\s+/g, ' ').slice(0, 60)}`,
+      );
+      this.workspace.bindDelegate(parentThreadId, to.id, conversation.id);
+      threadId = conversation.id;
+    }
+    const target = threadId;
+    const previous = this.delegations.get(target) ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() =>
+        this.turn(
+          target,
+          `${from.name}, another of the owner's Dots, asks you:\n\n${request}`,
+          signal,
+          { opendotsSource: 'delegation', fromDotId: from.id, parentThreadId },
+        ),
+      );
+    this.delegations.set(target, run);
+    try {
+      return { threadId: target, reply: await run };
+    } finally {
+      if (this.delegations.get(target) === run) this.delegations.delete(target);
     }
   }
   async turn(

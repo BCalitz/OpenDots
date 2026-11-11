@@ -98,6 +98,12 @@ interface ConversationBackend {
 
 ## Phase 2: See what it is doing
 
+**Status:** implemented. See **Insights** in the web app, `src/server/insight-routes.ts` (`GET /api/runs`, `/api/runs/:id`, `/api/usage`, `/api/audit`), `src/server/usage-store.ts`, `src/server/conversations/inspect.ts` and `tests/insights.test.ts`.
+
+- The run inspector needs local conversations; usage and audit work with either backend because the Dot records token usage itself when a run finishes (`usage_ledger`).
+- The cap is in tokens per UTC calendar month (`monthlyTokenCap` on the Dot, set in its settings). At the cap the Dot stops starting new turns, including schedules, with a message saying why. A turn already running is allowed to finish.
+- Ungated MCP calls and Composio tools had no receipt table, so they are now logged in `action_log` and joined with `mcp_actions` and `computer_audit`.
+
 **Goal:** trust and cost control before giving it more access.
 
 - **Run inspector:** a page per run showing prompt, tool calls, approvals, timings and errors, read from `conv_events`.
@@ -107,6 +113,13 @@ interface ConversationBackend {
 **Rough effort:** 1–2 weeks.
 
 ## Phase 3: The event engine
+
+**Status:** implemented. See **Inbox** in the web app, `src/server/inbox/` (`Source`, `InboxStore`, `InboxEngine`, `McpListSource`, `WebhookSource`) and `tests/inbox.test.ts`.
+
+- Sources are an MCP list tool on a timer, or a webhook (`POST /api/inbox/hooks/:id`, authenticated with the source's own secret in `X-OpenDots-Secret` or as a bearer token, stored only as a hash).
+- MCP sources only accept tools the owner lets run without asking. The string `"{{since}}"` in the tool arguments becomes the last poll time. Records are found in common result shapes (`data`, `items`, `issues`, ...) with optional dot paths for unusual ones.
+- Events are deduplicated per source (`UNIQUE(sourceId, externalId)`), kept to the newest 2,000 per source, and their raw payload is stored as untrusted data.
+- Level 0 autonomy only: a push notification per batch for events at or above the source's threshold (urgent by default), never for a source's first backfill. `InboxEngine.onEvents` is the seam phase 4's triage plugs into. The mobile app opens on an inbox push but has no inbox screen yet.
 
 **Goal:** things that happen elsewhere can wake a Dot. Schedules are time-only today; this adds "when X happens".
 

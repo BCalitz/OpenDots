@@ -92,6 +92,10 @@ export interface Dot {
   createdAt: number;
   learningContainerId?: string | null;
   skillDeliveryEnabled?: boolean;
+  /** Tokens per UTC month; at the cap the Dot stops starting new turns. */
+  monthlyTokenCap?: number | null;
+  /** Other Dots this one may hand work to with ask_dot. */
+  delegateDotIds?: string[];
 }
 export interface Conversation {
   id: string;
