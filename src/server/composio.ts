@@ -7,7 +7,7 @@ import type { WorkspaceStore } from './workspace.js';
 let client: Composio | undefined;
 let clientKey: string | undefined;
 
-function composioClient(apiKey: string) {
+export function composioClient(apiKey: string) {
   if (!client || clientKey !== apiKey) {
     client = new Composio({ apiKey });
     clientKey = apiKey;

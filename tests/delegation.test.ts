@@ -189,6 +189,27 @@ it('lets a coordinator Dot hand work to a specialist and use its answer', async 
   });
 });
 
+it('keeps one continuing conversation per Dot', async () => {
+  const { app, workspace } = start();
+  const dot = workspace.dots()[0];
+  const first = await app.request(
+    '/api/conversations',
+    json({ dotId: dot.id, title: 'Hello' }),
+  );
+  expect(first.status).toBe(201);
+  const { id } = (await first.json()) as { id: string };
+  const again = await app.request(
+    '/api/conversations',
+    json({ dotId: dot.id }),
+  );
+  expect(again.status).toBe(200);
+  expect(await again.json()).toMatchObject({ id, dotId: dot.id });
+  const state = (await (await app.request('/api/workspace')).json()) as {
+    mainConversations: Record<string, string>;
+  };
+  expect(state.mainConversations[dot.id]).toBe(id);
+});
+
 it('only lets a Dot direct other existing Dots', async () => {
   const { app, workspace } = start();
   const dot = workspace.dots()[0];

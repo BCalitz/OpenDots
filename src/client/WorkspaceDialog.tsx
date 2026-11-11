@@ -355,13 +355,14 @@ export function WorkspaceDialog({
                 id="composio-toolkits"
                 value={composioToolkits}
                 pattern="[a-z0-9_]+(, *[a-z0-9_]+)*"
-                placeholder="gmail, google_calendar"
+                placeholder="gmail, googlecalendar"
                 aria-describedby="composio-toolkits-help"
                 onChange={(event) => setComposioToolkits(event.target.value)}
               />
               <p className="muted" id="composio-toolkits-help">
-                Optional comma-separated Composio toolkit slugs. Leave blank to
-                let the Dot search all available toolkits.
+                Optional comma-separated Composio app names, such as gmail or
+                quickbooks. Leave blank to let the Dot use every app. Sign in to
+                apps on the Accounts page.
               </p>
             </fieldset>
           )}

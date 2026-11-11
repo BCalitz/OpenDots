@@ -24,7 +24,7 @@ const safeError = (error: unknown) =>
 /**
  * The event engine. Polls due sources under a lease, accepts webhook
  * deliveries, writes everything to the event log first and then tells
- * listeners (push today, triage in phase 4) about events it has not seen.
+ * listeners (push today, triage in phase 5) about events it has not seen.
  */
 export class InboxEngine {
   private timer?: ReturnType<typeof setInterval>;

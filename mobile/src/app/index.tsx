@@ -6,13 +6,12 @@ import {
   FlatList,
   Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api, type Conversation, type Workspace } from '../lib/api';
+import { api, type Conversation, type Dot, type Workspace } from '../lib/api';
 import { registerForPush, unregisterPush } from '../lib/push';
 import { useSession } from '../lib/session';
 import { useTheme } from '../lib/theme';
@@ -22,10 +21,9 @@ export default function Home() {
   const insets = useSafeAreaInsets();
   const { session, loading, signOut } = useSession();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [dotFilter, setDotFilter] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [opening, setOpening] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!session) return;
@@ -48,22 +46,16 @@ export default function Home() {
   if (!session) return <Redirect href="/sign-in" />;
 
   const dots = workspace?.dots ?? [];
-  const dotName = (id: string) =>
-    dots.find((dot) => dot.id === id)?.name ?? 'Dot';
-  const conversations = (workspace?.conversations ?? [])
-    .filter((c) => !dotFilter || c.dotId === dotFilter)
-    .sort((a, b) => b.createdAt - a.createdAt);
-  const newDotId = dotFilter ?? dots[0]?.id;
 
-  const create = async () => {
-    if (!newDotId) return;
-    setCreating(true);
+  // Each Dot is one continuing chat; the server reuses it or starts it.
+  const open = async (dot: Dot) => {
+    setOpening(dot.id);
     try {
       const conversation = await api<Conversation>(
         session,
         '/conversations',
         'POST',
-        { dotId: newDotId, title: 'A new thought' },
+        { dotId: dot.id },
       );
       router.push({
         pathname: '/conversation/[id]',
@@ -71,11 +63,11 @@ export default function Home() {
       });
     } catch (cause) {
       Alert.alert(
-        'Could not start a conversation',
+        `Could not open ${dot.name}`,
         cause instanceof Error ? cause.message : undefined,
       );
     } finally {
-      setCreating(false);
+      setOpening(null);
     }
   };
 
@@ -123,43 +115,12 @@ export default function Home() {
           Server setup incomplete: {workspace.setup.missing.join(', ')}
         </Text>
       )}
-      {dots.length > 1 && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.chipsRow}
-          contentContainerStyle={styles.chips}
-        >
-          {[{ id: null, name: 'All' }, ...dots].map((dot) => {
-            const selected = dotFilter === dot.id;
-            return (
-              <Pressable
-                key={dot.id ?? 'all'}
-                onPress={() => setDotFilter(dot.id)}
-                style={[
-                  styles.chip,
-                  {
-                    backgroundColor: selected ? theme.accent : theme.surface,
-                    borderColor: theme.border,
-                  },
-                ]}
-              >
-                <Text
-                  style={{ color: selected ? theme.accentText : theme.text }}
-                >
-                  {dot.name}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-      )}
       <FlatList
-        data={conversations}
+        data={dots}
         keyExtractor={(item) => item.id}
         contentContainerStyle={[
           styles.list,
-          { paddingBottom: 100 + insets.bottom },
+          { paddingBottom: 16 + insets.bottom },
         ]}
         refreshControl={
           <RefreshControl
@@ -181,7 +142,7 @@ export default function Home() {
         ListEmptyComponent={
           workspace ? (
             <Text style={[styles.empty, { color: theme.muted }]}>
-              No conversations yet.
+              No Dots yet.
             </Text>
           ) : (
             <ActivityIndicator style={{ marginTop: 40 }} />
@@ -189,17 +150,14 @@ export default function Home() {
         }
         renderItem={({ item }) => (
           <Pressable
-            onPress={() =>
-              router.push({
-                pathname: '/conversation/[id]',
-                params: { id: item.id },
-              })
-            }
+            onPress={() => void open(item)}
+            disabled={!!opening}
             style={({ pressed }) => [
               styles.row,
               {
                 backgroundColor: pressed ? theme.surfaceMuted : theme.surface,
                 borderColor: theme.border,
+                opacity: opening && opening !== item.id ? 0.6 : 1,
               },
             ]}
           >
@@ -207,34 +165,21 @@ export default function Home() {
               style={[styles.rowTitle, { color: theme.text }]}
               numberOfLines={1}
             >
-              {item.title}
+              {item.name}
             </Text>
-            <Text style={[styles.rowMeta, { color: theme.muted }]}>
-              {dotName(item.dotId)} ·{' '}
-              {new Date(item.createdAt).toLocaleDateString()}
+            <Text
+              style={[styles.rowMeta, { color: theme.muted }]}
+              numberOfLines={2}
+            >
+              {opening === item.id
+                ? 'Opening…'
+                : workspace?.mainConversations?.[item.id]
+                  ? item.instructions
+                  : 'Start chatting'}
             </Text>
           </Pressable>
         )}
       />
-      {!!newDotId && (
-        <Pressable
-          onPress={() => void create()}
-          disabled={creating}
-          style={[
-            styles.fab,
-            {
-              backgroundColor: theme.accent,
-              opacity: creating ? 0.6 : 1,
-              // Clear the Android navigation bar / iPhone home indicator.
-              bottom: 16 + insets.bottom,
-            },
-          ]}
-        >
-          <Text style={[styles.fabText, { color: theme.accentText }]}>
-            {creating ? 'Starting…' : `New chat with ${dotName(newDotId)}`}
-          </Text>
-        </Pressable>
-      )}
     </View>
   );
 }
@@ -242,15 +187,7 @@ export default function Home() {
 const styles = StyleSheet.create({
   center: { flex: 1 },
   banner: { paddingHorizontal: 16, paddingTop: 12, fontSize: 14 },
-  chipsRow: { flexGrow: 0 },
-  chips: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
-  chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  list: { padding: 16, gap: 8, paddingBottom: 100 },
+  list: { padding: 16, gap: 8 },
   row: {
     padding: 14,
     borderRadius: 12,
@@ -260,13 +197,4 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 16, fontWeight: '500' },
   rowMeta: { fontSize: 13 },
   empty: { textAlign: 'center', marginTop: 40, fontSize: 15 },
-  fab: {
-    position: 'absolute',
-    left: 16,
-    right: 16,
-    borderRadius: 14,
-    paddingVertical: 15,
-    alignItems: 'center',
-  },
-  fabText: { fontSize: 16, fontWeight: '600' },
 });

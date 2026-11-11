@@ -225,6 +225,17 @@ export class Platform {
     });
     return this.workspace.bindThread(id, dotId, title);
   }
+  /** The Dot's one continuing chat, created on first use. */
+  async dotConversation(dotId: string, title?: string) {
+    const existing = this.workspace.mainConversation(dotId);
+    if (existing) return { conversation: existing, created: false };
+    const dot = this.workspace.dot(dotId);
+    if (!dot) throw new Error('Dot not found.');
+    return {
+      conversation: await this.createConversation(dotId, title || dot.name),
+      created: true,
+    };
+  }
   async history(threadId: string): Promise<string> {
     this.requireReady();
     this.workspace.requireThread(threadId);

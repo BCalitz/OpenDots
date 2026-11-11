@@ -12,6 +12,7 @@ import {
   Folder,
   Gauge,
   Inbox,
+  Plug,
   Menu,
   MessageCircle,
   Monitor,
@@ -45,8 +46,8 @@ import {
 import { Mascot } from './Mascot';
 import { InsightsView } from './InsightsView';
 import { InboxView } from './InboxView';
+import { AccountsView } from './AccountsView';
 import { Chat } from './Chat';
-import { ThreadList } from './ThreadList';
 import { ResultPane } from './ResultPane';
 import { TaskRow } from './TaskPresentation';
 import { TaskActions } from './TaskActions';
@@ -67,7 +68,7 @@ export function App() {
   const [selectedDot, setSelectedDot] = useState('');
   const [selectedThread, setSelectedThread] = useState<string>();
   const [view, rawSetView] = useState<
-    'chat' | 'tasks' | 'memories' | 'space' | 'insights' | 'inbox'
+    'chat' | 'tasks' | 'memories' | 'space' | 'insights' | 'inbox' | 'accounts'
   >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
@@ -85,7 +86,11 @@ export function App() {
         '',
         location.pathname +
           location.search +
-          (next === 'inbox' ? '#/inbox' : ''),
+          (next === 'inbox'
+            ? '#/inbox'
+            : next === 'accounts'
+              ? '#/accounts'
+              : ''),
       );
     rawSetView(next);
   };
@@ -95,6 +100,11 @@ export function App() {
       // Inbox push notifications link here.
       if (location.hash === '#/inbox' && !dirtyPage.current) {
         rawSetView('inbox');
+        setMobile(false);
+        return;
+      }
+      if (location.hash === '#/accounts' && !dirtyPage.current) {
+        rawSetView('accounts');
         setMobile(false);
         return;
       }
@@ -173,12 +183,22 @@ export function App() {
     const timer = setInterval(() => void refresh(), 3000);
     return () => clearInterval(timer);
   }, [refresh]);
+  const dot =
+    workspace?.dots.find((item) => item.id === selectedDot) ??
+    workspace?.dots[0];
+  // Each Dot is one continuing chat. A specific thread (for example a Dot
+  // answering another Dot, opened from Insights) can still be shown directly.
+  const threadId =
+    selectedThread ?? (dot ? workspace?.mainConversations[dot.id] : undefined);
+  const thread = workspace?.conversations.find(
+    (item) => item.id === threadId && item.dotId === dot?.id,
+  );
   useEffect(() => {
     setCapture(undefined);
-    if (!selectedThread) return;
+    if (!threadId) return;
     let active = true;
     const load = () =>
-      void api<Result | null>(`/conversations/${selectedThread}/capture`)
+      void api<Result | null>(`/conversations/${threadId}/capture`)
         .then((result) => {
           if (!active) return;
           setCapture(result ?? undefined);
@@ -199,7 +219,7 @@ export function App() {
       active = false;
       clearInterval(timer);
     };
-  }, [selectedThread]);
+  }, [threadId]);
   const mutate = async (path: string, method: string, body?: unknown) => {
     setError('');
     try {
@@ -213,12 +233,6 @@ export function App() {
       return false;
     }
   };
-  const dot =
-    workspace?.dots.find((item) => item.id === selectedDot) ??
-    workspace?.dots[0];
-  const thread = workspace?.conversations.find(
-    (item) => item.id === selectedThread && item.dotId === dot?.id,
-  );
   const configured = !!workspace && workspace.setup.missing.length === 0;
   const setupStep = workspace
     ? dialog?.type === 'settings'
@@ -233,21 +247,19 @@ export function App() {
   }, [setupStep]);
   const chooseDot = (next: Dot) => {
     setSelectedDot(next.id);
-    setSelectedThread(
-      workspace?.conversations.find((item) => item.dotId === next.id)?.id,
-    );
+    setSelectedThread(undefined);
     setView('chat');
     setMobile(false);
     setPendingPrompt(undefined);
   };
-  const newConversation = async (text?: string) => {
+  const startConversation = async (text?: string) => {
     if (!dot || !configured || busy) return;
     setBusy(true);
     setError('');
     try {
       const next = await api<Conversation>('/conversations', 'POST', {
         dotId: dot.id,
-        title: text?.slice(0, 80) || 'A new thought',
+        title: text?.slice(0, 80) || dot.name,
       });
       await refresh();
       setSelectedThread(next.id);
@@ -339,13 +351,6 @@ export function App() {
           <PanelLeft size={18} />
         </button>
         <button
-          aria-label="New chat"
-          disabled={!configured}
-          onClick={() => void newConversation()}
-        >
-          <Plus size={19} />
-        </button>
-        <button
           aria-label="Open Spaces"
           onClick={() => {
             if (workspace.spaces[0]) openPage(workspace.spaces[0].id);
@@ -405,14 +410,6 @@ export function App() {
           </span>
           OpenDots<span className="wordmark-dot">•</span>
         </button>
-        <button
-          className="new-chat nav-item"
-          disabled={!configured}
-          onClick={() => void newConversation()}
-        >
-          <Plus size={17} />
-          <span>New chat</span>
-        </button>
         <div className="spaces-heading nav-label">
           DOTS
           <button
@@ -471,24 +468,7 @@ export function App() {
             />
           ))}
         </nav>
-        {configured ? (
-          <ThreadList
-            dotId={dot.id}
-            dots={workspace.dots}
-            local={workspace.conversations}
-            selected={view === 'chat' ? selectedThread : undefined}
-            onSelect={(id) => {
-              const conversation = workspace.conversations.find(
-                (item) => item.id === id,
-              );
-              if (conversation) setSelectedDot(conversation.dotId);
-              setSelectedThread(id);
-              setView('chat');
-              setMobile(false);
-            }}
-            onNew={() => void newConversation()}
-          />
-        ) : (
+        {!configured && (
           <div className="sidebar-empty">
             Set up text chat to begin a persistent conversation.
           </div>
@@ -514,6 +494,16 @@ export function App() {
           >
             <Inbox size={17} />
             <span>Inbox</span>
+          </button>
+          <button
+            className={`nav-item ${view === 'accounts' ? 'active' : ''}`}
+            onClick={() => {
+              setView('accounts');
+              setMobile(false);
+            }}
+          >
+            <Plug size={17} />
+            <span>Accounts</span>
           </button>
           <button
             className={`nav-item ${view === 'insights' ? 'active' : ''}`}
@@ -587,7 +577,9 @@ export function App() {
                       ? 'Insights'
                       : view === 'inbox'
                         ? 'Inbox'
-                        : 'Memories'}
+                        : view === 'accounts'
+                          ? 'Accounts'
+                          : 'Memories'}
             </strong>
           </div>
           <div className="top-actions">
@@ -648,6 +640,8 @@ export function App() {
           />
         ) : view === 'inbox' ? (
           <InboxView dots={workspace.dots} />
+        ) : view === 'accounts' ? (
+          <AccountsView configured={workspace.setup.composio} />
         ) : view === 'space' ? (
           <SpaceWorkspace
             key={spaceId}
@@ -749,7 +743,7 @@ export function App() {
                     className="composer"
                     onSubmit={(e) => {
                       e.preventDefault();
-                      void newConversation(prompt);
+                      void startConversation(prompt);
                     }}
                   >
                     <textarea

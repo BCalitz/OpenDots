@@ -1911,13 +1911,7 @@ h3 {
   color: #adb0ba;
   margin: 11px 0 27px 13px;
 }
-.new-chat.nav-item {
-  background: #f0f1f6;
-  color: #818ba9;
-  margin-bottom: 26px;
-}
-.spaces-heading,
-.thread-list .nav-label {
+.spaces-heading {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1966,20 +1960,6 @@ h3 {
   height: 10px;
   border-radius: 6px 6px 4px 4px;
   background: #a6b5e5;
-}
-.thread-list {
-  margin-top: 16px;
-  max-height: 27vh;
-  overflow: auto;
-}
-.thread-list .nav-item {
-  padding: 9px 12px;
-  font-size: 10px;
-}
-.thread-list .nav-item > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .sidebar-empty,
 .sidebar-error {
@@ -3154,11 +3134,6 @@ h3 {
   text-transform: none;
   color: #767676;
 }
-.template-app .new-chat {
-  background: transparent;
-  border: 0;
-  color: #252525;
-}
 .template-app .sidebar-bottom {
   border-top: 1px solid var(--line);
   padding-top: 10px;
@@ -3545,23 +3520,6 @@ h3 {
 .spaces-nav .nav-item {
   width: 100%;
 }
-.thread-summary {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  text-align: left;
-  gap: 2px;
-}
-.thread-summary > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.thread-summary small {
-  font-size: 11px;
-  color: var(--muted);
-  font-weight: 400;
-}
 .space-access-fields {
   border: 1px solid #e5e5e5;
   border-radius: 10px;
@@ -3603,12 +3561,6 @@ h3 {
 }
 .dot-nav-row > .dot-settings {
   flex-shrink: 0;
-}
-.template-app .thread-summary small {
-  background: transparent;
-  padding: 0;
-  border-radius: 0;
-  line-height: 1.4;
 }
 .space-nav-row > .space-disclosure {
   padding: 2px;
@@ -4743,4 +4695,59 @@ h3 {
   .run-step header {
     flex-wrap: wrap;
   }
+}
+.account-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.account-suggestions {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.account-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.account-suggestion:hover:not(:disabled) {
+  border-color: var(--blue);
+}
+.account-suggestion:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.account-suggestion svg:first-child {
+  color: var(--blue);
+}
+.account-suggestion span {
+  flex: 1;
+  min-width: 0;
+}
+.account-suggestion small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.account-custom {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  max-width: 460px;
+}
+.account-custom > div {
+  display: flex;
+  gap: 8px;
+}
+.account-custom input {
+  flex: 1;
+  min-width: 0;
 }

@@ -115,11 +115,11 @@ Use the same secret on the app and browser processes. Browser navigation is read
 
 ## Composio
 
-Set `COMPOSIO_API_KEY` to let Dots use the owner’s connected apps. Restart OpenDots, enable Connected apps in the global settings and for a Dot, then optionally restrict that Dot to comma-separated toolkit slugs such as `gmail` or `google_calendar`. Leaving the toolkit list blank lets the Dot search every toolkit available to the Composio project.
+Set `COMPOSIO_API_KEY` to let Dots use the owner’s connected apps. Restart OpenDots, enable Connected apps in the global settings and for a Dot, then optionally restrict that Dot to comma-separated toolkit slugs such as `gmail` or `googlecalendar`. Leaving the toolkit list blank lets the Dot search every toolkit available to the Composio project.
 
 Connected apps remain disabled when you add the API key. Composio tools can read and change data in real accounts, and a blank toolkit list permits every toolkit available to the Composio project. The global and per-Dot switches require the owner to grant that access explicitly.
 
-OpenDots uses the stable `OWNER_ID` as the Composio user identity. Do not change it after connecting accounts. When a tool needs authentication, open the HTTPS Connect link shown in chat and finish the provider’s sign-in flow. Disabling either permission prevents new app calls and stops active work. Without `COMPOSIO_API_KEY`, no Composio client or tools are created and the controls stay hidden.
+OpenDots uses the stable `OWNER_ID` as the Composio user identity. Do not change it after connecting accounts. Sign in to apps on the **Accounts** page: pick an app, finish the provider’s sign-in in the tab that opens, and the page shows it as Connected. You can also disconnect or reconnect accounts there. When a Dot needs an app you have not connected, it shows the same kind of Connect link in chat. The page lists only status and app names; Composio keeps the sign-in tokens. Disabling either permission prevents new app calls and stops active work. Without `COMPOSIO_API_KEY`, no Composio client or tools are created and the controls stay hidden.
 
 To test the integration, configure a working model, limit a Dot to one toolkit, and start with a read-only request such as listing recent messages or calendar events. Complete the Connect flow when prompted, then repeat the request. Test write actions only with an account where an accidental change is safe.
 

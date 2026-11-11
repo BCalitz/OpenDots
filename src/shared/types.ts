@@ -127,10 +127,24 @@ export interface SetupStatus {
   slack: string;
   missing: string[];
 }
+/** An app account connected through Composio, without its credentials. */
+export interface ConnectedAccount {
+  id: string;
+  /** Composio toolkit slug, for example gmail or quickbooks. */
+  toolkit: string;
+  name: string;
+  status: string;
+  statusReason: string | null;
+  alias: string | null;
+  disabled: boolean;
+  createdAt: string;
+}
 export interface WorkspaceState {
   spaces: Space[];
   dots: Dot[];
   conversations: Conversation[];
+  /** Each Dot's one continuing chat, by Dot id. */
+  mainConversations: Record<string, string>;
   setup: SetupStatus;
   calls: CallReceipt[];
 }

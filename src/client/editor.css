@@ -1169,8 +1169,7 @@
   color: #646c60;
 }
 .template-app .nav-label,
-.template-app .spaces-heading,
-.template-app .thread-list .nav-label {
+.template-app .spaces-heading {
   font-size: 10px;
   color: #646b61;
 }
@@ -1190,9 +1189,6 @@
 }
 .template-app .sidebar-bottom .nav-item {
   color: #58634f;
-}
-.template-app .new-chat.nav-item {
-  color: #53634d;
 }
 .template-app .version {
   color: #65705d;

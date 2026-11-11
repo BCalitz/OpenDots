@@ -318,6 +318,27 @@ export class WorkspaceStore {
       )
       .all(this.ownerId) as unknown as Conversation[];
   }
+  /**
+   * Each Dot is one continuing chat. Its main conversation is the latest
+   * thread that is not answering another Dot or mirroring Slack.
+   */
+  mainConversation(dotId: string): Conversation | undefined {
+    return this.conversations().find(
+      (thread) =>
+        thread.dotId === dotId &&
+        thread.title !== 'Slack conversation' &&
+        !this.isDelegateThread(thread.id),
+    );
+  }
+  /** Main conversation id for every Dot that has one. */
+  mainConversations(): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const dot of this.dots()) {
+      const thread = this.mainConversation(dot.id);
+      if (thread) result[dot.id] = thread.id;
+    }
+    return result;
+  }
   bindThread(id: string, dotId: string, title: string): Conversation {
     const dot = this.dot(dotId);
     if (!dot) throw new Error('Dot not found.');

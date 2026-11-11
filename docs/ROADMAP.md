@@ -2,7 +2,7 @@
 
 This plan takes OpenDots from "needs a CopilotKit account" to a self-contained personal assistant that watches your work, tells you what matters, and offers to prepare or handle it. Each phase ships something usable on its own, and each one adds a seam the next phase plugs into.
 
-Slack and Managed Channels are out of scope. The CopilotKit open-source SDK (`@copilotkit/runtime`, `@copilotkit/react-core`, `@copilotkit/core`) and the AG-UI protocol stay. Only the hosted Intelligence service is replaced.
+Phase 1 replaced the hosted Intelligence service. Phase 4 removes the CopilotKit SDK itself (`@copilotkit/runtime`, `@copilotkit/react-core`, `@copilotkit/core`, `@copilotkit/channels`), so OpenDots runs on its own code plus a model provider. Managed Channels stay out of scope.
 
 ## Where we are today
 
@@ -84,7 +84,7 @@ interface ConversationBackend {
 - Move `headless.ts` (voice, schedules) onto `backend.turn()`.
 - `Platform` builds `CopilotRuntime` with `runner: backend.runner()` when local; keeps the current Intelligence wiring when `intelligence`.
 - `setupStatus` only requires a model key in local mode.
-- `learning.ts` becomes a no-op in local mode until phase 7.
+- `learning.ts` becomes a no-op in local mode until phase 8.
 
 **Done when:**
 
@@ -119,7 +119,7 @@ interface ConversationBackend {
 - Sources are an MCP list tool on a timer, or a webhook (`POST /api/inbox/hooks/:id`, authenticated with the source's own secret in `X-OpenDots-Secret` or as a bearer token, stored only as a hash).
 - MCP sources only accept tools the owner lets run without asking. The string `"{{since}}"` in the tool arguments becomes the last poll time. Records are found in common result shapes (`data`, `items`, `issues`, ...) with optional dot paths for unusual ones.
 - Events are deduplicated per source (`UNIQUE(sourceId, externalId)`), kept to the newest 2,000 per source, and their raw payload is stored as untrusted data.
-- Level 0 autonomy only: a push notification per batch for events at or above the source's threshold (urgent by default), never for a source's first backfill. `InboxEngine.onEvents` is the seam phase 4's triage plugs into. The mobile app opens on an inbox push but has no inbox screen yet.
+- Level 0 autonomy only: a push notification per batch for events at or above the source's threshold (urgent by default), never for a source's first backfill. `InboxEngine.onEvents` is the seam phase 5's triage plugs into. The mobile app opens on an inbox push but has no inbox screen yet.
 
 **Goal:** things that happen elsewhere can wake a Dot. Schedules are time-only today; this adds "when X happens".
 
@@ -163,7 +163,92 @@ interface InboxEvent {
 
 **Rough effort:** 2 weeks.
 
-## Phase 4: Inbox, triage and "prepare or handle?"
+## Phase 4: Own the engine (remove CopilotKit)
+
+**Status:** next.
+
+**Goal:** no `@copilotkit/*` package is left in `package.json` or `mobile/package.json`. Chat, tools, approvals, voice, schedules, delegation, the mobile app and Slack keep working, and existing local threads still open.
+
+**What CopilotKit still does, and what replaces it:**
+
+| CopilotKit piece                                                   | Used in                                                  | Replacement                                                                                      |
+| ------------------------------------------------------------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `CopilotRuntime`, `createCopilotHonoHandler` (`/api/copilotkit/*`) | `platform.ts`, `app.ts`                                  | Our own Hono routes under `/api/chat/*`                                                          |
+| `BuiltInAgent`, `convertInputToTanStackAI`                         | `dot-agent.ts`                                           | `DotEngine`, which calls TanStack AI `chat()` directly (it already runs the model loop)          |
+| `defineTool`, `ToolDefinition`, `BuiltInAgentFactoryContext`       | `*-tools.ts`, `tanstack-tools.ts`, `learning.ts`         | Our own `Tool` type (name, description, zod schema, `execute`) in `src/server/engine/tools.ts`   |
+| `AgentRunner`, `finalizeRunEvents`, `LocalThreadEndpointRecord`    | `conversations/local-runner.ts`                          | `ThreadRunner`: the same SQLite tables, lock, replay and stop, without the SDK base class        |
+| `IntelligenceAgent` for server turns                               | `headless.ts`                                            | `DotEngine.turn()` called in-process, with no HTTP round trip to our own server                  |
+| `CopilotKitIntelligence` backend                                   | `platform.ts`, `conversations/backend.ts`, `learning.ts` | Removed, along with `CONVERSATION_BACKEND=intelligence` and the `CPK_*` settings                 |
+| `CopilotKitProvider`, `useAgent`, `useCopilotKit`                  | `App.tsx`, `Chat.tsx`                                    | A `useThread(threadId)` hook: load history, send, follow the stream, stop, reconnect             |
+| `useHumanInTheLoop` (page review, connection approvals)            | `Chat.tsx`                                               | Server-side pending approvals: the tool waits on an approval row and the card posts the decision |
+| `useRenderTool`, `CopilotChatToolCallsView`                        | `Chat.tsx`, `ChatTranscript.tsx`                         | Our own tool-call cards keyed by tool name, with a default card                                  |
+| `CopilotKitCoreErrorCode`                                          | `Chat.tsx`                                               | Our own stream error codes (`thread_locked`, `run_failed`, `over_budget`)                        |
+| `IntelligenceAgent` in the mobile app                              | `mobile/src/lib/chat.ts`                                 | The same client logic as `useThread`, shared as a small framework-free module                    |
+| `createChannel` (Slack)                                            | `slack-channel.ts`                                       | A `ChannelAdapter` interface with one Slack implementation on Slack's own SDK                    |
+| `copilotkit_load_skill` tool name                                  | `tanstack-tools.ts`                                      | `load_skill` in our tool registry                                                                |
+| SDK telemetry, CopilotKit links and branding                       | runtime, `App.tsx`, docs                                 | Removed. Only our own setup telemetry stays, still behind `DO_NOT_TRACK`                         |
+
+**Seam:** one engine that every caller uses: the web app, mobile, voice, schedules, delegation and Slack.
+
+```ts
+// src/server/engine/index.ts
+interface DotEngine {
+  // Starts a turn and returns at once; events go to the thread's stream.
+  start(input: {
+    threadId: string;
+    message: UserMessage;
+    source?: 'chat' | 'voice' | 'scheduled_task' | 'delegation' | 'slack';
+  }): Promise<{ runId: string }>;
+  // Runs a turn to the end and returns the reply (voice, schedules, delegation).
+  turn(
+    threadId: string,
+    prompt: string,
+    signal: AbortSignal,
+    meta?: object,
+  ): Promise<string>;
+  // Stored events, then live ones; picks up a run that is still going.
+  stream(threadId: string, afterSeq?: number): AsyncIterable<ThreadEvent>;
+  stop(threadId: string): Promise<void>;
+  resolveApproval(
+    approvalId: string,
+    decision: ApprovalDecision,
+  ): Promise<void>;
+}
+```
+
+Routes: `GET /api/chat/:threadId/events?after=<seq>` (Server-Sent Events: history, then live), `POST /api/chat/:threadId/messages`, `POST /api/chat/:threadId/stop`, `POST /api/chat/approvals/:id`.
+
+**Decisions:**
+
+- **Event format:** keep storing AG-UI event shapes in `conv_events` and keep `@ag-ui/core` for their types, so phase 1 threads open without a migration. AG-UI is an open protocol, not a CopilotKit service. If we later want no shared dependency at all, we copy the few event types we use into `src/shared/events.ts`.
+- **Model loop:** stay on TanStack AI (`@tanstack/ai`, `@tanstack/ai-openai`). It already runs our tool loop and is not part of CopilotKit.
+- **Approvals move to the server.** A tool that needs you writes a pending approval and waits for the decision, with a timeout. Approvals then work the same from the web app, mobile, push notifications and Slack, and they survive a page refresh.
+
+**Work, in order (the app keeps working after each step):**
+
+1. **Tool type.** Add our `Tool` type and convert `page-tools`, `computer-tools`, `connection-tools`, `composio-tools` and `learning` to it. Delete the `tanstackTools` adapter.
+2. **Engine.** Build `DotEngine` from the body of `DotAgent.run` (prompt, limits, delegation, Composio, learning) on TanStack AI `chat()`. Turn `local-runner.ts` into `ThreadRunner` without the SDK base class, on the same tables.
+3. **Server turns.** Point voice, schedules and delegation at `engine.turn()`, then delete `headless.ts`.
+4. **Chat routes and web client.** Add the `/api/chat/*` routes and `useThread`. Rewrite `Chat.tsx` and `ChatTranscript.tsx` on them with our own tool cards. Move page review and connection approvals to server-side approvals.
+5. **Mobile.** Move `mobile/src/lib/chat.ts` onto the same routes.
+6. **Slack.** Add the `ChannelAdapter` interface and a Slack adapter, keeping one Slack thread mapped to one OpenDots thread.
+7. **Remove.** Delete the Intelligence backend, `/api/copilotkit`, the `CPK_*` settings and every `@copilotkit/*` dependency. Update `README.md`, `docs/SETUP.md` and `docs/TELEMETRY.md`. `knip` reports no leftovers.
+
+**Done when:**
+
+- `grep -r "@copilotkit" src mobile/src package.json mobile/package.json` finds nothing.
+- Chat, refreshing mid-answer, stop, page review, connection approvals, voice, scheduled tasks, delegation and Slack all work, and each has a test.
+- Threads created before this phase open with their full history.
+- The web bundle is no larger than before.
+
+**Risks:**
+
+- The chat UI is the biggest rewrite (`Chat.tsx` and the tool cards). Steps 1–3 only touch the server, so do them first; then switch the client in one step onto the new routes.
+- `CONVERSATION_BACKEND=intelligence` goes away. Phase 1 already made `local` the default; the release notes must say so.
+
+**Rough effort:** 3–4 weeks.
+
+## Phase 5: Inbox, triage and "prepare or handle?"
 
 **Goal:** the scenario that started this plan.
 
@@ -208,7 +293,7 @@ sequenceDiagram
 
 **Rough effort:** 2–3 weeks.
 
-## Phase 5: Mail and messages
+## Phase 6: Mail and messages
 
 Ship in this order, one release each:
 
@@ -217,11 +302,11 @@ Ship in this order, one release each:
 3. **Send with approval:** sends go through an approval card, like MCP "Ask first".
 4. **Rules you write:** "Always handle meeting-confirmation emails from X", promoted to a higher autonomy level for that rule only.
 
-Sources: Gmail and Outlook through Composio (already integrated) or an MCP server; messages through whichever chat tool you use (Teams, WhatsApp; Channels SDK adapters for these exist in `node_modules/@copilotkit/channels-*` if you later want two-way chat).
+Sources: Gmail and Outlook through Composio (already integrated) or an MCP server; messages through whichever chat tool you use (Teams, WhatsApp; two-way chat uses the channel adapter interface from phase 4, not the CopilotKit Channels SDK).
 
 **Rough effort:** 2–3 weeks.
 
-## Phase 6: Scheduling
+## Phase 7: Scheduling
 
 1. **Read:** "what's my day", conflicts, meeting prep pages generated 30 minutes before each meeting from related tickets, mail and pages.
 2. **Find time:** propose slots that respect working hours and focus blocks.
@@ -232,9 +317,9 @@ Sources: Google Calendar or Microsoft 365 through Composio or MCP.
 
 **Rough effort:** 2 weeks.
 
-## Phase 7: Learning (later)
+## Phase 8: Learning (later)
 
-Replace Automatic Learning with our own loop: a nightly job groups finished threads by Dot and task type, asks a model to draft a skill (`SKILL.md`), and puts it in a review queue. Approved skills are injected through the existing `copilotkit_load_skill` tool path in `tanstack-tools.ts`. Triage dismissals and decisions from phase 4 are the best training signal.
+Replace Automatic Learning with our own loop: a nightly job groups finished threads by Dot and task type, asks a model to draft a skill (`SKILL.md`), and puts it in a review queue. Approved skills are injected through the `load_skill` tool that phase 4 moves into our own tool registry. Triage dismissals and decisions from phase 5 are the best training signal.
 
 **Rough effort:** 3–6 weeks.
 
@@ -265,10 +350,11 @@ Sending mail, accepting meetings on your behalf and closing tickets never go abo
 | 1     | No-account chat, local threads, resume | -          | 3–4 weeks    |
 | 2     | Run inspector, cost meter, audit       | 1          | 1–2 weeks    |
 | 3     | Event engine, first ticket source      | 1          | 2 weeks      |
-| 4     | Inbox, triage, prepare or handle       | 3          | 2–3 weeks    |
-| 5     | Mail and messages                      | 3, 4       | 2–3 weeks    |
-| 6     | Scheduling                             | 3, 4       | 2 weeks      |
-| 7     | Own learning loop                      | 1, 4       | 3–6 weeks    |
+| 4     | Own engine, CopilotKit removed         | 1, 2       | 3–4 weeks    |
+| 5     | Inbox, triage, prepare or handle       | 3, 4       | 2–3 weeks    |
+| 6     | Mail and messages                      | 3, 5       | 2–3 weeks    |
+| 7     | Scheduling                             | 3, 5       | 2 weeks      |
+| 8     | Own learning loop                      | 1, 5       | 3–6 weeks    |
 
 Estimates assume one TypeScript developer working in this repo and exclude multi-user support.
 

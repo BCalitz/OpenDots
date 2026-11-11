@@ -77,6 +77,8 @@ export interface PageContext {
 export interface Workspace {
   dots: Dot[];
   conversations: Conversation[];
+  /** Each Dot's one continuing chat, by Dot id (older servers omit it). */
+  mainConversations?: Record<string, string>;
   setup: { missing: string[] };
 }
 export interface PendingApproval {

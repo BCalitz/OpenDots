@@ -2,6 +2,12 @@ import { setupInputSchema } from './setup-telemetry.js';
 import { pageRoutes } from './page-routes.js';
 import { insightRoutes } from './insight-routes.js';
 import { inboxRoutes } from './inbox/routes.js';
+import {
+  accountRoutes,
+  composioAccountService,
+  type ComposioAccountService,
+} from './composio-accounts.js';
+import { composioClient } from './composio.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { Platform } from './platform.js';
@@ -40,6 +46,23 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   app.route('/', pageRoutes(platform));
   app.route('/', insightRoutes(platform));
   app.route('/', inboxRoutes(platform));
+  let accounts: ComposioAccountService | undefined;
+  let accountsKey: string | undefined;
+  app.route(
+    '/',
+    accountRoutes(() => {
+      const key = platform.config.composioApiKey;
+      if (!key) return undefined;
+      if (!accounts || accountsKey !== key) {
+        accounts = composioAccountService(
+          composioClient(key),
+          platform.workspace.ownerId,
+        );
+        accountsKey = key;
+      }
+      return accounts;
+    }),
+  );
   app.post('/setup-telemetry', async (c) => {
     const parsed = setupInputSchema.safeParse(
       await c.req.json().catch(() => null),
@@ -61,6 +84,7 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       spaces: platform.workspace.spaces(),
       dots: platform.workspace.dots(),
       conversations: platform.workspace.conversations(),
+      mainConversations: platform.workspace.mainConversations(),
       setup: platform.setup(),
       calls: platform.workspace.calls(),
     }),
@@ -177,7 +201,7 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     const data = z
       .object({
         dotId: z.string(),
-        title: z.string().trim().min(1).max(120).default('A new thought'),
+        title: z.string().trim().min(1).max(120).optional(),
       })
       .strict()
       .safeParse(await c.req.json().catch(() => null));
@@ -188,10 +212,12 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         { error: `Setup required: ${platform.setup().missing.join(', ')}.` },
         503,
       );
-    return c.json(
-      await platform.createConversation(data.data.dotId, data.data.title),
-      201,
+    // Each Dot has one continuing chat: reuse it when it already exists.
+    const { conversation, created } = await platform.dotConversation(
+      data.data.dotId,
+      data.data.title,
     );
+    return c.json(conversation, created ? 201 : 200);
   });
   app.get('/conversations/:id/capture', (c) =>
     c.json(platform.workspace.capture(c.req.param('id'))),
