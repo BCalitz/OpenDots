@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   applyEvent,
   compactEvents,
@@ -223,4 +224,20 @@ it('stops retrying when the server refuses the stream', async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(fetch).toHaveBeenCalledOnce();
   connection.close();
+});
+
+it('keeps the mobile copies of the shared chat modules identical', () => {
+  // Metro wants extensionless imports; otherwise the files must match.
+  const normalize = (text: string) =>
+    text.replace(/(from '\.\/[a-z-]+)\.js'/g, "$1'");
+  for (const name of [
+    'thread-events',
+    'approvals',
+    'chat-stream',
+    'thread-client',
+  ]) {
+    const shared = readFileSync(`src/shared/${name}.ts`, 'utf8');
+    const mobile = readFileSync(`mobile/src/lib/${name}.ts`, 'utf8');
+    expect(normalize(mobile), name).toBe(normalize(shared));
+  }
 });

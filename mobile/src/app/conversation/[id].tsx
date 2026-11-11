@@ -1,4 +1,3 @@
-import type { Message } from '@ag-ui/core';
 import { Redirect, Stack, useLocalSearchParams } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -16,14 +15,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ApprovalCard } from '../../components/ApprovalCard';
 import { PageReviewCard } from '../../components/PageReviewCard';
 import { api, type Conversation, type Workspace } from '../../lib/api';
-import {
-  isScheduledMessage,
-  pendingTools,
-  useConversation,
-} from '../../lib/chat';
+import { isScheduledMessage, useConversation } from '../../lib/chat';
+import type { Message } from '../../lib/thread-events';
 import { useSession, type Session } from '../../lib/session';
 import { useTheme } from '../../lib/theme';
-import { connectionActionTool, pageReviewTool } from '../../lib/tools';
 
 export default function ConversationScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -64,7 +59,6 @@ export default function ConversationScreen() {
         <Chat
           session={session}
           threadId={conversation.id}
-          dotId={conversation.dotId}
           dotName={dotName || 'Dot'}
         />
       )}
@@ -82,27 +76,32 @@ const textOf = (message: Message) =>
           .join('')
       : '';
 
+// Tool names from threads saved before approvals moved to the server.
+const legacyReviewTool = 'review_space_page';
+const legacyApprovalTool = 'request_connection_action';
+
 function Chat({
   session,
   threadId,
-  dotId,
   dotName,
 }: {
   session: Session;
   threadId: string;
-  dotId: string;
   dotName: string;
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
-  const chat = useConversation(session, threadId, dotId);
+  const chat = useConversation(session, threadId);
   const [draft, setDraft] = useState('');
   const list = useRef<FlatList<Message>>(null);
-  const busy = chat.status === 'running';
+  const busy = chat.running;
   const waiting = useMemo(
-    () => new Set(pendingTools(chat.messages).map((tool) => tool.toolCallId)),
-    [chat.messages],
+    () =>
+      Object.values(chat.approvals).filter(
+        (approval) => approval.status === 'pending',
+      ).length > 0 && chat.running,
+    [chat.approvals, chat.running],
   );
   const results = useMemo(
     () =>
@@ -118,8 +117,7 @@ function Chat({
       (m.role === 'user' || m.role === 'assistant') &&
       (textOf(m).trim() || (m.role === 'assistant' && m.toolCalls?.length)),
   );
-  const canSend =
-    chat.status === 'ready' && !waiting.size && draft.trim().length > 0;
+  const canSend = chat.ready && !chat.running && draft.trim().length > 0;
 
   const renderTool = (
     call: NonNullable<
@@ -132,20 +130,23 @@ function Chat({
     } catch {
       args = undefined;
     }
+    const approval = chat.approvals[call.id];
     const props = {
-      session,
-      threadId,
-      toolCallId: call.id,
       args,
       result: results.get(call.id),
-      respond:
-        waiting.has(call.id) && chat.status === 'ready'
-          ? (result: unknown) => chat.respond(call.id, result)
-          : undefined,
+      approval,
+      running: chat.running,
+      onDecide: chat.decide,
     };
-    if (call.function.name === connectionActionTool.name)
+    if (
+      approval?.kind === 'connection_action' ||
+      call.function.name === legacyApprovalTool
+    )
       return <ApprovalCard key={call.id} {...props} />;
-    if (call.function.name === pageReviewTool.name)
+    if (
+      approval?.kind === 'page_review' ||
+      call.function.name === legacyReviewTool
+    )
       return <PageReviewCard key={call.id} {...props} />;
     return (
       <Text key={call.id} style={[styles.tool, { color: theme.muted }]}>
@@ -163,12 +164,12 @@ function Chat({
       behavior="padding"
       keyboardVerticalOffset={headerHeight}
     >
-      {chat.status === 'connecting' ? (
+      {!chat.ready && !chat.messages.length && !chat.connectionError ? (
         <ActivityIndicator style={{ flex: 1 }} />
-      ) : chat.status === 'failed' ? (
+      ) : !chat.ready && !chat.messages.length ? (
         <View style={styles.failed}>
           <Text style={[styles.notice, { color: theme.danger }]}>
-            {chat.error}
+            {chat.connectionError}
           </Text>
           <Pressable onPress={chat.retry}>
             <Text style={{ color: theme.accent, fontSize: 16 }}>Retry</Text>
@@ -193,9 +194,9 @@ function Chat({
                   {dotName} is working…
                 </Text>
               )}
-              {!!chat.error && (
+              {!!(chat.error || chat.connectionError) && (
                 <Text style={[styles.tool, { color: theme.danger }]}>
-                  {chat.error}
+                  {chat.error || chat.connectionError}
                 </Text>
               )}
             </>
@@ -247,11 +248,10 @@ function Chat({
           value={draft}
           onChangeText={setDraft}
           placeholder={
-            waiting.size ? 'Answer the card above first' : `Message ${dotName}`
+            waiting ? 'Answer the card above first' : `Message ${dotName}`
           }
           placeholderTextColor={theme.muted}
           multiline
-          editable={chat.status !== 'failed'}
         />
         {busy ? (
           <Pressable
@@ -266,7 +266,8 @@ function Chat({
             onPress={() => {
               const text = draft;
               setDraft('');
-              void chat.send(text);
+              // Put the text back if the server did not take it.
+              chat.send(text).catch(() => setDraft(text));
             }}
             style={[
               styles.send,

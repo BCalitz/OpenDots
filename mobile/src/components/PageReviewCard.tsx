@@ -1,132 +1,78 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Text, View } from 'react-native';
-import {
-  api,
-  conversationPath,
-  type PageReviewDraft,
-  type ReviewedPage,
-} from '../lib/api';
-import type { Session } from '../lib/session';
+import type { ApprovalView } from '../lib/approvals';
 import { useTheme } from '../lib/theme';
 import { Card, CardButton, cardStyles } from './Card';
 
-function parseDraft(args: unknown): PageReviewDraft | null {
-  const value = args as Partial<PageReviewDraft> | undefined;
-  return typeof value?.title === 'string' &&
-    typeof value.content === 'string' &&
-    typeof value.spaceId === 'string'
-    ? { title: value.title, content: value.content, spaceId: value.spaceId }
+interface Draft {
+  title: string;
+  content: string;
+  spaceId: string;
+}
+function parseDraft(value: unknown): Draft | null {
+  const draft = value as Partial<Draft> | undefined;
+  return typeof draft?.title === 'string' &&
+    typeof draft.content === 'string' &&
+    typeof draft.spaceId === 'string'
+    ? { title: draft.title, content: draft.content, spaceId: draft.spaceId }
     : null;
 }
-const sameDraft = (page: ReviewedPage, draft: PageReviewDraft) =>
-  !page.reviewDraft ||
-  (page.reviewDraft.title === draft.title &&
-    page.reviewDraft.content === draft.content &&
-    page.reviewDraft.spaceId === draft.spaceId);
+function parse(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'string') return {};
+  try {
+    const value = JSON.parse(raw);
+    return value && typeof value === 'object' ? value : {};
+  } catch {
+    return {};
+  }
+}
 
-// Mobile version of the web PageReviewCard: approve saves the draft as a
-// Space page through the server, then tells the Dot where it was saved.
+// Mobile version of the web PageReviewCard. The draft shown is the server's
+// copy; the server saves it only after the owner approves.
 export function PageReviewCard({
-  session,
-  threadId,
-  toolCallId,
   args,
   result,
-  respond,
+  approval,
+  running,
+  onDecide,
 }: {
-  session: Session;
-  threadId: string;
-  toolCallId: string;
   args: unknown;
-  result?: string;
-  respond?: (result: unknown) => Promise<void>;
+  result?: unknown;
+  approval?: ApprovalView;
+  running: boolean;
+  onDecide: (approvalId: string, approved: boolean) => Promise<unknown>;
 }) {
   const theme = useTheme();
-  const draft = parseDraft(args);
-  const [saved, setSaved] = useState<ReviewedPage | null>();
+  const draft = parseDraft(approval?.payload ?? args);
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const pending = useRef(false);
-  const path = `${conversationPath(threadId)}/reviewed-page`;
-
-  useEffect(() => {
-    let active = true;
-    void api<ReviewedPage | null>(
-      session,
-      `${path}/${encodeURIComponent(toolCallId)}`,
-    )
-      .then((value) => active && setSaved(value))
-      .catch(() => active && setSaved(null));
-    return () => {
-      active = false;
-    };
-  }, [session, path, toolCallId]);
-
-  let recorded: { approved?: boolean } = {};
-  try {
-    if (result) recorded = JSON.parse(result);
-  } catch {
-    // Non-JSON results show as ended.
-  }
-  const conflict = !!saved && !!draft && !sameDraft(saved, draft);
+  const outcome = result === undefined ? undefined : parse(result);
+  const waiting = !outcome && approval?.status === 'pending' && running;
+  const declined =
+    outcome?.status === 'declined' || approval?.status === 'declined';
 
   const decide = async (approve: boolean) => {
-    if (!respond || !draft || conflict || pending.current) return;
-    pending.current = true;
+    if (!approval || busy) return;
     setBusy(true);
     setError('');
     try {
-      // A previous save may have committed even if its response never arrived.
-      const page =
-        saved ??
-        (approve
-          ? await api<ReviewedPage>(session, path, 'POST', {
-              ...draft,
-              toolCallId,
-            })
-          : null);
-      if (!page) {
-        await respond({
-          approved: false,
-          message: 'The owner declined this draft. Do not save it.',
-        });
-        return;
-      }
-      setSaved(page);
-      await respond(
-        page.deleted
-          ? {
-              approved: true,
-              pageId: page.pageId,
-              spaceId: page.spaceId,
-              deleted: true,
-              message:
-                'The draft was saved, then the owner deleted the page. Do not link it.',
-            }
-          : {
-              approved: true,
-              pageId: page.id,
-              spaceId: page.spaceId,
-              url: `/#/spaces/${page.spaceId}/pages/${page.id}`,
-            },
-      );
+      await onDecide(approval.id, approve);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not save.');
+      setError(cause instanceof Error ? cause.message : 'Could not send.');
     } finally {
-      pending.current = false;
       setBusy(false);
     }
   };
 
   const badge =
-    recorded.approved === true || (saved && !saved.deleted)
+    outcome?.approved === true
       ? 'Saved'
-      : recorded.approved === false
+      : declined
         ? 'Declined'
-        : result !== undefined
-          ? 'Ended'
-          : 'You decide';
+        : waiting
+          ? 'You decide'
+          : 'Ended';
   return (
     <Card heading={draft?.title ?? 'Page draft'} badge={badge}>
       {draft && (
@@ -138,30 +84,28 @@ export function PageReviewCard({
           {draft.content}
         </Text>
       )}
-      {conflict && (
+      {typeof outcome?.error === 'string' && (
         <Text style={[cardStyles.small, { color: theme.danger }]}>
-          This review was saved with a different draft. Ask for a new review.
+          {outcome.error}
         </Text>
       )}
       {!!error && (
         <Text style={[cardStyles.small, { color: theme.danger }]}>{error}</Text>
       )}
-      {respond && result === undefined && saved !== undefined && !conflict && (
+      {waiting && (
         <View style={cardStyles.actions}>
           <CardButton
             primary
-            label={saved ? 'Continue' : 'Approve & save'}
+            label="Approve & save"
             busy={busy}
             disabled={!draft}
             onPress={() => void decide(true)}
           />
-          {!saved && (
-            <CardButton
-              label="Decline"
-              disabled={busy}
-              onPress={() => void decide(false)}
-            />
-          )}
+          <CardButton
+            label="Decline"
+            disabled={busy}
+            onPress={() => void decide(false)}
+          />
         </View>
       )}
     </Card>
