@@ -8,6 +8,7 @@ import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
 import { completion } from './fixtures/model-stream.js';
+import { chatTurn } from './fixtures/chat.js';
 import type { RunDetail, RunSummary } from '../src/shared/insight-types.js';
 
 const cleanup: (() => void | Promise<void>)[] = [];
@@ -49,7 +50,7 @@ function start() {
     workspace.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  return { app, workspace };
+  return { app, workspace, platform };
 }
 const json = (body: unknown, method = 'POST') => ({
   method,
@@ -90,7 +91,7 @@ const hasToolResult = (body: Body) =>
   body.messages.some((message) => message.role === 'tool');
 
 it('lets a coordinator Dot hand work to a specialist and use its answer', async () => {
-  const { app, workspace } = start();
+  const { app, workspace, platform } = start();
   const coordinator = workspace.dots()[0];
   const space = workspace.spaces()[0];
   const researcher = (await (
@@ -143,20 +144,8 @@ it('lets a coordinator Dot hand work to a specialist and use its answer', async 
     json({ dotId: coordinator.id, title: 'Plan' }),
   );
   const { id: threadId } = (await created.json()) as { id: string };
-  const run = await app.request(
-    `/api/copilotkit/agent/${coordinator.id}/run`,
-    json({
-      threadId,
-      runId: 'coord-1',
-      state: {},
-      context: [],
-      tools: [],
-      forwardedProps: {},
-      messages: [{ id: 'u1', role: 'user', content: 'Check revenue growth' }],
-    }),
-  );
-  const stream = await run.text();
-  expect(stream).toContain('Researcher found revenue grew 12%.');
+  const run = await chatTurn(app, platform, threadId, 'Check revenue growth');
+  expect(run.text).toContain('Researcher found revenue grew 12%.');
 
   // The coordinator saw ask_dot; the specialist did not, so work cannot loop.
   const coordinatorCall = seen.find((body) =>

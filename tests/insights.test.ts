@@ -10,7 +10,8 @@ import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
 import { inspectRun } from '../src/server/conversations/inspect.js';
 import { monthStart } from '../src/server/usage-store.js';
-import { runTokens } from '../src/server/conversations/local-runner.js';
+import { runTokens } from '../src/server/engine/thread-runner.js';
+import { chatTurn } from './fixtures/chat.js';
 import type {
   AuditEntry,
   RunDetail,
@@ -112,18 +113,9 @@ function fakeModel(reply: string, prompt = 1200, completion = 300) {
       return Response.json({ choices: [{ message: { content: 'Named' } }] });
     });
 }
-const runInput = (threadId: string, runId: string, text: string) => ({
-  threadId,
-  runId,
-  state: {},
-  context: [],
-  tools: [],
-  forwardedProps: {},
-  messages: [{ id: `user-${runId}`, role: 'user', content: text }],
-});
 
 it('inspects runs, meters tokens per Dot and stops a Dot at its monthly cap', async () => {
-  const { app, workspace } = start();
+  const { app, workspace, platform } = start();
   fakeModel('Hello there');
   const dot = workspace.dots()[0];
   const created = await app.request(
@@ -131,18 +123,15 @@ it('inspects runs, meters tokens per Dot and stops a Dot at its monthly cap', as
     json({ dotId: dot.id, title: 'Thread' }),
   );
   const { id: threadId } = (await created.json()) as { id: string };
-  const run = await app.request(
-    `/api/copilotkit/agent/${dot.id}/run`,
-    json(runInput(threadId, 'run-1', 'Say hello')),
-  );
-  expect(await run.text()).toContain('Hello there');
+  const run = await chatTurn(app, platform, threadId, 'Say hello');
+  expect(run.text).toContain('Hello there');
 
   await vi.waitFor(async () => {
     const runs = (await (
       await app.request('/api/runs')
     ).json()) as RunSummary[];
     expect(runs[0]).toMatchObject({
-      id: 'run-1',
+      id: run.runId,
       threadId,
       agentId: dot.id,
       status: 'finished',
@@ -152,7 +141,7 @@ it('inspects runs, meters tokens per Dot and stops a Dot at its monthly cap', as
     });
   });
   const detail = (await (
-    await app.request('/api/runs/run-1')
+    await app.request(`/api/runs/${run.runId}`)
   ).json()) as RunDetail;
   expect(detail.steps.map((step) => step.kind)).toEqual([
     'prompt',
@@ -190,13 +179,8 @@ it('inspects runs, meters tokens per Dot and stops a Dot at its monthly cap', as
     ),
   );
   expect(await updated.json()).toMatchObject({ monthlyTokenCap: 1500 });
-  const blocked = await app.request(
-    `/api/copilotkit/agent/${dot.id}/run`,
-    json(runInput(threadId, 'run-2', 'Again')),
-  );
-  expect(await blocked.text()).toContain(
-    'reached its monthly limit of 1,500 tokens',
-  );
+  const blocked = await chatTurn(app, platform, threadId, 'Again');
+  expect(blocked.error).toContain('reached its monthly limit of 1,500 tokens');
   const capped = (await (
     await app.request('/api/usage')
   ).json()) as UsageReport;
@@ -219,11 +203,8 @@ it('inspects runs, meters tokens per Dot and stops a Dot at its monthly cap', as
       'PUT',
     ),
   );
-  const again = await app.request(
-    `/api/copilotkit/agent/${dot.id}/run`,
-    json(runInput(threadId, 'run-3', 'Again')),
-  );
-  expect(await again.text()).toContain('Hello there');
+  const again = await chatTurn(app, platform, threadId, 'Again');
+  expect(again.text).toContain('Hello there');
 });
 
 it('rejects caps below a thousand tokens', async () => {

@@ -9,7 +9,12 @@ import {
   normalizeResult,
   type McpTransportFactory,
 } from '../src/server/connections.js';
-import { connectionTools } from '../src/server/connection-tools.js';
+import {
+  connectionTools,
+  type Approve,
+} from '../src/server/connection-tools.js';
+import { detachedContext } from '../src/server/engine/tools.js';
+import type { ApprovalStatus } from '../src/shared/approvals.js';
 import { connectionRoutes } from '../src/server/connection-routes.js';
 import {
   ConnectionStore,
@@ -97,7 +102,6 @@ function fixture({ twin = false } = {}) {
     gate,
   };
 }
-const toolCtx = { toolCallId: 'call' } as never;
 it('discovers tools, gates anything not read-only, and never returns the token', async () => {
   const { dot, request, tokens } = fixture();
   const response = await request(`/dots/${dot.id}/connections`, 'POST', {
@@ -171,7 +175,7 @@ it('derives unique, provider-safe tool names', () => {
 const tools = (
   connections: ConnectionService,
   dotId: string,
-  approvals = true,
+  approve?: Approve,
   threadId = 'thread',
 ) =>
   connectionTools(
@@ -180,21 +184,17 @@ const tools = (
     threadId,
     () => {},
     new AbortController().signal,
-    approvals,
+    approve,
   );
-const requestApproval = async (
-  connections: ConnectionService,
-  dotId: string,
-  name: string,
-  args: Record<string, unknown>,
-) => {
-  const tool = tools(connections, dotId).find((item) => item.name === name)!;
-  const result = (await tool.execute!(args, toolCtx)) as {
-    status: string;
-    approvalId: string;
+const toolCtx = (toolCallId = 'call') => detachedContext(undefined, toolCallId);
+/** An owner who answers every request the same way, and remembers it. */
+const owner = (answer: ApprovalStatus) => {
+  const asked: { kind: string; payload: unknown }[] = [];
+  const approve: Approve = async (_context, request) => {
+    asked.push(request);
+    return answer;
   };
-  expect(result.status).toBe('approval_required');
-  return result.approvalId;
+  return { approve, asked };
 };
 it('runs read-only tools directly and holds write tools for owner approval', async () => {
   const { dot, connections, sent } = fixture();
@@ -202,24 +202,89 @@ it('runs read-only tools directly and holds write tools for owner approval', asy
     name: 'Mail',
     url: 'https://mail.example.com/mcp',
   });
-  const search = tools(connections, dot.id).find(
-    (tool) => tool.name === 'mail__search_mail',
-  )!;
-  expect(await search.execute!({ query: 'invoices' }, toolCtx)).toEqual({
-    isError: false,
-    text: '3 results for invoices',
-  });
-  await requestApproval(connections, dot.id, 'mail__send_mail', {
-    to: 'a@example.com',
-    body: 'Hi',
-  });
+  const declining = owner('declined');
+  const find = (approve: Approve | undefined, name: string) =>
+    tools(connections, dot.id, approve).find((tool) => tool.name === name)!;
+  expect(
+    await find(declining.approve, 'mail__search_mail').execute(
+      { query: 'invoices' },
+      toolCtx(),
+    ),
+  ).toEqual({ isError: false, text: '3 results for invoices' });
+  expect(declining.asked).toEqual([]);
+  expect(
+    await find(declining.approve, 'mail__send_mail').execute(
+      { to: 'a@example.com', body: 'Hi' },
+      toolCtx(),
+    ),
+  ).toMatchObject({ approved: false, status: 'declined' });
+  // The owner saw the server's record of exactly what would run.
+  expect(declining.asked).toEqual([
+    {
+      kind: 'connection_action',
+      payload: {
+        connection: 'Mail',
+        title: 'send mail!',
+        description: 'Send an email.',
+        arguments: { to: 'a@example.com', body: 'Hi' },
+      },
+    },
+  ]);
+  expect(
+    await find(owner('expired').approve, 'mail__send_mail').execute(
+      { to: 'a@example.com', body: 'Hi' },
+      toolCtx(),
+    ),
+  ).toMatchObject({ approved: false, status: 'expired' });
+  // Schedules, voice and Slack cannot ask, so gated tools never run there.
+  expect(
+    await find(undefined, 'mail__send_mail').execute(
+      { to: 'a@example.com', body: 'Hi' },
+      toolCtx(),
+    ),
+  ).toMatchObject({ status: 'unavailable' });
   expect(sent).not.toHaveBeenCalled();
-  const headless = tools(connections, dot.id, false).find(
+});
+it('runs an approved request once and records its receipt', async () => {
+  const { dot, connections, sent, workspace } = fixture();
+  await connections.add(dot.id, {
+    name: 'Mail',
+    url: 'https://mail.example.com/mcp',
+  });
+  const send = tools(connections, dot.id, owner('approved').approve).find(
     (tool) => tool.name === 'mail__send_mail',
   )!;
   expect(
-    await headless.execute!({ to: 'a@example.com', body: 'Hi' }, toolCtx),
-  ).toMatchObject({ status: 'unavailable' });
+    await send.execute({ to: 'a@example.com', body: 'Hi' }, toolCtx('tc1')),
+  ).toEqual({ approved: true, isError: false, text: 'Sent to a@example.com' });
+  // The same tool call cannot run it twice.
+  expect(
+    await send.execute({ to: 'a@example.com', body: 'Hi' }, toolCtx('tc1')),
+  ).toMatchObject({ approved: true, error: 'This action already ran.' });
+  expect(sent).toHaveBeenCalledOnce();
+  expect(sent.mock.calls[0][0]).toEqual({ to: 'a@example.com', body: 'Hi' });
+  expect(workspace.connections.action('thread', 'tc1')).toMatchObject({
+    status: 'done',
+    result: { isError: false, text: 'Sent to a@example.com' },
+  });
+});
+it('binds approvals to the exact tool, even when look-alike names collide', async () => {
+  const { dot, connections, sent, sentTwin } = fixture({ twin: true });
+  await connections.add(dot.id, {
+    name: 'Mail',
+    url: 'https://mail.example.com/mcp',
+  });
+  const names = connections.tools(dot.id).map((tool) => tool.name);
+  expect(names).toEqual(
+    expect.arrayContaining(['mail__send_mail', 'mail__send_mail_2']),
+  );
+  const approving = owner('approved');
+  const twin = tools(connections, dot.id, approving.approve).find(
+    (tool) => tool.name === 'mail__send_mail_2',
+  )!;
+  await twin.execute({ to: 'a@example.com', body: 'Hi' }, toolCtx('tc1'));
+  expect(approving.asked[0]?.payload).toMatchObject({ title: 'send mail?' });
+  expect(sentTwin).toHaveBeenCalledOnce();
   expect(sent).not.toHaveBeenCalled();
 });
 it('honors owner changes to a tool, including during a turn', async () => {
@@ -232,153 +297,16 @@ it('honors owner changes to a tool, including during a turn', async () => {
   const before = workspace.connections.fingerprint(dot.id);
   connections.setTool(connection.id, 'search_mail', { requiresApproval: true });
   expect(workspace.connections.fingerprint(dot.id)).not.toBe(before);
-  expect(await search.execute!({ query: 'x' }, toolCtx)).toMatchObject({
-    status: 'approval_required',
+  expect(await search.execute!({ query: 'x' }, toolCtx())).toMatchObject({
+    status: 'unavailable',
   });
   connections.setTool(connection.id, 'search_mail', { enabled: false });
   expect(connections.tools(dot.id).map((tool) => tool.name)).toEqual([
     'mail__send_mail',
   ]);
-  await expect(search.execute!({ query: 'x' }, toolCtx)).rejects.toThrow(
+  await expect(search.execute!({ query: 'x' }, toolCtx())).rejects.toThrow(
     'not available',
   );
-});
-it('runs the stored request once on approval and restores its result', async () => {
-  const { dot, connections, request, sent } = fixture();
-  await connections.add(dot.id, {
-    name: 'Mail',
-    url: 'https://mail.example.com/mcp',
-  });
-  const approvalId = await requestApproval(
-    connections,
-    dot.id,
-    'mail__send_mail',
-    { to: 'a@example.com', body: 'Hi' },
-  );
-  const preview = await request(
-    `/conversations/thread/connection-approvals/${approvalId}`,
-  );
-  expect(await preview.json()).toMatchObject({
-    connection: 'Mail',
-    title: 'send mail!',
-    arguments: { to: 'a@example.com', body: 'Hi' },
-  });
-  const approve = () =>
-    request('/conversations/thread/connection-actions', 'POST', {
-      toolCallId: 'tc1',
-      approvalId,
-    });
-  expect(await (await approve()).json()).toEqual({
-    isError: false,
-    text: 'Sent to a@example.com',
-  });
-  expect(await (await approve()).json()).toEqual({
-    isError: false,
-    text: 'Sent to a@example.com',
-  });
-  expect(sent).toHaveBeenCalledOnce();
-  expect(sent.mock.calls[0][0]).toEqual({ to: 'a@example.com', body: 'Hi' });
-  const restored = await request(
-    '/conversations/thread/connection-actions/tc1',
-  );
-  expect(await restored.json()).toMatchObject({ status: 'done' });
-  expect(
-    await (
-      await request('/conversations/thread/connection-actions/other')
-    ).json(),
-  ).toBeNull();
-  // Arguments sent with an approval are not accepted: only the stored ones run.
-  const injected = await request(
-    '/conversations/thread/connection-actions',
-    'POST',
-    { toolCallId: 'tc2', approvalId, arguments: { to: 'evil@example.com' } },
-  );
-  expect(injected.status).toBe(400);
-});
-it('binds approvals to the exact tool, even when look-alike names collide', async () => {
-  const { dot, connections, request, sent, sentTwin } = fixture({
-    twin: true,
-  });
-  const connection = await connections.add(dot.id, {
-    name: 'Mail',
-    url: 'https://mail.example.com/mcp',
-  });
-  const names = () =>
-    Object.fromEntries(
-      connections.tools(dot.id).map((item) => [item.tool.name, item.name]),
-    );
-  expect(names()).toMatchObject({
-    'send mail!': 'mail__send_mail',
-    'send mail?': 'mail__send_mail_2',
-  });
-  const approvalId = await requestApproval(
-    connections,
-    dot.id,
-    'mail__send_mail',
-    { to: 'a@example.com', body: 'Hi' },
-  );
-  // Disabling the requested tool must not hand its name or approval to the twin.
-  connections.setTool(connection.id, 'send mail!', { enabled: false });
-  expect(names()).toEqual({
-    search_mail: 'mail__search_mail',
-    'send mail?': 'mail__send_mail_2',
-  });
-  const refused = await request(
-    '/conversations/thread/connection-actions',
-    'POST',
-    { toolCallId: 'tc1', approvalId },
-  );
-  expect(refused.status).toBe(400);
-  expect(await refused.json()).toEqual({
-    error: 'This tool is no longer enabled for this Dot. Nothing was run.',
-  });
-  expect(sent).not.toHaveBeenCalled();
-  expect(sentTwin).not.toHaveBeenCalled();
-});
-it('refuses approvals from other conversations, other Dots, or after expiry', async () => {
-  const { dot, connections, request, workspace, sent } = fixture();
-  await connections.add(dot.id, {
-    name: 'Mail',
-    url: 'https://mail.example.com/mcp',
-  });
-  const other = workspace.createDot(
-    dot.spaceId,
-    'Other',
-    'Another specialist.',
-    true,
-    true,
-  );
-  workspace.bindThread('other-thread', other.id, 'Elsewhere');
-  const approvalId = await requestApproval(
-    connections,
-    dot.id,
-    'mail__send_mail',
-    { to: 'a', body: 'b' },
-  );
-  for (const thread of ['other-thread', 'missing'])
-    expect(
-      (
-        await request(`/conversations/${thread}/connection-actions`, 'POST', {
-          toolCallId: 'x',
-          approvalId,
-        })
-      ).status,
-    ).toBe(400);
-  vi.useFakeTimers({ toFake: ['Date'] });
-  try {
-    vi.setSystemTime(Date.now() + 61 * 60_000);
-    const expired = await request(
-      '/conversations/thread/connection-actions',
-      'POST',
-      { toolCallId: 'late', approvalId },
-    );
-    expect(await expired.json()).toEqual({
-      error: 'This approval request expired. Ask the Dot to try again.',
-    });
-  } finally {
-    vi.useRealTimers();
-  }
-  expect(sent).not.toHaveBeenCalled();
 });
 it('keeps owner changes made while a refresh is discovering tools', async () => {
   const { dot, connections, gate } = fixture();
@@ -448,153 +376,6 @@ it('normalizes and bounds tool results', () => {
   ).toHaveLength(20000 + '\n[truncated]'.length);
   expect(normalizeResult('nope').isError).toBe(true);
 });
-it('returns a saved result only for the approval that produced it', async () => {
-  const { dot, connections, request, sent } = fixture();
-  await connections.add(dot.id, {
-    name: 'Mail',
-    url: 'https://mail.example.com/mcp',
-  });
-  const alice = await requestApproval(connections, dot.id, 'mail__send_mail', {
-    to: 'alice@example.com',
-    body: 'Hi',
-  });
-  const bob = await requestApproval(connections, dot.id, 'mail__send_mail', {
-    to: 'bob@example.com',
-    body: 'Hi',
-  });
-  const approve = (approvalId: string) =>
-    request('/conversations/thread/connection-actions', 'POST', {
-      toolCallId: 'tc1',
-      approvalId,
-    });
-  expect(await (await approve(alice)).json()).toEqual({
-    isError: false,
-    text: 'Sent to alice@example.com',
-  });
-  // Bob's approval must not be shown Alice's result, nor run under her call.
-  const mismatched = await approve(bob);
-  expect(mismatched.status).toBe(409);
-  expect(await mismatched.json()).toEqual({
-    error: 'This action belongs to a different approval request.',
-  });
-  // The receipt names its approval, so the card can reject a mismatch too.
-  const receipt = await request('/conversations/thread/connection-actions/tc1');
-  expect(await receipt.json()).toMatchObject({
-    approvalId: alice,
-    status: 'done',
-  });
-  // Retrying the original approval still recovers its result.
-  expect(await (await approve(alice)).json()).toEqual({
-    isError: false,
-    text: 'Sent to alice@example.com',
-  });
-  expect(sent).toHaveBeenCalledOnce();
-  expect(sent.mock.calls[0][0]).toMatchObject({ to: 'alice@example.com' });
-});
-
-it('surfaces stale running claims and lets only their approval retry', async () => {
-  const { dot, connections, request, sent } = fixture();
-  const connection = await connections.add(dot.id, {
-    name: 'Mail',
-    url: 'https://mail.example.com/mcp',
-  });
-  vi.useFakeTimers({ toFake: ['Date'] });
-  try {
-    const startedAt = Date.now();
-    const alice = await requestApproval(
-      connections,
-      dot.id,
-      'mail__send_mail',
-      { to: 'alice@example.com', body: 'Hi' },
-    );
-    const bob = await requestApproval(connections, dot.id, 'mail__send_mail', {
-      to: 'bob@example.com',
-      body: 'Hi',
-    });
-    expect(
-      connections.store.claimAction(
-        'thread',
-        'tc1',
-        alice,
-        connection.id,
-        'send mail!',
-      ),
-    ).toBe(true);
-    const approve = (approvalId: string) =>
-      request('/conversations/thread/connection-actions', 'POST', {
-        toolCallId: 'tc1',
-        approvalId,
-      });
-
-    const running = await request(
-      '/conversations/thread/connection-actions/tc1',
-    );
-    expect(await running.json()).toMatchObject({
-      approvalId: alice,
-      status: 'running',
-      result: null,
-    });
-    const tooSoon = await approve(alice);
-    expect(tooSoon.status).toBe(409);
-    expect(await tooSoon.json()).toEqual({
-      error: 'This action is already running.',
-    });
-
-    const stolen = await approve(bob);
-    expect(stolen.status).toBe(409);
-    expect(await stolen.json()).toEqual({
-      error: 'This action belongs to a different approval request.',
-    });
-    expect(sent).not.toHaveBeenCalled();
-
-    vi.setSystemTime(startedAt + INTERRUPTED_ACTION_THRESHOLD_MS - 1);
-    const stillRunning = await request(
-      '/conversations/thread/connection-actions/tc1',
-    );
-    expect(await stillRunning.json()).toMatchObject({ status: 'running' });
-
-    vi.setSystemTime(startedAt + INTERRUPTED_ACTION_THRESHOLD_MS);
-    const interrupted = await request(
-      '/conversations/thread/connection-actions/tc1',
-    );
-    expect(await interrupted.json()).toMatchObject({
-      approvalId: alice,
-      status: 'interrupted',
-      result: null,
-    });
-
-    const retries = await Promise.all([approve(alice), approve(alice)]);
-    expect(retries.filter((response) => response.status === 200)).toHaveLength(
-      1,
-    );
-    expect(retries.filter((response) => response.status === 409)).toHaveLength(
-      1,
-    );
-    expect(
-      await retries.find((response) => response.status === 200)!.json(),
-    ).toEqual({
-      isError: false,
-      text: 'Sent to alice@example.com',
-    });
-    const mismatched = await approve(bob);
-    expect(mismatched.status).toBe(409);
-    expect(await mismatched.json()).toEqual({
-      error: 'This action belongs to a different approval request.',
-    });
-    const completed = await request(
-      '/conversations/thread/connection-actions/tc1',
-    );
-    expect(await completed.json()).toMatchObject({
-      approvalId: alice,
-      status: 'done',
-      result: { text: 'Sent to alice@example.com' },
-    });
-    expect(sent).toHaveBeenCalledOnce();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
 it('migrates existing action receipts with their original claim time', () => {
   const db = new DatabaseSync(':memory:');
   try {
@@ -622,32 +403,4 @@ it('migrates existing action receipts with their original claim time', () => {
   } finally {
     db.close();
   }
-});
-
-it('runs an approved request once, even under a fresh toolCallId', async () => {
-  const { dot, connections, request, sent } = fixture();
-  await connections.add(dot.id, {
-    name: 'Mail',
-    url: 'https://mail.example.com/mcp',
-  });
-  const approvalId = await requestApproval(
-    connections,
-    dot.id,
-    'mail__send_mail',
-    { to: 'a@example.com', body: 'Hi' },
-  );
-  const approve = (toolCallId: string) =>
-    request('/conversations/thread/connection-actions', 'POST', {
-      toolCallId,
-      approvalId,
-    });
-  expect(await (await approve('tc1')).json()).toEqual({
-    isError: false,
-    text: 'Sent to a@example.com',
-  });
-  // The stored request ran. The same approval must not run it a second
-  // time under a different tool call id.
-  const replay = await approve('tc2');
-  expect(replay.status).toBe(409);
-  expect(sent).toHaveBeenCalledOnce();
 });

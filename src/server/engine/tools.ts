@@ -8,6 +8,11 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Adds an event to the thread's stream, e.g. an approval request. */
   emit(event: BaseEvent): void;
+  /**
+   * Waits for `work` without counting the wait toward the turn's time
+   * limit. For waits on the owner, such as an approval.
+   */
+  hold<T>(work: Promise<T>): Promise<T>;
 }
 
 /**
@@ -39,13 +44,13 @@ export function detachedContext(
   signal: AbortSignal = new AbortController().signal,
   toolCallId = 'detached',
 ): ToolContext {
-  return { toolCallId, signal, emit: () => {} };
+  return { toolCallId, signal, emit: () => {}, hold: (work) => work };
 }
 
 /** Hands our tools to TanStack AI's `chat()`. */
 export function toTanStackTools(
   tools: Tool[],
-  run: { signal: AbortSignal; emit(event: BaseEvent): void },
+  run: Pick<ToolContext, 'signal' | 'emit' | 'hold'>,
 ) {
   const names = new Set<string>();
   return tools.map((tool) => {
@@ -63,6 +68,7 @@ export function toTanStackTools(
           ? AbortSignal.any([run.signal, context.abortSignal])
           : run.signal,
         emit: run.emit,
+        hold: run.hold,
       }),
     );
   });

@@ -1,13 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import type { AbstractAgent, Message } from '@ag-ui/client';
-import { EventType, type BaseEvent } from '@ag-ui/core';
 import type { CopilotKitIntelligence } from '@copilotkit/runtime/v2';
-import { lastValueFrom, tap } from 'rxjs';
 import { runThreadTurn } from '../headless.js';
-import { voiceReceiptMessagePrefix } from '../../shared/voice-receipt.js';
-import { scheduledTaskMessagePrefix } from '../../shared/scheduled-message.js';
-import { delegationMessagePrefix } from '../../shared/delegation.js';
-import type { LocalAgentRunner } from './local-runner.js';
+import type { ThreadRunner } from '../engine/thread-runner.js';
+import type { DotEngine } from '../engine/index.js';
 
 export type ConversationBackendKind = 'local' | 'intelligence';
 interface ThreadMessage {
@@ -45,21 +39,11 @@ export interface ConversationBackend {
   }): Promise<string>;
 }
 
-function messageIdPrefix(metadata?: Record<string, unknown>) {
-  return metadata?.opendotsSource === 'voice_receipt'
-    ? voiceReceiptMessagePrefix
-    : metadata?.opendotsSource === 'scheduled_task'
-      ? scheduledTaskMessagePrefix
-      : metadata?.opendotsSource === 'delegation'
-        ? delegationMessagePrefix
-        : '';
-}
-
 export class LocalConversationBackend implements ConversationBackend {
   readonly kind = 'local' as const;
   constructor(
-    readonly runner: LocalAgentRunner,
-    private agent: (dotId: string) => AbstractAgent,
+    readonly runner: ThreadRunner,
+    private engine: DotEngine,
   ) {}
   /** Chat threads start unnamed; a name is generated after the first answer. */
   createThread({
@@ -79,67 +63,16 @@ export class LocalConversationBackend implements ConversationBackend {
     );
   }
   getThreadMessages({ threadId }: { threadId: string; userId?: string }) {
-    return Promise.resolve({
-      messages: this.runner.getThreadMessages(threadId),
-    });
+    return Promise.resolve({ messages: this.runner.messages(threadId) });
   }
-  /** Runs one turn in-process through the same runner the browser uses. */
-  async turn({
+  /** Runs one turn in-process through the same engine the apps use. */
+  turn({
     threadId,
-    dotId,
     prompt,
     signal,
     metadata,
   }: Parameters<ConversationBackend['turn']>[0]) {
-    signal.throwIfAborted();
-    const agent = this.agent(dotId);
-    const userMessage = {
-      id: `${messageIdPrefix(metadata)}${randomUUID()}`,
-      role: 'user',
-      content: prompt,
-      ...(metadata ? { metadata } : {}),
-    } as Message;
-    const runId = randomUUID();
-    const events = this.runner.run({
-      threadId,
-      agent,
-      input: {
-        threadId,
-        runId,
-        messages: [userMessage],
-        tools: [],
-        context: [],
-        state: {},
-        forwardedProps: {},
-      },
-    });
-    const stop = () => void this.runner.stop({ threadId, runId });
-    signal.addEventListener('abort', stop, { once: true });
-    let runError: string | undefined;
-    try {
-      await lastValueFrom(
-        events.pipe(
-          tap((event: BaseEvent) => {
-            if (event.type === EventType.RUN_ERROR)
-              runError = (event as { message?: string }).message;
-          }),
-        ),
-        { defaultValue: undefined },
-      );
-    } finally {
-      signal.removeEventListener('abort', stop);
-    }
-    signal.throwIfAborted();
-    if (runError) throw new Error(runError);
-    const reply = agent.messages
-      .slice(agent.messages.findIndex((m) => m.id === userMessage.id) + 1)
-      .filter((message) => message.role === 'assistant')
-      .at(-1)?.content;
-    if (typeof reply !== 'string' || !reply.trim())
-      throw new Error(
-        'The current compute turn returned no assistant response.',
-      );
-    return reply;
+    return this.engine.turn(threadId, prompt, signal, metadata);
   }
 }
 

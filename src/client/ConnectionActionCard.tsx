@@ -1,137 +1,68 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Check, PlugZap } from 'lucide-react';
-import {
-  connectionActionSchema,
-  type ConnectionActionResult,
-  type PendingApproval,
-} from '../shared/connection-types';
-import { api } from './api';
+import type { ApprovalView } from '../shared/approvals';
 import { computerToolResult } from './ComputerToolCard';
-type Receipt = {
-  approvalId: string | null;
-  status: 'running' | 'interrupted' | 'done';
-  result: ConnectionActionResult | null;
-};
-const conversation = (threadId: string) =>
-  `/conversations/${encodeURIComponent(threadId)}`;
+
 const display = (value: unknown) =>
   typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+
+interface ActionPayload {
+  connection?: string;
+  title?: string;
+  description?: string;
+  arguments?: Record<string, unknown>;
+}
+
+/**
+ * A connected-service action waiting for the owner. It shows the server's
+ * record of exactly what will run; approving lets the waiting tool run it
+ * once on the server.
+ */
 export function ConnectionActionCard({
   args,
-  status,
   result,
-  respond,
-  threadId,
-  toolCallId,
+  approval,
+  running,
+  onDecide,
 }: {
   args: unknown;
-  status: string;
   result?: unknown;
-  respond?: (result: unknown) => Promise<void>;
-  threadId: string;
-  toolCallId: string;
+  approval?: ApprovalView;
+  running: boolean;
+  onDecide: (approvalId: string, approved: boolean) => Promise<unknown>;
 }) {
-  const action = connectionActionSchema.safeParse(args);
-  const recorded = computerToolResult(result);
-  const [approval, setApproval] = useState<PendingApproval>();
-  const [approvalError, setApprovalError] = useState('');
-  const [receipt, setReceipt] = useState<Receipt | null>();
-  const [error, setError] = useState('');
+  const payload = (approval?.payload ?? {}) as ActionPayload;
+  const outcome = result === undefined ? undefined : computerToolResult(result);
   const [busy, setBusy] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-  const pending = useRef(false);
-  const finished = status === 'complete';
-  const approvalId = action.success ? action.data.approvalId : '';
-  // Show the server's record of what will run, not the model's description.
-  useEffect(() => {
-    if (!approvalId) return;
-    let active = true;
-    setApprovalError('');
-    void api<PendingApproval>(
-      `${conversation(threadId)}/connection-approvals/${encodeURIComponent(approvalId)}`,
-    )
-      .then((value) => active && setApproval(value))
-      .catch(
-        (cause) =>
-          active &&
-          setApprovalError(
-            cause instanceof Error
-              ? cause.message
-              : 'Could not load this request.',
-          ),
-      );
-    return () => {
-      active = false;
-    };
-  }, [threadId, approvalId]);
-  // A saved result counts only if it came from this card's approval.
-  const mismatch = !!receipt && receipt.approvalId !== approvalId;
-  const own = mismatch ? null : receipt;
-  // A receipt that is still running is checked until the server finishes.
-  const running = own?.status === 'running';
-  const interrupted = own?.status === 'interrupted';
-  useEffect(() => {
-    let active = true;
-    const load = () =>
-      api<Receipt | null>(
-        `${conversation(threadId)}/connection-actions/${encodeURIComponent(toolCallId)}`,
-      )
-        .then((value) => active && setReceipt(value))
-        .catch((cause) => {
-          if (active)
-            setError(
-              cause instanceof Error
-                ? cause.message
-                : 'Could not check this action.',
-            );
-        });
-    setError('');
-    void load();
-    const timer = running ? setInterval(() => void load(), 2000) : undefined;
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [threadId, toolCallId, attempt, running]);
-  const outcome = own?.result ?? null;
-  const approved = recorded.approved === true || own?.status === 'done';
-  const declined = recorded.approved === false;
-  const ready = receipt !== undefined;
+  const [error, setError] = useState('');
+  const waiting =
+    !outcome && approval?.status === 'pending' && running && !!approval;
+  const approved = outcome?.approved === true;
+  const declined =
+    outcome?.status === 'declined' || approval?.status === 'declined';
+  const failed = approved && outcome?.isError === true;
+  // Threads from before server approvals passed a summary to a client tool.
+  const legacy = computerToolResult(args);
+  const summary =
+    payload.description ??
+    (typeof legacy.summary === 'string' ? legacy.summary : '');
+  const entries = Object.entries(payload.arguments ?? {});
   const decide = async (approve: boolean) => {
-    if (!respond || !action.success || pending.current) return;
-    pending.current = true;
+    if (!approval || busy) return;
     setBusy(true);
     setError('');
     try {
-      if (!approve && !outcome) {
-        await respond({
-          approved: false,
-          message:
-            'The owner declined this action. Do not perform it or try another way.',
-        });
-        return;
-      }
-      if (!outcome) setReceipt({ approvalId, status: 'running', result: null });
-      // A previous approval may have run even if its response never arrived.
-      const value =
-        outcome ??
-        (await api<ConnectionActionResult>(
-          `${conversation(threadId)}/connection-actions`,
-          'POST',
-          { toolCallId, approvalId: action.data.approvalId },
-        ));
-      setReceipt({ approvalId, status: 'done', result: value });
-      await respond({ approved: true, ...value });
+      await onDecide(approval.id, approve);
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : 'Could not run this action.',
+        cause instanceof Error
+          ? cause.message
+          : 'Could not send your decision.',
       );
     } finally {
-      pending.current = false;
       setBusy(false);
     }
   };
-  const entries = approval ? Object.entries(approval.arguments) : [];
   return (
     <section
       className="page-review-card connection-action-card"
@@ -140,32 +71,26 @@ export function ConnectionActionCard({
       <header>
         <PlugZap size={17} />
         <strong>
-          {approval
-            ? `${approval.connection} · ${approval.title}`
+          {payload.connection && payload.title
+            ? `${payload.connection} · ${payload.title}`
             : 'Connected service'}
         </strong>
         <span>
-          {approved
-            ? outcome?.isError
-              ? 'Failed'
-              : 'Approved'
-            : declined
-              ? 'Declined'
-              : running
-                ? 'Running'
-                : interrupted
-                  ? 'Interrupted'
-                  : finished
+          {failed
+            ? 'Failed'
+            : approved
+              ? 'Approved'
+              : declined
+                ? 'Declined'
+                : waiting
+                  ? 'Needs your approval'
+                  : outcome || !running
                     ? 'Ended'
-                    : !ready
-                      ? 'Checking'
-                      : 'Needs your approval'}
+                    : 'Preparing'}
         </span>
       </header>
       <div className="page-review-body">
-        <h3>
-          {action.success ? action.data.summary : 'Preparing the action…'}
-        </h3>
+        {summary && <h3>{summary}</h3>}
         {entries.length > 0 && (
           <dl className="connection-action-args">
             {entries.map(([key, value]) => (
@@ -176,75 +101,47 @@ export function ConnectionActionCard({
             ))}
           </dl>
         )}
-        {mismatch && (
-          <div className="connection-action-result failed">
-            <strong>Cannot run</strong>
-            <pre>
-              This card’s saved result belongs to a different approval request.
-              Nothing was run for this one.
-            </pre>
-          </div>
-        )}
-        {approvalError && !outcome && (
-          <div className="connection-action-result failed">
-            <strong>Cannot run</strong>
-            <pre>{approvalError}</pre>
-          </div>
-        )}
-        {outcome && (
-          <div
-            className={`connection-action-result ${outcome.isError ? 'failed' : ''}`}
-          >
-            <strong>
-              {outcome.isError ? 'Service error' : 'Service response'}
-            </strong>
+        {approved && typeof outcome?.text === 'string' && (
+          <div className={`connection-action-result ${failed ? 'failed' : ''}`}>
+            <strong>{failed ? 'Service error' : 'Service response'}</strong>
             <pre>{outcome.text}</pre>
+          </div>
+        )}
+        {typeof outcome?.error === 'string' && (
+          <div className="connection-action-result failed">
+            <strong>Cannot run</strong>
+            <pre>{outcome.error}</pre>
           </div>
         )}
       </div>
       {error && <p role="alert">{error}</p>}
       <footer>
-        {!ready && error && (
-          <button type="button" onClick={() => setAttempt((n) => n + 1)}>
-            Retry
-          </button>
-        )}
-        {!finished && respond && ready && !running && !mismatch && (
+        {waiting && (
           <>
             <button
               type="button"
               className="review-primary"
-              disabled={busy || !action.success || (!outcome && !approval)}
+              disabled={busy}
               onClick={() => void decide(true)}
             >
               <Check size={15} />
-              {busy
-                ? 'Running…'
-                : outcome
-                  ? 'Continue conversation'
-                  : interrupted
-                    ? 'Retry & run'
-                    : 'Approve & run'}
+              {busy ? 'Running…' : 'Approve & run'}
             </button>
-            {!outcome && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void decide(false)}
-              >
-                Decline
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void decide(false)}
+            >
+              Decline
+            </button>
           </>
         )}
         <small>
-          {running
-            ? 'This action is still running on the server.'
-            : interrupted
-              ? 'No result was saved for the previous run. Retrying can repeat the action if the service completed it before the interruption.'
-              : approved || declined || finished
-                ? ''
-                : 'Nothing runs until you approve. These are the exact arguments.'}
+          {waiting
+            ? 'Nothing runs until you approve. These are the exact arguments.'
+            : !outcome && !approved && !declined && !running
+              ? 'Nothing ran.'
+              : ''}
         </small>
       </footer>
     </section>

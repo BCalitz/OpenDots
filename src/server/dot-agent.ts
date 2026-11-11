@@ -431,7 +431,7 @@ export class DotAgent extends AbstractAgent {
           input.threadId,
           check,
           controller.signal,
-          approvals,
+          undefined,
           this.workspace.usage,
         );
         const pages = pageAccess(
@@ -531,6 +531,7 @@ export class DotAgent extends AbstractAgent {
                   ...toTanStackTools([...serverTools, ...connected], {
                     signal: controller.signal,
                     emit: (event) => subscriber.next(event),
+                    hold: (work) => work,
                   }),
                   ...converted.tools,
                   ...learnedSkillTools(ctx, check),

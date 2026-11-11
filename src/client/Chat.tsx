@@ -1,22 +1,7 @@
-import { PageReviewCard } from './PageReviewCard';
-import { pageReviewSchema, pageReviewTool } from '../shared/page-review';
-import {
-  connectionActionSchema,
-  connectionActionTool,
-} from '../shared/connection-types';
-import { ConnectionActionCard } from './ConnectionActionCard';
 import { contextualMessage, type PageContext } from './page-context';
 import { api } from './api';
 import type { Page } from '../server/pages';
 import { useEffect, useRef, useState } from 'react';
-import { CopilotKitCoreErrorCode } from '@copilotkit/core';
-import {
-  CopilotChatToolCallsView,
-  useRenderTool,
-  useHumanInTheLoop,
-  useAgent,
-  useCopilotKit,
-} from '@copilotkit/react-core/v2';
 import {
   FilePlus,
   ArrowUp,
@@ -27,10 +12,8 @@ import {
   Square,
   X,
 } from 'lucide-react';
-import {
-  ComputerToolCard,
-  type ComputerToolRenderProps,
-} from './ComputerToolCard';
+import { ToolCalls, toolResults } from './ToolCalls';
+import { useThread } from './useThread';
 import { ChatTranscript, isInternalVoiceReceipt } from './ChatTranscript';
 import type { CallReceipt, Conversation, Dot } from '../shared/types';
 import { Mascot } from './Mascot';
@@ -61,12 +44,13 @@ export function Chat({
   onSchedule: () => void;
   onComputer?: () => void;
 }) {
-  const { agent, isReady } = useAgent({
-    agentId: `chat-${thread.id}`,
-    runtimeAgentId: dot.id,
-    threadId: thread.id,
+  const chat = useThread(thread.id, {
+    // A finished turn may have saved pages or changed the workspace.
+    onEvent: (event) => {
+      if (event.type === 'RUN_FINISHED') onSaved();
+    },
   });
-  const { copilotkit } = useCopilotKit();
+  const messages = chat.messages;
   const [pageContext, setPageContext] = useState<PageContext | null>();
   const [contextError, setContextError] = useState('');
   const [contextAttempt, setContextAttempt] = useState(0);
@@ -98,83 +82,35 @@ export function Chat({
   const [source, setSource] = useState('');
   const [sourceOpen, setSourceOpen] = useState(false);
   const [error, setError] = useState('');
-  const [runError, setRunError] = useState('');
-  const chatError = error || runError;
-  const [loaded, setLoaded] = useState(false);
-  const [running, setRunning] = useState(false);
-  const voice = useVoice(thread.id, onSaved, agent.messages.at(-1)?.id);
+  const [sending, setSending] = useState(false);
+  const chatError = error || chat.runError || chat.connectionError;
+  const loaded = chat.ready;
+  const running = chat.running || sending;
+  const voice = useVoice(thread.id, onSaved, messages.at(-1)?.id);
   const sent = useRef(false);
   const bottom = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const subscription = copilotkit.subscribe({
-      onError: ({ error, code }) => {
-        if (
-          code === CopilotKitCoreErrorCode.AGENT_RUN_ERROR_EVENT ||
-          code === CopilotKitCoreErrorCode.AGENT_RUN_FAILED_EVENT ||
-          code === CopilotKitCoreErrorCode.AGENT_RUN_FAILED ||
-          code === CopilotKitCoreErrorCode.AGENT_THREAD_LOCKED
-        )
-          setRunError(error.message);
-        else setError(error.message);
-      },
-    });
-    const events = agent.subscribe({
-      onRunErrorEvent: ({ event }) => setRunError(event.message),
-      onRunFinishedEvent: ({ outcome }) => {
-        if (outcome === 'success') setRunError('');
-      },
-    });
-    return () => {
-      subscription.unsubscribe();
-      events.unsubscribe();
-    };
-  }, [agent, copilotkit]);
-  useEffect(() => {
-    if (!isReady) return;
-    let active = true;
-    void copilotkit
-      .connectAgent({ agent })
-      .then(() => {
-        if (active) setLoaded(true);
-      })
-      .catch((e) => {
-        if (active)
-          setError(
-            e instanceof Error ? e.message : 'Conversation could not connect.',
-          );
-      });
-    return () => {
-      active = false;
-    };
-  }, [agent, copilotkit, isReady]);
   const send = async (text: string) => {
     if (!text.trim() || running || !loaded || !contextReady || paused) return;
     setError('');
-    setRunError('');
-    setRunning(true);
-    agent.addMessage({
-      id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
-      role: 'user',
-      content: contextualMessage(text, pageContext),
-    });
+    setSending(true);
+    const previous = { draft, source, sourceOpen };
     setDraft('');
     setSource('');
     setSourceOpen(false);
     try {
-      const result = await copilotkit.runAgent({ agent });
-      if (!result.newMessages.some((message) => message.role === 'assistant'))
-        throw new Error(
-          'The current turn returned no response. Check the runtime connection and retry.',
-        );
-      onSaved();
+      await chat.send(contextualMessage(text, pageContext));
     } catch (e) {
-      setRunError(
+      // Keep what the owner wrote so nothing is lost.
+      setDraft(previous.draft);
+      setSource(previous.source);
+      setSourceOpen(previous.sourceOpen);
+      setError(
         e instanceof Error
           ? e.message
-          : 'The turn failed. Your conversation remains saved.',
+          : 'The message could not be sent. Your conversation remains saved.',
       );
     } finally {
-      setRunning(false);
+      setSending(false);
     }
   };
   useEffect(() => {
@@ -186,33 +122,11 @@ export function Chat({
   }, [loaded, contextReady, paused, initialPrompt]);
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'instant', block: 'end' });
-  }, [agent.messages.length, running]);
+  }, [messages.length, running]);
   useEffect(() => {
     if (paused && voice.status !== 'idle') void voice.end();
   }, [paused]);
-  useHumanInTheLoop(
-    {
-      name: pageReviewTool.name,
-      description: pageReviewTool.description,
-      parameters: pageReviewSchema,
-      render: (props) => (
-        <PageReviewCard {...props} threadId={thread.id} onSaved={onSaved} />
-      ),
-    },
-    [thread.id, onSaved],
-  );
-  useHumanInTheLoop(
-    {
-      name: connectionActionTool.name,
-      description: connectionActionTool.description,
-      parameters: connectionActionSchema,
-      render: (props) => (
-        <ConnectionActionCard {...props} threadId={thread.id} />
-      ),
-    },
-    [thread.id],
-  );
-  const computerCalls = agent.messages.flatMap((message) =>
+  const computerCalls = messages.flatMap((message) =>
     message.role === 'assistant' ? (message.toolCalls ?? []) : [],
   );
   const latestBrowserCall = computerCalls.findLast((call) =>
@@ -227,36 +141,13 @@ export function Chat({
       'scroll',
     ].some((action) => call.function.name === `computer_${action}`),
   );
-  useRenderTool(
-    {
-      name: '*',
-      render: (props: ComputerToolRenderProps) =>
-        props.name.startsWith('computer_') ? (
-          <ComputerToolCard
-            {...props}
-            dotId={dot.id}
-            dotName={dot.name}
-            running={running}
-            showScreen={props.toolCallId === latestBrowserCall?.id}
-            onExpand={onComputer}
-          />
-        ) : null,
-    },
-    [dot.id, dot.name, running, latestBrowserCall?.id, onComputer],
-  );
-  const visible = agent.messages.filter(
+  const results = toolResults(messages);
+  const visible = messages.filter(
     (message) =>
       !isInternalVoiceReceipt(message) &&
       ['user', 'assistant'].includes(message.role) &&
       ((typeof message.content === 'string' && message.content.trim()) ||
-        (message.role === 'assistant' &&
-          message.toolCalls?.some(
-            (call) =>
-              call.function.name.startsWith('computer_') ||
-              call.function.name === 'COMPOSIO_MANAGE_CONNECTIONS' ||
-              call.function.name === pageReviewTool.name ||
-              call.function.name === connectionActionTool.name,
-          ))),
+        (message.role === 'assistant' && !!message.toolCalls?.length)),
   );
   return (
     <div className="live-chat">
@@ -358,9 +249,15 @@ export function Chat({
           messages={visible}
           calls={calls}
           renderTools={(message) => (
-            <CopilotChatToolCallsView
+            <ToolCalls
               message={message}
-              messages={agent.messages}
+              results={results}
+              approvals={chat.approvals}
+              running={chat.running}
+              dot={dot}
+              latestBrowserCallId={latestBrowserCall?.id}
+              onComputer={onComputer}
+              onDecide={chat.decide}
             />
           )}
         />
@@ -389,11 +286,7 @@ export function Chat({
             <button
               onClick={() => {
                 setError('');
-                setRunError('');
-                void copilotkit
-                  .connectAgent({ agent })
-                  .then(() => setLoaded(true))
-                  .catch((e) => setError(e.message));
+                chat.reconnect();
               }}
             >
               Reconnect
@@ -464,7 +357,15 @@ export function Chat({
               type="button"
               className="send-button"
               aria-label="Stop response"
-              onClick={() => copilotkit.stopAgent({ agent })}
+              onClick={() =>
+                void chat
+                  .stop()
+                  .catch((e) =>
+                    setError(
+                      e instanceof Error ? e.message : 'Could not stop.',
+                    ),
+                  )
+              }
             >
               <Square size={16} />
             </button>

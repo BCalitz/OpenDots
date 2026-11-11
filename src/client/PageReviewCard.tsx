@@ -1,147 +1,81 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Check, FileText, ArrowUpRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { pageReviewSchema } from '../shared/page-review';
-import {
-  decidePageReview,
-  isDeletedReview,
-  matchesReviewedDraft,
-  restorePageReview,
-  type DeletedReview,
-} from './page-review-decision';
+import type { ApprovalView } from '../shared/approvals';
 import { openPageLink } from './page-navigation';
-import type { ReviewedPage } from '../server/pages';
+import { computerToolResult } from './ComputerToolCard';
+
+/**
+ * A page draft the Dot wants to save. The draft shown is the server's copy
+ * from the approval request; nothing is saved until the owner approves, and
+ * the server saves it, not this card.
+ */
 export function PageReviewCard({
   args,
-  status,
-  respond,
-  threadId,
-  toolCallId,
-  onSaved,
+  result,
+  approval,
+  running,
+  onDecide,
 }: {
   args: unknown;
-  status: string;
   result?: unknown;
-  respond?: (result: unknown) => Promise<void>;
-  threadId: string;
-  toolCallId: string;
-  onSaved: () => void;
+  approval?: ApprovalView;
+  running: boolean;
+  onDecide: (approvalId: string, approved: boolean) => Promise<unknown>;
 }) {
-  const draft = pageReviewSchema.safeParse(args);
-  const [savedPage, setSavedPage] = useState<ReviewedPage>();
-  const [deletedReview, setDeletedReview] = useState<DeletedReview>();
-  const [error, setError] = useState('');
+  const draft = pageReviewSchema.safeParse(approval?.payload ?? args);
+  const outcome = result === undefined ? undefined : computerToolResult(result);
   const [busy, setBusy] = useState(false);
-  const [receiptReady, setReceiptReady] = useState(false);
-  const [restoreAttempt, setRestoreAttempt] = useState(0);
-  const pending = useRef(false);
-  const finished = status === 'complete';
-  const reviewed = savedPage ?? deletedReview;
-  const conflict = !!reviewed && !matchesReviewedDraft(reviewed, args);
-  const removed = !!deletedReview && !conflict;
-  const saved = (!!savedPage || removed) && !conflict;
-  const pageId = savedPage?.id ?? '';
-  const spaceId = savedPage?.spaceId ?? '';
-  useEffect(() => {
-    let active = true;
-    setReceiptReady(false);
-    setSavedPage(undefined);
-    setDeletedReview(undefined);
-    setError('');
-    void restorePageReview(threadId, toolCallId)
-      .then((page) => {
-        if (!active) return;
-        if (isDeletedReview(page)) setDeletedReview(page);
-        else setSavedPage(page ?? undefined);
-        setReceiptReady(true);
-      })
-      .catch((cause) => {
-        if (active)
-          setError(
-            cause instanceof Error
-              ? cause.message
-              : 'Could not restore this review.',
-          );
-      });
-    return () => {
-      active = false;
-    };
-  }, [threadId, toolCallId, restoreAttempt]);
+  const [error, setError] = useState('');
+  const saved = outcome?.approved === true;
+  const pageId = typeof outcome?.pageId === 'string' ? outcome.pageId : '';
+  const spaceId = typeof outcome?.spaceId === 'string' ? outcome.spaceId : '';
+  const waiting =
+    !outcome && approval?.status === 'pending' && running && !!approval;
+  const declined =
+    outcome?.status === 'declined' || approval?.status === 'declined';
   const decide = async (approved: boolean) => {
-    if (!respond || !receiptReady || conflict || pending.current) return;
-    pending.current = true;
+    if (!approval || busy) return;
     setBusy(true);
     setError('');
     try {
-      const page = await decidePageReview(threadId, toolCallId, args, approved);
-      if (!page) {
-        await respond({
-          approved: false,
-          message: 'The owner declined this draft. Do not save it.',
-        });
-        return;
-      }
-      if (isDeletedReview(page)) {
-        setSavedPage(undefined);
-        setDeletedReview(page);
-        await respond({
-          approved: true,
-          pageId: page.pageId,
-          spaceId: page.spaceId,
-          deleted: true,
-          message:
-            'The draft was saved, then the owner deleted the page. Do not link it.',
-        });
-        return;
-      }
-      setSavedPage(page);
-      onSaved();
-      await respond({
-        approved: true,
-        pageId: page.id,
-        spaceId: page.spaceId,
-        url: `/#/spaces/${page.spaceId}/pages/${page.id}`,
-      });
+      await onDecide(approval.id, approved);
     } catch (cause) {
-      setReceiptReady(false);
       setError(
         cause instanceof Error
           ? cause.message
-          : 'Could not save the approved draft.',
+          : 'Could not send your decision.',
       );
     } finally {
-      pending.current = false;
       setBusy(false);
     }
   };
+  const title = saved
+    ? 'Saved to your Space'
+    : waiting
+      ? 'Ready for your review'
+      : declined
+        ? 'Declined'
+        : outcome || !running
+          ? 'Review ended'
+          : 'Preparing your draft…';
   return (
     <section className="page-review-card" aria-label="Review page draft">
       <header>
         <FileText size={17} />
-        <strong>
-          {conflict
-            ? 'Review changed'
-            : removed
-              ? 'Saved, then deleted'
-              : saved
-                ? 'Saved to your Space'
-                : !receiptReady
-                  ? 'Checking saved review…'
-                  : finished
-                    ? 'Review ended'
-                    : 'Ready for your review'}
-        </strong>
+        <strong>{title}</strong>
         <span>
-          {conflict
-            ? 'Needs new review'
-            : saved
-              ? 'Approved'
-              : !receiptReady
-                ? 'Checking'
-                : finished
+          {saved
+            ? 'Approved'
+            : waiting
+              ? 'You decide'
+              : declined
+                ? 'Not saved'
+                : outcome || !running
                   ? 'Not saved'
-                  : 'You decide'}
+                  : 'Drafting'}
         </span>
       </header>
       <div className="page-review-body">
@@ -162,23 +96,12 @@ export function PageReviewCard({
           </ReactMarkdown>
         )}
       </div>
-      {conflict && (
-        <p role="alert">
-          This review was saved with a different draft. Start a new review for
-          the changed draft.
-        </p>
-      )}
       {error && <p role="alert">{error}</p>}
-      {!receiptReady && error && (
-        <button
-          type="button"
-          onClick={() => setRestoreAttempt((attempt) => attempt + 1)}
-        >
-          Retry review
-        </button>
+      {!saved && typeof outcome?.error === 'string' && (
+        <p role="alert">{outcome.error}</p>
       )}
       <footer>
-        {(saved || conflict) && pageId && spaceId && (
+        {saved && pageId && spaceId && (
           <button
             type="button"
             className="review-primary"
@@ -188,43 +111,34 @@ export function PageReviewCard({
               )
             }
           >
-            {conflict ? 'Open saved page' : 'Open page'}{' '}
-            <ArrowUpRight size={15} />
+            Open page <ArrowUpRight size={15} />
           </button>
         )}
-        {!finished && respond && receiptReady && !conflict && (
+        {waiting && (
           <>
             <button
               type="button"
-              disabled={busy || (!saved && !draft.success)}
+              disabled={busy || !draft.success}
               className="review-primary"
               onClick={() => void decide(true)}
             >
               <Check size={15} />
-              {busy
-                ? 'Saving…'
-                : saved
-                  ? 'Continue conversation'
-                  : 'Approve & save'}
+              {busy ? 'Saving…' : 'Approve & save'}
             </button>
-            {!saved && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void decide(false)}
-              >
-                Decline
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void decide(false)}
+            >
+              Decline
+            </button>
           </>
         )}
-        {!saved && !conflict && (
+        {!saved && (
           <small>
-            {!receiptReady
-              ? 'Checking whether this draft was already saved.'
-              : finished
-                ? 'No page was saved.'
-                : 'Nothing is saved until you approve.'}
+            {waiting
+              ? 'Nothing is saved until you approve.'
+              : 'No page was saved.'}
           </small>
         )}
       </footer>

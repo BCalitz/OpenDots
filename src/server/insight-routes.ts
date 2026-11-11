@@ -16,7 +16,7 @@ const listQuery = z.object({
 export function insightRoutes(platform: Platform) {
   const app = new Hono();
   app.get('/runs', (c) => {
-    const runner = platform.localRunner;
+    const runner = platform.runner;
     if (!runner) return c.json({ error: LOCAL_ONLY }, 422);
     const query = listQuery.safeParse(c.req.query());
     if (!query.success) return c.json({ error: 'Invalid run filter.' }, 400);
@@ -29,7 +29,7 @@ export function insightRoutes(platform: Platform) {
     );
   });
   app.get('/runs/:id', (c) => {
-    const runner = platform.localRunner;
+    const runner = platform.runner;
     if (!runner) return c.json({ error: LOCAL_ONLY }, 422);
     const detail = runner.runDetail(c.req.param('id'));
     if (!detail) return c.json({ error: 'Run not found.' }, 404);

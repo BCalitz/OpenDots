@@ -12,7 +12,8 @@ import { createSlackChannel } from './slack-channel.js';
 export { slackIdentity } from './slack-channel.js';
 import { Store } from './store.js';
 import { WorkspaceStore } from './workspace.js';
-import { DotAgent, type Delegate } from './dot-agent.js';
+import { DotAgent } from './dot-agent.js';
+import type { Delegate } from './engine/index.js';
 import {
   conversationBackend,
   INTELLIGENCE_KEY_MISSING_LABEL,
@@ -24,10 +25,9 @@ import {
   LocalConversationBackend,
   type ConversationBackend,
 } from './conversations/backend.js';
-import {
-  LocalAgentRunner,
-  type FinishedRun,
-} from './conversations/local-runner.js';
+import { ThreadRunner, type FinishedRun } from './engine/thread-runner.js';
+import { DotEngine } from './engine/index.js';
+import { Approvals } from './engine/approvals.js';
 import {
   generateThreadName,
   namingExcerpt,
@@ -49,7 +49,11 @@ export class Platform {
   readonly backend: 'local' | 'intelligence';
   readonly conversations?: ConversationBackend;
   /** Set when conversations are stored locally. */
-  readonly localRunner?: LocalAgentRunner;
+  readonly runner?: ThreadRunner;
+  /** Runs every turn when conversations are stored locally. */
+  readonly engine?: DotEngine;
+  /** Owner approvals for tools that change things. */
+  readonly approvals?: Approvals;
   private naming = new Set<string>();
   /** One request at a time per specialist thread. */
   private delegations = new Map<string, Promise<unknown>>();
@@ -98,26 +102,24 @@ export class Platform {
         console.warn(
           'Slack Channels need CONVERSATION_BACKEND=intelligence; Slack stays offline with local conversations.',
         );
-      this.localRunner = new LocalAgentRunner(
-        options.databasePath ?? ':memory:',
-        workspace.ownerId,
-        { onRunFinished: (run) => void this.nameThread(run) },
-      );
+      const database = options.databasePath ?? ':memory:';
+      this.runner = new ThreadRunner(database, workspace.ownerId, {
+        onRunFinished: (run) => void this.nameThread(run),
+      });
+      this.approvals = new Approvals(database);
+      this.engine = new DotEngine({
+        store,
+        workspace,
+        config,
+        runner: this.runner,
+        setupTelemetry: this.setupTelemetry,
+        delegate: this.delegate,
+        approvals: this.approvals,
+      });
       this.conversations = new LocalConversationBackend(
-        this.localRunner,
-        agent,
+        this.runner,
+        this.engine,
       );
-      const runtime = new CopilotRuntime({
-        runner: this.localRunner,
-        telemetryId: this.setupTelemetry.identity,
-        telemetryProperties: this.setupTelemetry.metadata,
-        agents,
-      });
-      this.handler = createCopilotHonoHandler({
-        runtime,
-        basePath: '/api/copilotkit',
-        cors: { origin: [] },
-      });
       return;
     }
     if (!config.intelligenceKey) return;
@@ -212,7 +214,8 @@ export class Platform {
     this.inbox.stop();
     await this.setupTelemetry.stop();
     await this.handler?.channels?.stop();
-    this.localRunner?.close();
+    this.approvals?.close();
+    this.runner?.close();
   }
   async createConversation(dotId: string, title: string) {
     this.requireReady();
@@ -254,6 +257,11 @@ export class Platform {
       .slice(-12000);
   }
   async handle(request: Request): Promise<Response> {
+    if (this.engine)
+      return Response.json(
+        { error: 'Local conversations use /api/chat.' },
+        { status: 404 },
+      );
     if (!this.handler)
       return Response.json(
         { error: `Setup required: ${INTELLIGENCE_KEY_MISSING_LABEL}.` },
@@ -278,67 +286,11 @@ export class Platform {
         { status: 403 },
       );
     }
-    if (this.localRunner) {
-      const local = this.localThreadRoute(request, body);
-      if (local) return local;
-    }
     return this.handler.fetch(request);
-  }
-  /**
-   * Thread rename, archive and delete. The SDK serves these only from
-   * Intelligence, so the local backend answers them here. The route and
-   * thread were already checked by validateRuntimeScope.
-   */
-  private localThreadRoute(request: Request, body: unknown) {
-    const runner = this.localRunner!;
-    const path = new URL(request.url).pathname.slice('/api/copilotkit/'.length);
-    if (path === 'threads/subscribe')
-      return Response.json(
-        { error: 'Live thread updates need the Intelligence backend.' },
-        { status: 422 },
-      );
-    const match = path.match(/^threads\/([^/]+)(\/archive)?$/);
-    if (!match) return undefined;
-    const threadId = decodeURIComponent(match[1]);
-    const data = (body && typeof body === 'object' ? body : {}) as {
-      name?: unknown;
-      archived?: unknown;
-    };
-    if (match[2]) {
-      if (!runner.archiveThread(threadId))
-        return Response.json({ error: 'Thread not found.' }, { status: 404 });
-      return Response.json({ threadId, archived: true });
-    }
-    if (request.method === 'DELETE') {
-      try {
-        runner.deleteThread(threadId);
-      } catch (error) {
-        return Response.json(
-          { error: error instanceof Error ? error.message : 'Delete failed.' },
-          { status: 409 },
-        );
-      }
-      return Response.json({ threadId, deleted: true });
-    }
-    let thread = runner.thread(threadId);
-    if (!thread)
-      return Response.json({ error: 'Thread not found.' }, { status: 404 });
-    if (typeof data.name === 'string' && data.name.trim()) {
-      const name = data.name.trim().slice(0, 120);
-      thread = runner.renameThread(threadId, name) ?? thread;
-      this.workspace.retitleThread(threadId, name);
-    }
-    if (typeof data.archived === 'boolean')
-      thread = runner.archiveThread(threadId, data.archived) ?? thread;
-    return Response.json({
-      ...thread,
-      createdAt: new Date(thread.createdAt).toISOString(),
-      updatedAt: new Date(thread.updatedAt).toISOString(),
-    });
   }
   /** Names a local thread after its first answer, like Intelligence does. */
   private async nameThread(run: FinishedRun) {
-    const runner = this.localRunner;
+    const runner = this.runner;
     if (!runner || run.status !== 'finished' || this.naming.has(run.threadId))
       return;
     if (runner.thread(run.threadId)?.name) return;

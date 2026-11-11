@@ -1,4 +1,4 @@
-import type { Message } from '@ag-ui/client';
+import type { Message } from '../../shared/thread-events.js';
 
 export interface NamingModel {
   apiKey?: string;

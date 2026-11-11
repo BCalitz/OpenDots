@@ -2,6 +2,7 @@ import { setupInputSchema } from './setup-telemetry.js';
 import { pageRoutes } from './page-routes.js';
 import { insightRoutes } from './insight-routes.js';
 import { inboxRoutes } from './inbox/routes.js';
+import { chatRoutes } from './chat-routes.js';
 import {
   accountRoutes,
   composioAccountService,
@@ -43,6 +44,7 @@ const dotSchema = z
   .strict();
 export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   const app = new Hono();
+  app.route('/', chatRoutes(platform));
   app.route('/', pageRoutes(platform));
   app.route('/', insightRoutes(platform));
   app.route('/', inboxRoutes(platform));

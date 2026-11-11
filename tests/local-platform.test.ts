@@ -7,12 +7,17 @@ import { WorkspaceStore } from '../src/server/workspace.js';
 import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
+import {
+  ThreadConnection,
+  type ThreadState,
+} from '../src/shared/thread-client.js';
 import { completion } from './fixtures/model-stream.js';
+import { chatTurn, json } from './fixtures/chat.js';
 
-const cleanup: (() => void)[] = [];
-afterEach(() => {
+const cleanup: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
   vi.restoreAllMocks();
-  for (const fn of cleanup.splice(0).reverse()) fn();
+  for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
 function start(database: string) {
@@ -46,13 +51,8 @@ function start(database: string) {
     store.close();
     workspace.close();
   };
-  return { app, platform, workspace, stop };
+  return { app, platform, workspace, store, stop };
 }
-const json = (body: unknown) => ({
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(body),
-});
 /** Model replies stream; the naming call gets a plain completion. */
 function fakeModel(reply: string) {
   return vi
@@ -67,30 +67,36 @@ function fakeModel(reply: string) {
       });
     });
 }
-const runInput = (threadId: string, runId: string, text: string) => ({
-  threadId,
-  runId,
-  state: {},
-  context: [],
-  tools: [],
-  forwardedProps: {},
-  messages: [{ id: `user-${runId}`, role: 'user', content: text }],
-});
-
-it('chats, names, survives a restart and replays without Intelligence', async () => {
+function tempDatabase() {
   const dir = mkdtempSync(join(tmpdir(), 'opendots-local-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-  const database = join(dir, 'opendots.sqlite');
-  fakeModel('Hello there');
+  return join(dir, 'opendots.sqlite');
+}
+/** The shared web/mobile client, talking to the app in-process. */
+function connect(app: ReturnType<typeof start>['app'], threadId: string) {
+  const states: ThreadState[] = [];
+  const connection = new ThreadConnection({
+    url: `http://localhost/api/chat/${threadId}/events`,
+    headers: () => ({}),
+    onState: (state) => states.push(state),
+    fetch: ((url: string, init?: RequestInit) =>
+      app.request(url, init)) as typeof fetch,
+    retryMs: [10],
+  });
+  connection.start();
+  cleanup.push(() => connection.close());
+  return { connection, states, latest: () => states.at(-1) };
+}
 
+it('chats over /api/chat, names the thread, survives a restart and replays', async () => {
+  const database = tempDatabase();
+  fakeModel('Hello there');
   let server = start(database);
   expect(server.platform.setup()).toMatchObject({
     conversations: 'local',
     intelligence: false,
     missing: [],
   });
-  const info = await (await server.app.request('/api/copilotkit/info')).json();
-  expect(info.mode).toBe('sse');
   const dot = server.workspace.dots()[0];
   const created = await server.app.request(
     '/api/conversations',
@@ -99,16 +105,16 @@ it('chats, names, survives a restart and replays without Intelligence', async ()
   expect(created.status).toBe(201);
   const { id: threadId } = (await created.json()) as { id: string };
 
-  const run = await server.app.request(
-    `/api/copilotkit/agent/${dot.id}/run`,
-    json(runInput(threadId, 'run-1', 'Say hello')),
+  const turn = await chatTurn(
+    server.app,
+    server.platform,
+    threadId,
+    'Say hello',
   );
-  expect(run.status).toBe(200);
-  const stream = await run.text();
-  expect(stream).toContain('Hello there');
-  expect(stream).toContain('RUN_FINISHED');
+  expect(turn.status).toBe(202);
+  expect(turn.text).toBe('Hello there');
   await vi.waitFor(() =>
-    expect(server.platform.localRunner?.thread(threadId)?.name).toBe(
+    expect(server.platform.runner?.thread(threadId)?.name).toBe(
       'Greeting check',
     ),
   );
@@ -116,15 +122,14 @@ it('chats, names, survives a restart and replays without Intelligence', async ()
   await server.stop();
 
   server = start(database);
-  const connect = await server.app.request(
-    `/api/copilotkit/agent/${dot.id}/connect`,
-    json({ ...runInput(threadId, 'connect-1', ''), messages: [] }),
-  );
-  const replay = await connect.text();
-  expect(replay).toContain('Say hello');
-  expect(replay).toContain('Hello there');
+  const client = connect(server.app, threadId);
+  await vi.waitFor(() => expect(client.latest()?.ready).toBe(true));
+  expect(client.latest()?.messages.map((m) => m.content)).toEqual([
+    'Say hello',
+    'Hello there',
+  ]);
 
-  // A scheduled turn lands in the same thread.
+  // A scheduled turn lands in the same thread and reaches an open client live.
   fakeModel('Your summary');
   expect(
     await server.platform.turn(
@@ -134,23 +139,90 @@ it('chats, names, survives a restart and replays without Intelligence', async ()
       { opendotsSource: 'scheduled_task' },
     ),
   ).toBe('Your summary');
-  expect(await server.platform.history(threadId)).toContain('Your summary');
-
-  const listed = await (
-    await server.app.request(`/api/copilotkit/threads?agentId=${dot.id}`)
-  ).json();
-  expect(listed.threads).toMatchObject([
-    { id: threadId, name: 'Greeting check' },
-  ]);
-  const renamed = await server.app.request(
-    `/api/copilotkit/threads/${threadId}`,
-    {
-      ...json({ agentId: dot.id, name: 'Renamed' }),
-      method: 'PATCH',
-    },
+  await vi.waitFor(() =>
+    expect(client.latest()?.messages.at(-1)?.content).toBe('Your summary'),
   );
-  expect(await renamed.json()).toMatchObject({ id: threadId, name: 'Renamed' });
+  expect(await server.platform.history(threadId)).toContain('Your summary');
+  client.connection.close();
   await server.stop();
+});
+
+it('refuses a second message while answering, and stops on request', async () => {
+  const database = tempDatabase();
+  const server = start(database);
+  cleanup.push(server.stop);
+  const network = vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(init.signal?.reason),
+            { once: true },
+          ),
+        ),
+    );
+  const dot = server.workspace.dots()[0];
+  const { conversation } = await server.platform.dotConversation(dot.id);
+  const client = connect(server.app, conversation.id);
+  await vi.waitFor(() => expect(client.latest()?.ready).toBe(true));
+  const first = await server.app.request(
+    `/api/chat/${conversation.id}/messages`,
+    json({ id: 'mine-1', content: 'Take your time' }),
+  );
+  expect(first.status).toBe(202);
+  await vi.waitFor(() => expect(network).toHaveBeenCalled());
+  await vi.waitFor(() => expect(client.latest()?.running).toBe(true));
+  const second = await server.app.request(
+    `/api/chat/${conversation.id}/messages`,
+    json({ content: 'Hurry' }),
+  );
+  expect(second.status).toBe(409);
+  expect(await second.json()).toMatchObject({ code: 'thread_locked' });
+
+  const stop = await server.app.request(
+    `/api/chat/${conversation.id}/stop`,
+    json({}),
+  );
+  expect(await stop.json()).toEqual({ stopped: true });
+  await vi.waitFor(() => expect(client.latest()?.running).toBe(false));
+  expect(client.latest()?.runError).toBe('');
+  expect(client.latest()?.messages.map((m) => m.id)).toEqual(['mine-1']);
+});
+
+it('validates messages and refuses to chat while paused', async () => {
+  const server = start(':memory:');
+  cleanup.push(server.stop);
+  const dot = server.workspace.dots()[0];
+  const { conversation } = await server.platform.dotConversation(dot.id);
+  const path = `/api/chat/${conversation.id}/messages`;
+  expect((await server.app.request(path, json({ content: '' }))).status).toBe(
+    400,
+  );
+  expect(
+    (await server.app.request(path, json({ content: 'x'.repeat(20_001) })))
+      .status,
+  ).toBe(400);
+  expect(
+    (await server.app.request(path, json({ content: 'Hi', role: 'system' })))
+      .status,
+  ).toBe(400);
+  expect(
+    (
+      await server.app.request(
+        '/api/chat/missing/messages',
+        json({ content: 'Hi' }),
+      )
+    ).status,
+  ).toBe(404);
+  expect((await server.app.request('/api/chat/missing/events')).status).toBe(
+    404,
+  );
+  server.store.updateSettings({ paused: true });
+  const paused = await server.app.request(path, json({ content: 'Hi' }));
+  expect(paused.status).toBe(409);
+  expect(await paused.json()).toMatchObject({ code: 'paused' });
 });
 
 it('still asks for Intelligence when it is the chosen backend', () => {
@@ -169,6 +241,6 @@ it('still asks for Intelligence when it is the chosen backend', () => {
     voiceName: 'marin',
     slackUsers: [],
   });
-  expect(platform.localRunner).toBeUndefined();
+  expect(platform.runner).toBeUndefined();
   expect(() => platform.requireReady()).toThrow(/CONVERSATION_BACKEND=local/);
 });
