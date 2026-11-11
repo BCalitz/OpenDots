@@ -6,7 +6,7 @@ import {
 } from '../../shared/inbox-types.js';
 import type { NewEvents } from '../inbox/engine.js';
 import type { InboxStore } from '../inbox/store.js';
-import { ruleVerdict, type Classifier, type Verdict } from './classifier.js';
+import { ruleVerdict, type Judge, type Verdict } from './classifier.js';
 
 /** Starts a read-only investigation of one flagged item; returns its thread. */
 export type Investigate = (
@@ -15,6 +15,11 @@ export type Investigate = (
     app: string;
     event: InboxEventView;
     finding: FindingView;
+    /** The earlier item this one was found to reference, if any. */
+    referencedEvent?: InboxEventView;
+    /** Set when the referenced item already has its own thread; continue
+     * there instead of opening a second, disconnected conversation. */
+    existingThreadId?: string;
   },
   signal: AbortSignal,
 ) => Promise<{ threadId: string }>;
@@ -42,10 +47,14 @@ export class DiscoveryService {
   constructor(
     private store: InboxStore,
     private options: {
-      classifier: () => Classifier | undefined;
+      judge: () => Judge | undefined;
       investigate: Investigate;
-      /** Lowest confidence that still counts as needing attention. */
+      /** Lowest confidence — or, for a correlated item, lowest urgency —
+       * that still counts as needing attention. */
       threshold?: number;
+      /** How far back a new item can correlate with one from the same
+       * sender. */
+      windowMs?: number;
       /** Items judged per check; the rest are left unjudged. */
       maxJudged?: number;
       /** Investigations started per check; the rest wait for the owner. */
@@ -55,6 +64,9 @@ export class DiscoveryService {
   ) {}
   get threshold() {
     return this.options.threshold ?? 0.6;
+  }
+  get windowMs() {
+    return this.options.windowMs ?? 72 * 60 * 60_000;
   }
   /** Called when a Dot has finished looking into a flagged item. */
   onReady(listener: ReadyListener) {
@@ -115,28 +127,45 @@ export class DiscoveryService {
       );
       let judgedBy = 'rules';
       if (!verdict) {
-        const classifier = this.options.classifier();
-        if (!classifier) return;
+        const model = this.options.judge();
+        if (!model) return;
+        const candidates = event.from
+          ? this.store.recentFrom(
+              event.from,
+              event.occurredAt,
+              this.windowMs,
+              event.id,
+            )
+          : [];
         try {
-          verdict = await classifier.classify(
+          verdict = await model.judge(
             { ...event, app },
+            candidates,
             this.controller.signal,
           );
-          judgedBy = classifier.name;
+          judgedBy = model.name;
         } catch (error) {
           // Left unjudged; the item stays in the Inbox as an ordinary event.
           console.error(`Discovery model failed: ${safeError(error)}`);
           continue;
         }
       }
+      // A correlated reference escalates on its own urgency threshold, same
+      // as the base signal escalates on its own confidence threshold.
+      const correlated =
+        verdict.referencedEventId !== null &&
+        (verdict.urgency ?? 0) >= this.threshold;
       const finding = this.store.saveFinding({
         eventId: event.id,
-        attention: verdict.attention && verdict.confidence >= this.threshold,
+        attention:
+          (verdict.attention && verdict.confidence >= this.threshold) ||
+          correlated,
         category: verdict.category,
         confidence: verdict.confidence,
         reason: verdict.reason,
         judgedBy,
         dotId: config.dotId,
+        referencedEventId: correlated ? verdict.referencedEventId : null,
       });
       if (finding.state === 'flagged') flagged.push(finding);
     }
@@ -155,6 +184,19 @@ export class DiscoveryService {
       source?.type === 'composio'
         ? (source.config as ComposioSourceConfig).toolkit
         : undefined;
+    const referencedEvent = finding.referencedEventId
+      ? this.store.event(finding.referencedEventId)
+      : undefined;
+    // When this item follows up on one already flagged for the same Dot,
+    // continue that conversation instead of opening a second, disconnected
+    // one for what is really the same thread of work.
+    const referencedFinding = finding.referencedEventId
+      ? this.store.findingForEvent(finding.referencedEventId)
+      : undefined;
+    const sameDot = referencedFinding?.dotId === finding.dotId;
+    const existingThreadId = sameDot
+      ? (referencedFinding!.threadId ?? undefined)
+      : undefined;
     this.store.updateFinding(finding.id, { state: 'investigating' });
     try {
       const { threadId } = await this.options.investigate(
@@ -164,6 +206,8 @@ export class DiscoveryService {
             (toolkit && DISCOVERY_TOOLKITS[toolkit]?.name) || event.sourceName,
           event,
           finding,
+          referencedEvent,
+          existingThreadId,
         },
         AbortSignal.any([
           this.controller.signal,
@@ -176,6 +220,13 @@ export class DiscoveryService {
         state: 'ready',
         threadId,
       });
+      // The item this one followed up on now shares this conversation, so
+      // it never needs a standalone investigation of its own.
+      if (sameDot && referencedFinding!.threadId !== threadId)
+        this.store.updateFinding(referencedFinding!.id, {
+          state: 'ready',
+          threadId,
+        });
       for (const listener of this.ready) {
         try {
           await listener(done!, event);

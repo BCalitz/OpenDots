@@ -235,16 +235,13 @@ export function AccountsView({
           <Sparkles size={14} aria-hidden />{' '}
           {discovery.model.configured ? (
             <>
-              Discovery decides what needs you with{' '}
-              <strong>{discovery.model.name}</strong>
-              {discovery.model.local ? ' on this machine' : ''}. A Dot then
-              looks into what it flags with read-only access and suggests what
-              to do. Nothing changes until you reply.
+              Discovery decides what needs you with <strong>Jev</strong>. A
+              Dot then looks into what it flags with read-only access and
+              suggests what to do. Nothing changes until you reply.
             </>
           ) : (
             <>
-              Discovery needs a model. Set <code>DISCOVERY_MODEL</code> (for
-              example a small model in Ollama) or <code>OPENAI_MODEL</code>.
+              Discovery needs a model. Set <code>TYPESAFE_API_KEY</code>.
             </>
           )}
         </p>

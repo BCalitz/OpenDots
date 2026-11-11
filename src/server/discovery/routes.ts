@@ -6,18 +6,7 @@ import {
   type DiscoveryState,
 } from '../../shared/inbox-types.js';
 import type { ComposioAccountService } from '../composio-accounts.js';
-import { DEFAULT_DISCOVERY_URL, type Platform } from '../platform.js';
-import { DEFAULT_LAYA_URL, isLayaModel } from './classifier.js';
-
-const isLocal = (url: string) => {
-  try {
-    return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(
-      new URL(url).hostname,
-    );
-  } catch {
-    return false;
-  }
-};
+import type { Platform } from '../platform.js';
 
 /** Discovery settings per connected account, and starting investigations. */
 export function discoveryRoutes(
@@ -28,7 +17,6 @@ export function discoveryRoutes(
   const store = platform.inbox.store;
   app.get('/discovery', (c) => {
     const { config } = platform;
-    const classifier = platform.classifier();
     const state: DiscoveryState = {
       accounts: store.composioSources().map((source) => {
         const value = source.config as ComposioSourceConfig;
@@ -43,18 +31,7 @@ export function discoveryRoutes(
           lastError: source.lastError,
         };
       }),
-      model: {
-        configured: !!classifier,
-        name: classifier?.name ?? null,
-        local: config.discoveryModel
-          ? isLocal(
-              config.discoveryBaseUrl ??
-                (isLayaModel(config.discoveryModel)
-                  ? DEFAULT_LAYA_URL
-                  : DEFAULT_DISCOVERY_URL),
-            )
-          : isLocal(config.baseUrl),
-      },
+      model: { configured: !!config.typesafeApiKey },
     };
     return c.json(state);
   });

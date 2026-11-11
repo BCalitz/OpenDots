@@ -91,6 +91,9 @@ export interface FindingView {
   state: FindingState;
   dotId: string | null;
   threadId: string | null;
+  /** Set when this item reads as referencing an earlier one from the same
+   * sender and asking for an action. */
+  referencedEventId: string | null;
   error: string | null;
   createdAt: number;
   updatedAt: number;
@@ -122,6 +125,6 @@ export interface DiscoveryAccountView {
 }
 export interface DiscoveryState {
   accounts: DiscoveryAccountView[];
-  /** The model that decides what needs attention. */
-  model: { configured: boolean; name: string | null; local: boolean };
+  /** Whether Jev (TYPESAFE_API_KEY) is set up to decide what needs attention. */
+  model: { configured: boolean };
 }

@@ -68,14 +68,10 @@ export interface PlatformConfig extends WebConfig {
   browserUrl?: string;
   browserSecret?: string;
   composioApiKey?: string;
-  /**
-   * The discovery model, which only decides whether an item needs the
-   * owner. Any OpenAI-compatible endpoint; Ollama on this machine by default.
-   */
-  discoveryModel?: string;
-  discoveryBaseUrl?: string;
-  discoveryApiKey?: string;
-  /** Lowest confidence (0 to 1) that still flags an item. Default 0.6. */
+  /** TypeSafe API key. Discovery is inactive without it. */
+  typesafeApiKey?: string;
+  /** Lowest confidence — or, for a correlated item, lowest urgency — that
+   * still flags an item. Default 0.6. */
   discoveryThreshold?: number;
   voiceKey?: string;
   voiceModel?: string;

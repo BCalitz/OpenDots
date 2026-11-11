@@ -23,16 +23,8 @@ import { SetupTelemetry } from './setup-telemetry.js';
 import { InboxEngine } from './inbox/engine.js';
 import { composioReader } from './composio.js';
 import { DiscoveryService, type Investigate } from './discovery/service.js';
-import {
-  chatClassifier,
-  isLayaModel,
-  layaClassifier,
-  type Classifier,
-} from './discovery/classifier.js';
+import { jevJudge, type Judge } from './discovery/classifier.js';
 import { investigationMessage } from './discovery/investigation.js';
-
-/** Ollama's OpenAI-compatible endpoint on this machine. */
-export const DEFAULT_DISCOVERY_URL = 'http://127.0.0.1:11434/v1';
 
 export class Platform {
   readonly setupTelemetry: SetupTelemetry;
@@ -88,7 +80,7 @@ export class Platform {
       },
     });
     this.discovery = new DiscoveryService(workspace.inbox, {
-      classifier: () => this.classifier(),
+      judge: () => this.jev(),
       investigate: (input, signal) => this.investigate(input, signal),
       threshold: config.discoveryThreshold,
     });
@@ -166,54 +158,44 @@ export class Platform {
     this.approvals.close();
     this.runner.close();
   }
-  /**
-   * The discovery model: DISCOVERY_MODEL (a small model, usually on this
-   * machine), or the main model when that is not set.
-   */
-  classifier(): Classifier | undefined {
-    const { config } = this;
-    if (config.discoveryModel && isLayaModel(config.discoveryModel))
-      return layaClassifier({
-        model: config.discoveryModel,
-        baseUrl: config.discoveryBaseUrl,
-        apiKey: config.discoveryApiKey,
-        fetch: this.options.fetch,
-      });
-    if (config.discoveryModel)
-      return chatClassifier({
-        baseUrl: config.discoveryBaseUrl ?? DEFAULT_DISCOVERY_URL,
-        model: config.discoveryModel,
-        apiKey: config.discoveryApiKey,
-        fetch: this.options.fetch,
-      });
-    if (config.apiKey && config.model)
-      return chatClassifier({
-        baseUrl: config.baseUrl,
-        model: config.model,
-        apiKey: config.apiKey,
-        fetch: this.options.fetch,
-      });
-    return undefined;
+  /** The discovery judge: Jev, when TYPESAFE_API_KEY is set. */
+  jev(): Judge | undefined {
+    return this.config.typesafeApiKey
+      ? jevJudge({
+          apiKey: this.config.typesafeApiKey,
+          fetch: this.options.fetch,
+        })
+      : undefined;
   }
-  /** Opens a discovery conversation and runs the read-only investigation. */
+  /**
+   * Opens a discovery conversation and runs the read-only investigation, or,
+   * when the item follows up on one already discussed, continues that
+   * conversation instead.
+   */
   private investigate: Investigate = async (input, signal) => {
-    const conversation = await this.createConversation(
-      input.dotId,
-      `${input.app}: ${input.event.title}`.slice(0, 80),
-      'discovery',
-    );
+    const threadId =
+      input.existingThreadId ??
+      (
+        await this.createConversation(
+          input.dotId,
+          `${input.app}: ${input.event.title}`.slice(0, 80),
+          'discovery',
+        )
+      ).id;
     try {
-      await this.turn(conversation.id, investigationMessage(input), signal, {
-        opendotsSource: 'discovery',
-        findingId: input.finding.id,
-      });
+      await this.turn(
+        threadId,
+        investigationMessage({ ...input, continuing: !!input.existingThreadId }),
+        signal,
+        { opendotsSource: 'discovery', findingId: input.finding.id },
+      );
     } catch (error) {
       throw Object.assign(
         error instanceof Error ? error : new Error('The investigation failed.'),
-        { threadId: conversation.id },
+        { threadId },
       );
     }
-    return { threadId: conversation.id };
+    return { threadId };
   };
   /** A new thread; `source` marks background threads such as Slack's. */
   async createConversation(dotId: string, title: string, source?: string) {

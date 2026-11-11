@@ -68,7 +68,7 @@ export class InboxStore {
     db.exec(`CREATE TABLE IF NOT EXISTS inbox_sources(id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notify TEXT NOT NULL DEFAULT 'urgent', intervalSeconds INTEGER NOT NULL DEFAULT 300, secretHash TEXT, cursor TEXT, lease TEXT, leaseUntil INTEGER, lastPolledAt INTEGER, nextPollAt INTEGER, lastError TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox_events(id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, externalId TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL, priority TEXT NOT NULL, sender TEXT, url TEXT, payload TEXT NOT NULL, occurredAt INTEGER NOT NULL, receivedAt INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'new', UNIQUE(sourceId, externalId));
       CREATE INDEX IF NOT EXISTS inbox_events_time ON inbox_events(receivedAt);
-      CREATE TABLE IF NOT EXISTS discovery_findings(id TEXT PRIMARY KEY, eventId TEXT NOT NULL UNIQUE, attention INTEGER NOT NULL, category TEXT NOT NULL, confidence REAL NOT NULL, reason TEXT NOT NULL, judgedBy TEXT NOT NULL, state TEXT NOT NULL, dotId TEXT, threadId TEXT, error TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS discovery_findings(id TEXT PRIMARY KEY, eventId TEXT NOT NULL UNIQUE, attention INTEGER NOT NULL, category TEXT NOT NULL, confidence REAL NOT NULL, reason TEXT NOT NULL, judgedBy TEXT NOT NULL, state TEXT NOT NULL, dotId TEXT, threadId TEXT, referencedEventId TEXT, error TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS discovery_findings_state ON discovery_findings(state);`);
   }
   private transaction<T>(work: () => T): T {
@@ -342,6 +342,26 @@ export class InboxStore {
       EventRow | undefined;
     return row ? this.toEvent(row) : undefined;
   }
+  /**
+   * Recent events from the same sender, looking backward from `beforeMs`
+   * within `windowMs` — candidates for discovery's cross-item correlation.
+   * No per-source-pair logic: any source that labels an event's `sender`
+   * participates.
+   */
+  recentFrom(
+    from: string,
+    beforeMs: number,
+    windowMs: number,
+    excludeId: string,
+    limit = 10,
+  ): InboxEventView[] {
+    const rows = this.db
+      .prepare(
+        `${this.eventQuery} WHERE e.sender=? AND e.id!=? AND e.occurredAt BETWEEN ? AND ? ORDER BY e.occurredAt DESC LIMIT ?`,
+      )
+      .all(from, excludeId, beforeMs - windowMs, beforeMs, limit) as unknown as EventRow[];
+    return rows.map((row) => this.toEvent(row));
+  }
   /** The stored raw payload, as untrusted data. */
   payload(id: string): unknown {
     const row = this.db
@@ -430,11 +450,12 @@ export class InboxStore {
     reason: string;
     judgedBy: string;
     dotId: string | null;
+    referencedEventId?: string | null;
   }) {
     const now = Date.now();
     this.db
       .prepare(
-        'INSERT INTO discovery_findings (id, eventId, attention, category, confidence, reason, judgedBy, state, dotId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(eventId) DO NOTHING',
+        'INSERT INTO discovery_findings (id, eventId, attention, category, confidence, reason, judgedBy, state, dotId, referencedEventId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(eventId) DO NOTHING',
       )
       .run(
         randomUUID(),
@@ -446,6 +467,7 @@ export class InboxStore {
         clip(value.judgedBy, 120),
         value.attention ? 'flagged' : 'ignored',
         value.dotId,
+        value.referencedEventId ?? null,
         now,
         now,
       );
