@@ -295,7 +295,6 @@ it('accepts webhook deliveries with the source secret, not the owner token', asy
     apiKey: 'fixture',
     model: 'custom-model',
     baseUrl: 'https://unused.invalid/v1',
-    runtimeUrl: '',
     voiceName: 'marin',
     slackUsers: [],
   });
@@ -406,7 +405,6 @@ it('only accepts MCP sources whose tool can run without asking', async () => {
     apiKey: 'fixture',
     model: 'custom-model',
     baseUrl: 'https://unused.invalid/v1',
-    runtimeUrl: '',
     voiceName: 'marin',
     slackUsers: [],
   });

@@ -1,58 +1,62 @@
 import { expect, it } from 'vitest';
 import {
-  INTELLIGENCE_KEY_MISSING_LABEL,
+  legacySettingsNotice,
   setupStatus,
   type PlatformConfig,
 } from '../src/server/platform-config.js';
 const config: PlatformConfig = {
-  intelligenceKey: 'fixture',
   apiKey: 'fixture',
   model: 'fixture',
   baseUrl: 'https://example.com',
-  runtimeUrl: '',
   voiceName: 'marin',
   slackUsers: [],
 };
-it('never claims Slack online without a complete managed channel declaration', () => {
+const slack = {
+  ...config,
+  slackBotToken: 'xoxb-fixture',
+  slackAppToken: 'xapp-fixture',
+  slackTeam: 'T1',
+  slackUsers: ['U1'],
+};
+it('never claims Slack online without every Slack setting', () => {
   expect(setupStatus(config, 'online').slack).toBe('not_configured');
   expect(
-    setupStatus({ ...config, slackChannel: 'support' }, 'online').slack,
+    setupStatus({ ...config, slackBotToken: 'xoxb-fixture' }, 'online').slack,
   ).toBe('setup_required');
   expect(
-    setupStatus(
-      {
-        ...config,
-        slackChannel: 'support',
-        slackTeam: 'team',
-        slackUsers: ['owner'],
-      },
-      'online',
-    ).slack,
-  ).toBe('online');
+    setupStatus({ ...slack, slackAppToken: undefined }, 'online').slack,
+  ).toBe('setup_required');
+  expect(setupStatus(slack, 'online').slack).toBe('online');
+  expect(setupStatus(slack, 'activation_failed').slack).toBe(
+    'activation_failed',
+  );
+  expect(setupStatus(slack).slack).toBe('connecting');
 });
-it('requires Intelligence and model setup and disables voice when either is absent', () => {
+it('requires only model setup and disables voice without it', () => {
+  expect(setupStatus(config).missing).toEqual([]);
   expect(
     setupStatus({
       ...config,
-      conversationBackend: 'intelligence',
-      intelligenceKey: '',
+      apiKey: undefined,
       voiceKey: 'fixture',
       voiceModel: 'fixture',
     }),
-  ).toMatchObject({
-    missing: [INTELLIGENCE_KEY_MISSING_LABEL],
-    voice: false,
-  });
+  ).toMatchObject({ missing: ['OPENAI_API_KEY'], voice: false });
 });
-it('reports activation failure until the SDK recovers online', () => {
-  const declared = {
-    ...config,
-    slackChannel: 'support',
-    slackTeam: 'team',
-    slackUsers: ['owner'],
-  };
-  expect(setupStatus(declared, 'offline', true).slack).toBe(
-    'activation_failed',
+it('says once that Intelligence settings no longer do anything', () => {
+  expect(legacySettingsNotice({})).toBeUndefined();
+  expect(
+    legacySettingsNotice({ CONVERSATION_BACKEND: 'local' }),
+  ).toBeUndefined();
+  const notice = legacySettingsNotice({
+    CONVERSATION_BACKEND: 'intelligence',
+    CPK_INTELLIGENCE_API_KEY: 'cpk-key',
+    SLACK_CHANNEL_NAME: 'opendots',
+  });
+  expect(notice).toContain(
+    'Remove CONVERSATION_BACKEND, CPK_INTELLIGENCE_API_KEY, SLACK_CHANNEL_NAME',
   );
-  expect(setupStatus(declared, 'online', true).slack).toBe('online');
+  expect(notice).toContain('SLACK_BOT_TOKEN');
+  // The notice names settings, never their values.
+  expect(notice).not.toContain('cpk-key');
 });

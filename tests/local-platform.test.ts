@@ -30,7 +30,6 @@ function start(database: string) {
       apiKey: 'fixture',
       model: 'custom-model',
       baseUrl: 'https://unused.invalid/v1',
-      runtimeUrl: '',
       voiceName: 'marin',
       slackUsers: [],
     },
@@ -92,11 +91,7 @@ it('chats over /api/chat, names the thread, survives a restart and replays', asy
   const database = tempDatabase();
   fakeModel('Hello there');
   let server = start(database);
-  expect(server.platform.setup()).toMatchObject({
-    conversations: 'local',
-    intelligence: false,
-    missing: [],
-  });
+  expect(server.platform.setup()).toMatchObject({ missing: [] });
   const dot = server.workspace.dots()[0];
   const created = await server.app.request(
     '/api/conversations',
@@ -225,22 +220,53 @@ it('validates messages and refuses to chat while paused', async () => {
   expect(await paused.json()).toMatchObject({ code: 'paused' });
 });
 
-it('still asks for Intelligence when it is the chosen backend', () => {
+it('answers Slack through the engine in a background thread of its own', async () => {
   const store = new Store(':memory:');
   const workspace = new WorkspaceStore(':memory:', 'owner');
-  cleanup.push(() => {
-    store.close();
-    workspace.close();
-  });
   const platform = new Platform(store, workspace, {
-    conversationBackend: 'intelligence',
     apiKey: 'fixture',
     model: 'custom-model',
     baseUrl: 'https://unused.invalid/v1',
-    runtimeUrl: '',
     voiceName: 'marin',
-    slackUsers: [],
+    slackBotToken: 'xoxb-fixture',
+    slackAppToken: 'xapp-fixture',
+    slackTeam: 'T1',
+    slackUsers: ['U1'],
   });
-  expect(platform.runner).toBeUndefined();
-  expect(() => platform.requireReady()).toThrow(/CONVERSATION_BACKEND=local/);
+  cleanup.push(async () => {
+    await platform.stop();
+    store.close();
+    workspace.close();
+  });
+  const posted: Record<string, unknown>[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (String(url).endsWith('/chat.postMessage')) {
+      posted.push(body);
+      return Response.json({ ok: true });
+    }
+    if (body.stream)
+      return completion({ role: 'assistant', content: 'Here is **today**.' });
+    return Response.json({ choices: [{ message: { content: 'Named' } }] });
+  });
+  expect(platform.setup().slack).toBe('connecting');
+  await platform.channel!.receive({
+    threadKey: 'T1:C1:100.1',
+    tenantId: 'T1',
+    userId: 'U1',
+    text: 'What is on today?',
+    addressed: true,
+  });
+  expect(posted).toEqual([
+    expect.objectContaining({
+      channel: 'C1',
+      thread_ts: '100.1',
+      text: 'Here is *today*.',
+    }),
+  ]);
+  const threadId = platform.channel!.threadFor('T1:C1:100.1')!;
+  expect(workspace.requireThread(threadId)).toMatchObject({ source: 'slack' });
+  // A Slack thread never becomes the Dot's main chat.
+  expect(workspace.mainConversation(workspace.dots()[0].id)).toBeUndefined();
+  expect(platform.runner.listRuns()[0]).toMatchObject({ threadId });
 });

@@ -132,7 +132,7 @@ const STOP_MESSAGE = 'Run stopped by user';
  * RUN_FINISHED (a stop) or RUN_ERROR. Appends to `events` and returns what
  * was added.
  */
-export function finalizeRunEvents(
+function finalizeRunEvents(
   events: BaseEvent[],
   options: { stopRequested?: boolean; message?: string } = {},
 ): BaseEvent[] {

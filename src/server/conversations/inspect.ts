@@ -1,5 +1,6 @@
 import { EventType, type BaseEvent, type Message } from '@ag-ui/core';
-import { connectionActionTool } from '../../shared/connection-types.js';
+import { legacyConnectionActionTool } from '../../shared/connection-types.js';
+import { approvalOf } from '../../shared/approvals.js';
 import { pageReviewTool } from '../../shared/page-review.js';
 import { voiceReceiptMessagePrefix } from '../../shared/voice-receipt.js';
 import { scheduledTaskMessagePrefix } from '../../shared/scheduled-message.js';
@@ -33,7 +34,12 @@ const sourceOf = (
       : message.id.startsWith(delegationMessagePrefix)
         ? 'delegation'
         : 'chat';
-const approvalTools = new Set([connectionActionTool.name, pageReviewTool.name]);
+// Tools that always ask the owner; gated connection tools announce their
+// approval with an event instead.
+const approvalTools = new Set([
+  legacyConnectionActionTool,
+  pageReviewTool.name,
+]);
 
 /**
  * Turns one run's stored AG-UI events into the steps the run inspector shows:
@@ -142,6 +148,20 @@ export function inspectRun(events: BaseEvent[]): RunStep[] {
           step.result = clip(text(data.content));
           step.endedAt = at;
         }
+        break;
+      }
+      case EventType.CUSTOM: {
+        const approval = approvalOf(data as { type: string });
+        if (!approval) break;
+        const step = tools.get(approval.toolCallId);
+        if (step) step.approval = true;
+        if (approval.status !== 'pending')
+          steps.push({
+            kind: 'decision',
+            at,
+            toolCallId: approval.toolCallId,
+            text: `Owner ${approval.status === 'expired' ? 'did not answer in time' : approval.status}.`,
+          });
         break;
       }
       case EventType.RUN_ERROR:

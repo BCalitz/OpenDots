@@ -12,7 +12,7 @@ import {
 import type { ToolContext } from './tools.js';
 
 /** How long a tool waits for the owner before giving up. */
-export const APPROVAL_WAIT_MS = 30 * 60_000;
+const APPROVAL_WAIT_MS = 30 * 60_000;
 
 /** Thrown for a decision on a request that is no longer waiting. */
 export class ApprovalClosedError extends Error {

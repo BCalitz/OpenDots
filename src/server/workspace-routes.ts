@@ -13,10 +13,6 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { Platform } from './platform.js';
 import { VoiceService } from './voice.js';
-import {
-  learningContainerIdSchema,
-  validateLearningSettings,
-} from '../shared/learning.js';
 const dotSchema = z
   .object({
     name: z.string().trim().min(1).max(40),
@@ -28,8 +24,6 @@ const dotSchema = z
       .array(z.string().regex(/^[a-z0-9_]+$/))
       .max(100)
       .default([]),
-    learningContainerId: learningContainerIdSchema.optional(),
-    skillDeliveryEnabled: z.boolean().optional(),
     spaceIds: z.array(z.string().min(1)).min(1).max(100).optional(),
     spaceId: z.string().min(1).optional(),
     delegateDotIds: z.array(z.string().min(1).max(200)).max(50).optional(),
@@ -137,22 +131,6 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       );
     if (badDelegates(undefined, data.data.delegateDotIds))
       return c.json({ error: 'Choose existing Dots for it to direct.' }, 400);
-    try {
-      validateLearningSettings(
-        data.data.learningContainerId ?? null,
-        data.data.skillDeliveryEnabled ?? false,
-      );
-    } catch (error) {
-      return c.json(
-        {
-          error:
-            error instanceof Error
-              ? error.message
-              : 'Invalid Learning settings.',
-        },
-        400,
-      );
-    }
     const dot = platform.workspace.createDot(
       data.data.spaceId,
       data.data.name,
@@ -160,8 +138,6 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       data.data.researchAllowed,
       data.data.memoryAllowed,
       data.data.spaceIds,
-      data.data.learningContainerId,
-      data.data.skillDeliveryEnabled,
       data.data.appsAllowed,
       data.data.composioToolkits,
     );
@@ -178,24 +154,6 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         { error: 'A Dot can direct other existing Dots, not itself.' },
         400,
       );
-    try {
-      validateLearningSettings(
-        data.data.learningContainerId === undefined
-          ? (current.learningContainerId ?? null)
-          : data.data.learningContainerId,
-        data.data.skillDeliveryEnabled ?? current.skillDeliveryEnabled ?? false,
-      );
-    } catch (error) {
-      return c.json(
-        {
-          error:
-            error instanceof Error
-              ? error.message
-              : 'Invalid Learning settings.',
-        },
-        400,
-      );
-    }
     const dot = platform.workspace.updateDot(c.req.param('id'), data.data);
     return c.json(applyLimits(dot.id, data.data));
   });
@@ -283,13 +241,12 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     platform.workspace.anchorCall(c.req.param('id'), data.data.anchorMessageId);
     return c.json(await voice.end(c.req.param('id'), data.data.transcript));
   });
-  app.all('/copilotkit/*', (c) => platform.handle(c.req.raw));
   app.onError((error, c) => {
     const text = error.message;
     if (text.startsWith('Space access must include'))
       return c.json({ error: text }, 400);
     const known =
-      /^(Setup|Voice setup|Dot |Space |Specialist |Conversation |Call |This call|End the current|Voice provider|An audio|Intelligence could not)/.test(
+      /^(Setup|Voice setup|Dot |Space |Specialist |Conversation |Call |This call|End the current|Voice provider|An audio)/.test(
         text,
       );
     // A conversation, call or Dot the caller named that does not exist is a missing resource, not a

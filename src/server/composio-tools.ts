@@ -1,7 +1,7 @@
 import type { JSONSchema } from '@tanstack/ai';
 import type { Tool } from './engine/tools.js';
 import type { composioSession } from './composio.js';
-import { safeFailure } from './slack-channel.js';
+import { safeFailure } from './channels/adapter.js';
 import type { UsageStore } from './usage-store.js';
 
 type Session = Awaited<ReturnType<typeof composioSession>>;

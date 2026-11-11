@@ -8,9 +8,6 @@ import type { BaseEvent } from './thread-events.js';
 export type ChatFrame =
   { kind: 'event'; event: BaseEvent } | { kind: 'ready'; running: boolean };
 
-/** Error codes the chat routes return alongside a message. */
-export type ChatErrorCode = 'thread_locked' | 'paused' | 'approval_closed';
-
 /**
  * Splits a streamed SSE body into frames. Feed it text as it arrives; it
  * returns the complete frames and keeps any partial one for next time.

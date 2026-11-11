@@ -13,7 +13,7 @@ import type { TokenUsage } from './thread-runner.js';
  * and grow every turn's cost. The window starts at a user message so tool
  * calls and their results are never split.
  */
-export const HISTORY_LIMIT = { messages: 80, characters: 120_000 };
+const HISTORY_LIMIT = { messages: 80, characters: 120_000 };
 
 function size(message: Message) {
   const calls =
@@ -85,7 +85,7 @@ const count = (value: unknown) =>
     : undefined;
 
 /** Token usage from one TanStack RUN_FINISHED chunk, in either shape. */
-export function chunkUsage(chunk: Raw): TokenUsage[] {
+function chunkUsage(chunk: Raw): TokenUsage[] {
   const model = str(chunk.model) || null;
   const usage = chunk.usage as unknown;
   if (Array.isArray(usage))

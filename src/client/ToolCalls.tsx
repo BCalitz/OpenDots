@@ -2,13 +2,12 @@ import { Wrench } from 'lucide-react';
 import type { Message } from '../shared/thread-events';
 import type { ApprovalView } from '../shared/approvals';
 import { pageReviewTool } from '../shared/page-review';
-import { connectionActionTool } from '../shared/connection-types';
+import { legacyConnectionActionTool } from '../shared/connection-types';
 import { ComputerToolCard, computerToolResult } from './ComputerToolCard';
 import { PageReviewCard } from './PageReviewCard';
 import { ConnectionActionCard } from './ConnectionActionCard';
 
 type AssistantMessage = Extract<Message, { role: 'assistant' }>;
-export type ToolCallView = NonNullable<AssistantMessage['toolCalls']>[number];
 
 function parse(raw: string): unknown {
   try {
@@ -103,7 +102,7 @@ export function ToolCalls({
           );
         if (
           approval?.kind === 'connection_action' ||
-          name === connectionActionTool.name
+          name === legacyConnectionActionTool
         )
           return (
             <ConnectionActionCard

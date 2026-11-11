@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { PageError } from './pages.js';
 import type { WorkspaceStore } from './workspace.js';
-export interface PageIntelligence {
+/** Where page conversations are stored. */
+export interface PageConversations {
   getOrCreateThread(input: {
     threadId: string;
     userId: string;
@@ -23,7 +24,7 @@ async function bounded<T>(operation: Promise<T>): Promise<T> {
           () =>
             reject(
               new Error(
-                'Intelligence request timed out. Retry to recover the same conversation.',
+                'The conversation store timed out. Retry to recover the same conversation.',
               ),
             ),
           30000,
@@ -41,7 +42,7 @@ export class PageService {
   >();
   constructor(
     private workspace: WorkspaceStore,
-    private intelligence: () => PageIntelligence,
+    private conversations: () => PageConversations,
   ) {}
   async conversation(spaceId: string, pageId: string, dotId: string) {
     const page = this.workspace.pages.get(spaceId, pageId);
@@ -57,7 +58,7 @@ export class PageService {
     const current = this.workspace.pages.thread(pageId, dotId);
     if (current?.ready)
       return this.workspace.requireThread(current.threadId, dotId);
-    const sdk = this.intelligence();
+    const sdk = this.conversations();
     const task = (async () => {
       const candidateId = randomUUID();
       if (!this.workspace.pages.reserveThread(pageId, dotId, candidateId))
@@ -75,7 +76,7 @@ export class PageService {
             name: page.title,
           }),
         );
-        // The page may have been deleted while Intelligence created its thread.
+        // The page may have been deleted while its thread was being created.
         // Recheck before binding a local conversation or marking it ready.
         this.workspace.pages.get(spaceId, pageId);
         if (!this.workspace.canAccessSpace(dotId, spaceId))
@@ -105,7 +106,7 @@ export class PageService {
     const thread = this.workspace.requireThread(threadId);
     const dot = this.workspace.dot(thread.dotId)!;
     const history = await bounded(
-      this.intelligence().getThreadMessages({
+      this.conversations().getThreadMessages({
         threadId,
         userId: this.workspace.ownerId,
       }),

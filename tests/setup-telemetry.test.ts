@@ -160,7 +160,6 @@ it('protects the browser route with owner auth and origin guards and rejects for
   const workspace = new WorkspaceStore(':memory:', 'fixture-owner');
   const platform = new Platform(store, workspace, {
     baseUrl: '',
-    runtimeUrl: '',
     voiceName: 'marin',
     slackUsers: [],
   });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, authHeaders } from './api';
+import { api, authHeaders } from './api';
 import { ThreadConnection, type ThreadState } from '../shared/thread-client';
 import type { BaseEvent } from '../shared/thread-events';
 import type { ApprovalView } from '../shared/approvals';
@@ -77,7 +77,3 @@ export function useThread(
   const reconnect = useCallback(() => setAttempt((value) => value + 1), []);
   return { ...state, send, stop, decide, reconnect };
 }
-
-/** A send that failed because a turn is already running. */
-export const isThreadLocked = (error: unknown) =>
-  error instanceof ApiError && error.status === 409;

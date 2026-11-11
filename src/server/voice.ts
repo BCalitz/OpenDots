@@ -228,7 +228,7 @@ export class VoiceService {
     if (this.platform.store.settings().paused) {
       this.platform.workspace.setCallError(
         id,
-        'Transcript saved locally; pending Intelligence sync until workspace resumes.',
+        'Transcript saved locally; pending conversation sync until workspace resumes.',
       );
       return;
     }
@@ -242,13 +242,14 @@ export class VoiceService {
     } catch {
       this.platform.workspace.setCallError(
         id,
-        'Call ended; its local receipt is saved, but Intelligence transcript sync failed.',
+        'Call ended; its local receipt is saved, but adding the transcript to the conversation failed.',
       );
     }
   }
   async resumePending() {
     for (const call of this.platform.workspace.calls())
-      if (call.error?.includes('pending Intelligence sync')) {
+      // Older receipts were saved with the Intelligence wording.
+      if (/pending (conversation|Intelligence) sync/.test(call.error ?? '')) {
         this.platform.workspace.setCallError(call.id, null);
         await this.syncReceipt(call.id, call.transcript);
       }

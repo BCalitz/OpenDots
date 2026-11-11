@@ -1,6 +1,6 @@
 import { webSearchProvider } from './parallel.js';
 import { createShutdown } from './shutdown.js';
-import { reportChannelFailure, safeFailure } from './slack-channel.js';
+import { reportChannelFailure, safeFailure } from './channels/adapter.js';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Store } from './store.js';
@@ -13,9 +13,7 @@ import { PushService, scheduledResultMessage } from './push.js';
 import { pushNotifier } from './inbox/notify.js';
 import {
   agentRunTimeoutMsFromEnv,
-  conversationBackendFromEnv,
-  intelligenceApiKeyFromEnv,
-  intelligenceWsUrlFromEnv,
+  legacySettingsNotice,
   type PlatformConfig,
 } from './platform-config.js';
 const host = process.env.HOST ?? '127.0.0.1';
@@ -39,10 +37,6 @@ const workspace = new WorkspaceStore(
   process.env.OWNER_ID ?? 'opendots-owner',
 );
 const config: PlatformConfig = {
-  conversationBackend: conversationBackendFromEnv(process.env),
-  intelligenceKey: intelligenceApiKeyFromEnv(process.env),
-  intelligenceApiUrl: process.env.INTELLIGENCE_API_URL || undefined,
-  intelligenceWsUrl: intelligenceWsUrlFromEnv(process.env),
   apiKey: process.env.OPENAI_API_KEY,
   model: process.env.OPENAI_MODEL,
   baseUrl: process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
@@ -59,22 +53,22 @@ const config: PlatformConfig = {
   voiceKey: process.env.VOICE_API_KEY,
   voiceModel: process.env.VOICE_MODEL,
   voiceName: process.env.VOICE_NAME ?? 'marin',
-  slackChannel: process.env.SLACK_CHANNEL_NAME,
+  slackBotToken: process.env.SLACK_BOT_TOKEN || undefined,
+  slackAppToken: process.env.SLACK_APP_TOKEN || undefined,
   slackTeam: process.env.SLACK_TEAM_ID,
   slackUsers: (process.env.SLACK_USER_IDS ?? '')
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean),
   slackDotId: process.env.SLACK_DOT_ID || undefined,
-  runtimeUrl: `http://${host === '::1' ? '[::1]' : '127.0.0.1'}:${port}/api/copilotkit`,
   ownerToken,
 };
 const platform = new Platform(store, workspace, config, {
   databasePath: database,
 });
-console.log(
-  `Conversations are stored ${platform.backend === 'local' ? `locally in ${database}` : 'in CopilotKit Intelligence'}.`,
-);
+console.log(`Conversations are stored in ${database}.`);
+const legacy = legacySettingsNotice(process.env);
+if (legacy) console.warn(legacy);
 const researchConfig = {
   mode: 'live' as const,
   apiKey: config.apiKey,
@@ -120,11 +114,6 @@ const runner = new Runner(
   },
   config.agentRunTimeoutMs,
 );
-// The browser opens a socket to Intelligence only when it stores conversations.
-const wsOrigin =
-  platform.backend === 'intelligence'
-    ? ` ${new URL(config.intelligenceWsUrl ?? 'wss://realtime.intelligence.copilotkit.ai').origin}`
-    : '';
 const app = createApp({
   store,
   runner,
@@ -139,7 +128,7 @@ app.use('*', async (c, next) => {
   c.header('Referrer-Policy', 'no-referrer');
   c.header(
     'Content-Security-Policy',
-    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'${wsOrigin}; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`,
+    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`,
   );
   await next();
 });
@@ -157,10 +146,9 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   void platform
     .start()
     .catch((error) =>
-      reportChannelFailure(
-        'Slack Channels activation failed; check setup status',
-        [safeFailure(error)],
-      ),
+      reportChannelFailure('Slack failed to connect; check setup status', [
+        safeFailure(error),
+      ]),
     );
 });
 const shutdown = createShutdown({

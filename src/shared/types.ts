@@ -90,8 +90,6 @@ export interface Dot {
   composioSessionId?: string | null;
   composioPolicyHash?: string | null;
   createdAt: number;
-  learningContainerId?: string | null;
-  skillDeliveryEnabled?: boolean;
   /** Tokens per UTC month; at the cap the Dot stops starting new turns. */
   monthlyTokenCap?: number | null;
   /** Other Dots this one may hand work to with ask_dot. */
@@ -103,8 +101,8 @@ export interface Conversation {
   ownerId: string;
   title: string;
   createdAt: number;
-  /** Frozen at creation; null means this conversation does not participate. */
-  learningContainerId?: string | null;
+  /** Set for background threads, such as one mirroring a Slack thread. */
+  source?: string;
 }
 export interface CallReceipt {
   anchorMessageId?: string | null;
@@ -118,8 +116,6 @@ export interface CallReceipt {
 }
 export interface SetupStatus {
   /** Where conversations are stored. */
-  conversations: 'local' | 'intelligence';
-  intelligence: boolean;
   model: boolean;
   browser: boolean;
   voice: boolean;

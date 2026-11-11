@@ -2,9 +2,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EventType, type RunAgentInput } from '@ag-ui/core';
-import { lastValueFrom, toArray } from 'rxjs';
-import { DotAgent } from '../src/server/dot-agent.js';
+import { DotEngine } from '../src/server/engine/index.js';
+import { ThreadRunner } from '../src/server/engine/thread-runner.js';
 import {
   DEFAULT_AGENT_RUN_TIMEOUT_MS,
   agentRunTimeoutMsFromEnv,
@@ -50,79 +49,50 @@ it('rejects invalid timeout overrides at startup', () => {
     ).toThrow(/AGENT_RUN_TIMEOUT_MS/);
 });
 
-it('finishes an interactive turn when Composio startup stalls', async () => {
-  vi.useFakeTimers();
+function composioEngine(timeout?: number) {
   const store = new Store(':memory:');
   const workspace = new WorkspaceStore(':memory:', 'owner');
-  resources.push(store, workspace);
+  const runner = new ThreadRunner(':memory:', 'owner');
+  resources.push(runner, store, workspace);
   const dot = workspace.dots()[0];
   store.updateSettings({ appsAllowed: true });
   workspace.updateDot(dot.id, { ...dot, appsAllowed: true });
   workspace.bindThread('thread', dot.id, 'Timeout test');
-  const agent = new DotAgent(
+  const engine = new DotEngine({
     store,
     workspace,
-    {
-      intelligenceKey: 'fixture',
+    runner,
+    config: {
       apiKey: 'fixture',
       model: 'custom-model',
       composioApiKey: 'fixture',
       baseUrl: 'https://unused.invalid/v1',
-      runtimeUrl: '',
       voiceName: 'marin',
       slackUsers: [],
-      agentRunTimeoutMs: 1_250,
+      ...(timeout ? { agentRunTimeoutMs: timeout } : {}),
     },
-    dot.id,
-  );
-  const input: RunAgentInput = {
-    threadId: 'thread',
-    runId: 'run',
-    state: {},
-    context: [],
-    messages: [{ id: 'user', role: 'user', content: 'Keep working.' }],
-    tools: [],
-    forwardedProps: {},
-  };
+  });
+  return { engine, runner };
+}
+
+it('finishes an interactive turn when Composio startup stalls', async () => {
+  vi.useFakeTimers();
+  const { engine } = composioEngine(1_250);
   composio.session.mockReturnValue(new Promise(() => {}));
-
-  const finished = lastValueFrom(agent.run(input).pipe(toArray()));
+  const { done } = engine.start({
+    threadId: 'thread',
+    message: { content: 'Keep working.' },
+  });
   await vi.advanceTimersByTimeAsync(1_251);
-  const events = await finished;
-
-  expect(events).toEqual([
-    expect.objectContaining({
-      type: EventType.RUN_ERROR,
-      message: expect.stringContaining('1.25 second time limit'),
-    }),
-  ]);
+  const run = await done;
+  expect(run.status).toBe('error');
+  expect(run.error).toContain('1.25 second time limit');
   const signal = composio.session.mock.calls[0][4] as AbortSignal;
   expect(signal.aborted).toBe(true);
 });
 
-it('does not start the inner agent after Composio startup is cancelled', async () => {
-  const store = new Store(':memory:');
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  resources.push(store, workspace);
-  const dot = workspace.dots()[0];
-  store.updateSettings({ appsAllowed: true });
-  workspace.updateDot(dot.id, { ...dot, appsAllowed: true });
-  workspace.bindThread('thread', dot.id, 'Cancellation test');
-  const agent = new DotAgent(
-    store,
-    workspace,
-    {
-      intelligenceKey: 'fixture',
-      apiKey: 'fixture',
-      model: 'custom-model',
-      composioApiKey: 'fixture',
-      baseUrl: 'https://unused.invalid/v1',
-      runtimeUrl: '',
-      voiceName: 'marin',
-      slackUsers: [],
-    },
-    dot.id,
-  );
+it('does not call the model after Composio startup is cancelled', async () => {
+  const { engine, runner } = composioEngine();
   let resolveSession!: (session: unknown) => void;
   composio.session.mockReturnValue(
     new Promise((resolve) => {
@@ -130,25 +100,15 @@ it('does not start the inner agent after Composio startup is cancelled', async (
     }),
   );
   const network = vi.spyOn(globalThis, 'fetch');
-  const finished = lastValueFrom(
-    agent
-      .run({
-        threadId: 'thread',
-        runId: 'run',
-        state: {},
-        context: [],
-        messages: [{ id: 'user', role: 'user', content: 'Keep working.' }],
-        tools: [],
-        forwardedProps: {},
-      })
-      .pipe(toArray()),
-  );
-
+  const { done } = engine.start({
+    threadId: 'thread',
+    message: { content: 'Keep working.' },
+  });
+  await vi.waitFor(() => expect(composio.session).toHaveBeenCalled());
   const tools = vi.fn().mockResolvedValue([]);
-  agent.abortRun();
+  runner.stop('thread');
   resolveSession({ tools });
-  await finished;
-
+  expect((await done).status).toBe('stopped');
   expect(tools).not.toHaveBeenCalled();
   expect(network).not.toHaveBeenCalled();
 });

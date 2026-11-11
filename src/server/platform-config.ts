@@ -1,30 +1,9 @@
 import type { WebConfig } from './parallel.js';
 import type { SetupStatus } from '../shared/types.js';
-import type { ConversationBackendKind } from './conversations/backend.js';
+import type { ChannelStatus } from './channels/adapter.js';
 
-// `copilotkit project select` writes the CLI name and deletes the template name.
-const INTELLIGENCE_API_KEY_ENV_NAMES = [
-  'CPK_INTELLIGENCE_API_KEY',
-  'INTELLIGENCE_API_KEY',
-] as const;
-export const INTELLIGENCE_KEY_MISSING_LABEL = `${INTELLIGENCE_API_KEY_ENV_NAMES[1]} (or ${INTELLIGENCE_API_KEY_ENV_NAMES[0]})`;
 export const DEFAULT_AGENT_RUN_TIMEOUT_MS = 90_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-export function intelligenceApiKeyFromEnv(
-  env: Record<string, string | undefined>,
-): string | undefined {
-  return firstNonEmptyEnvValue(env, INTELLIGENCE_API_KEY_ENV_NAMES);
-}
-
-export function intelligenceWsUrlFromEnv(
-  env: Record<string, string | undefined>,
-): string | undefined {
-  return firstNonEmptyEnvValue(env, [
-    'INTELLIGENCE_GATEWAY_WS_URL',
-    'INTELLIGENCE_WS_URL',
-  ]);
-}
 
 export function agentRunTimeoutMsFromEnv(
   env: Record<string, string | undefined>,
@@ -39,46 +18,34 @@ export function agentRunTimeoutMsFromEnv(
   return value;
 }
 
-/** CONVERSATION_BACKEND=local|intelligence. Unset means "choose from the keys present". */
-export function conversationBackendFromEnv(
-  env: Record<string, string | undefined>,
-): ConversationBackendKind | undefined {
-  const raw = env.CONVERSATION_BACKEND?.trim().toLowerCase();
-  if (!raw) return undefined;
-  if (raw === 'local' || raw === 'intelligence') return raw;
-  throw new Error('CONVERSATION_BACKEND must be "local" or "intelligence".');
-}
-
 /**
- * Local unless chosen otherwise. Existing installs that already have an
- * Intelligence key and no explicit choice keep using Intelligence, so their
- * stored conversations stay reachable after an upgrade.
+ * Settings from releases that used CopilotKit Intelligence. They no longer
+ * do anything; this says so once at startup instead of failing silently.
  */
-export function conversationBackend(
-  config: Pick<PlatformConfig, 'conversationBackend' | 'intelligenceKey'>,
-): ConversationBackendKind {
-  return (
-    config.conversationBackend ??
-    (config.intelligenceKey ? 'intelligence' : 'local')
-  );
-}
-
-function firstNonEmptyEnvValue(
+export function legacySettingsNotice(
   env: Record<string, string | undefined>,
-  names: readonly string[],
 ): string | undefined {
-  for (const name of names) {
-    const value = env[name]?.trim();
-    if (value) return value;
-  }
-  return undefined;
+  const found = [
+    'CONVERSATION_BACKEND',
+    'CPK_INTELLIGENCE_API_KEY',
+    'INTELLIGENCE_API_KEY',
+    'INTELLIGENCE_GATEWAY_WS_URL',
+    'INTELLIGENCE_WS_URL',
+    'INTELLIGENCE_API_URL',
+    'SLACK_CHANNEL_NAME',
+  ].filter(
+    (name) =>
+      env[name]?.trim() &&
+      !(
+        name === 'CONVERSATION_BACKEND' &&
+        env[name]?.trim().toLowerCase() === 'local'
+      ),
+  );
+  if (!found.length) return undefined;
+  return `OpenDots no longer uses CopilotKit Intelligence; conversations are stored in this server's database and earlier Intelligence conversations are not imported. Remove ${found.join(', ')} from your settings.${found.includes('SLACK_CHANNEL_NAME') ? ' Slack now connects directly: set SLACK_BOT_TOKEN and SLACK_APP_TOKEN (see docs/SETUP.md#slack).' : ''}`;
 }
 
 export interface PlatformConfig extends WebConfig {
-  conversationBackend?: ConversationBackendKind;
-  intelligenceKey?: string;
-  intelligenceApiUrl?: string;
-  intelligenceWsUrl?: string;
   model?: string;
   apiKey?: string;
   baseUrl: string;
@@ -93,49 +60,49 @@ export interface PlatformConfig extends WebConfig {
   voiceKey?: string;
   voiceModel?: string;
   voiceName: string;
-  slackChannel?: string;
+  /** Bot token (xoxb-) for replies. */
+  slackBotToken?: string;
+  /** App-level token (xapp-) for the Socket Mode connection. */
+  slackAppToken?: string;
   slackTeam?: string;
   slackUsers: string[];
   slackDotId?: string;
-  runtimeUrl: string;
   ownerToken?: string;
+}
+/** Whether every Slack setting is present, some are, or none. */
+export function slackSetup(config: PlatformConfig) {
+  const values = [
+    config.slackBotToken,
+    config.slackAppToken,
+    config.slackTeam,
+    config.slackUsers.length ? 'users' : '',
+  ];
+  return values.every(Boolean)
+    ? 'configured'
+    : values.some(Boolean)
+      ? 'partial'
+      : 'none';
 }
 export function setupStatus(
   config: PlatformConfig,
-  slack = 'not_configured',
-  activationFailed = false,
+  slack?: ChannelStatus,
 ): SetupStatus {
-  const backend = conversationBackend(config);
   const missing = [
-    backend === 'intelligence' &&
-      !config.intelligenceKey &&
-      INTELLIGENCE_KEY_MISSING_LABEL,
     !config.apiKey && 'OPENAI_API_KEY',
     !config.model && 'OPENAI_MODEL',
   ].filter((item): item is string => !!item);
-  const declaredSlack = !!(
-    config.slackChannel &&
-    config.slackTeam &&
-    config.slackUsers.length
-  );
-  // Slack Channels run through Intelligence; the local backend has no channel host.
-  slack = declaredSlack
-    ? backend !== 'intelligence'
-      ? 'setup_required'
-      : activationFailed && slack !== 'online'
-        ? 'activation_failed'
-        : slack
-    : config.slackChannel || config.slackTeam || config.slackUsers.length
-      ? 'setup_required'
-      : 'not_configured';
+  const declared = slackSetup(config);
   return {
-    conversations: backend,
-    intelligence: !!config.intelligenceKey,
     model: !!(config.apiKey && config.model),
     browser: !!(config.browserUrl && config.browserSecret),
     voice: !!(config.voiceKey && config.voiceModel && !missing.length),
     composio: !!config.composioApiKey,
-    slack,
+    slack:
+      declared === 'configured'
+        ? (slack ?? 'connecting')
+        : declared === 'partial'
+          ? 'setup_required'
+          : 'not_configured',
     missing,
   };
 }

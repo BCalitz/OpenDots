@@ -16,7 +16,6 @@ function fixture() {
     baseUrl: 'https://example.com',
     voiceName: 'voice',
     slackUsers: [],
-    runtimeUrl: 'http://localhost',
   };
   // No computer supervisor configured: `configured` is false, so any
   // action that reaches `allowed()` fails with a plain domain error
@@ -37,7 +36,6 @@ function configuredFixture() {
     baseUrl: 'https://example.com',
     voiceName: 'voice',
     slackUsers: [],
-    runtimeUrl: 'http://localhost',
     computerSupervisorUrl: 'https://supervisor.example.com',
     computerSupervisorToken: 'supervisor-token',
     computerToken: 'computer-token',
@@ -132,7 +130,6 @@ function upstreamFixture(responses: Record<string, unknown>) {
     baseUrl: 'https://example.com',
     voiceName: 'voice',
     slackUsers: [],
-    runtimeUrl: 'http://localhost',
     computerSupervisorUrl: 'https://supervisor.example.com',
     computerSupervisorToken: 'supervisor-token',
     computerToken: 'computer-token',

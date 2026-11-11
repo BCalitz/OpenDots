@@ -258,7 +258,17 @@ export class DotEngine {
       }
     };
     let watcher: ReturnType<typeof setInterval> | undefined;
-    try {
+    // The turn races the abort, so the time limit, a pause or a stop ends it
+    // even while an outside call that ignores the signal is still pending.
+    const aborted = new Promise<never>((_resolve, reject) =>
+      controller.signal.addEventListener(
+        'abort',
+        () => reject(controller.signal.reason),
+        { once: true },
+      ),
+    );
+    aborted.catch(() => {});
+    const body = async () => {
       const dot = workspace.dot(dotId);
       if (!dot) throw new Error('Specialist Dot not found.');
       if (!config.apiKey || !config.model) {
@@ -415,6 +425,12 @@ export class DotEngine {
         signal,
       );
       signal.throwIfAborted();
+    };
+    try {
+      const running = body();
+      // Settles after the race when the turn was aborted; nothing to report.
+      running.catch(() => {});
+      await Promise.race([running, aborted]);
     } catch (error) {
       // An owner's stop is not an error; the runner closes the run.
       if (run.signal.aborted) return;

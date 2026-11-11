@@ -19,7 +19,6 @@ vi.mock('@composio/core', () => ({
 const config: PlatformConfig = {
   composioApiKey: 'composio-fixture',
   baseUrl: 'https://example.com',
-  runtimeUrl: '',
   voiceName: 'marin',
   slackUsers: [],
 };

@@ -7,7 +7,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { validateLearningSettings } from '../shared/learning.js';
 import type { CallReceipt, Conversation, Dot, Space } from '../shared/types.js';
 export class WorkspaceStore {
   private db: DatabaseSync;
@@ -40,6 +39,7 @@ export class WorkspaceStore {
       ['dots', 'monthlyTokenCap', 'INTEGER'],
       ['dots', 'delegateDotIds', "TEXT NOT NULL DEFAULT '[]'"],
       ['thread_bindings', 'learningContainerId', 'TEXT'],
+      ['thread_bindings', 'source', 'TEXT'],
     ]) {
       if (
         !this.db
@@ -111,26 +111,30 @@ export class WorkspaceStore {
     return space;
   }
   dots(): Dot[] {
-    return this.db
-      .prepare('SELECT * FROM dots ORDER BY createdAt')
-      .all()
-      .map((row) => ({
-        ...row,
-        spaceIds: this.db
-          .prepare(
-            'SELECT spaceId FROM dot_spaces WHERE dotId=? ORDER BY spaceId',
-          )
-          .all(String(row.id))
-          .map((grant) => String(grant.spaceId)),
-        researchAllowed: !!row.researchAllowed,
-        memoryAllowed: !!row.memoryAllowed,
-        appsAllowed: !!row.appsAllowed,
-        composioToolkits: JSON.parse(String(row.composioToolkits ?? '[]')),
-        skillDeliveryEnabled: !!row.skillDeliveryEnabled,
-        monthlyTokenCap:
-          row.monthlyTokenCap == null ? null : Number(row.monthlyTokenCap),
-        delegateDotIds: JSON.parse(String(row.delegateDotIds ?? '[]')),
-      })) as unknown as Dot[];
+    return (
+      this.db
+        .prepare('SELECT * FROM dots ORDER BY createdAt')
+        .all()
+        // Learning columns are left from the Intelligence releases; unused.
+        .map(
+          ({ learningContainerId: _l, skillDeliveryEnabled: _s, ...row }) => ({
+            ...row,
+            spaceIds: this.db
+              .prepare(
+                'SELECT spaceId FROM dot_spaces WHERE dotId=? ORDER BY spaceId',
+              )
+              .all(String(row.id))
+              .map((grant) => String(grant.spaceId)),
+            researchAllowed: !!row.researchAllowed,
+            memoryAllowed: !!row.memoryAllowed,
+            appsAllowed: !!row.appsAllowed,
+            composioToolkits: JSON.parse(String(row.composioToolkits ?? '[]')),
+            monthlyTokenCap:
+              row.monthlyTokenCap == null ? null : Number(row.monthlyTokenCap),
+            delegateDotIds: JSON.parse(String(row.delegateDotIds ?? '[]')),
+          }),
+        ) as unknown as Dot[]
+    );
   }
   dot(id: string) {
     return this.dots().find((dot) => dot.id === id);
@@ -142,13 +146,10 @@ export class WorkspaceStore {
     researchAllowed: boolean,
     memoryAllowed: boolean,
     spaceIds: string[] = [spaceId],
-    learningContainerId: string | null = null,
-    skillDeliveryEnabled = false,
     appsAllowed = false,
     composioToolkits: string[] = [],
   ): Dot {
     this.validateSpaceAccess(spaceId, spaceIds);
-    validateLearningSettings(learningContainerId, skillDeliveryEnabled);
     const dot: Dot = {
       id: randomUUID(),
       spaceId,
@@ -161,15 +162,13 @@ export class WorkspaceStore {
       composioToolkits: [...new Set(composioToolkits)].sort(),
       composioSessionId: null,
       composioPolicyHash: null,
-      learningContainerId,
-      skillDeliveryEnabled,
       createdAt: Date.now(),
     };
     this.db.exec('BEGIN');
     try {
       this.db
         .prepare(
-          'INSERT INTO dots (id, spaceId, name, instructions, researchAllowed, memoryAllowed, createdAt, learningContainerId, skillDeliveryEnabled, appsAllowed, composioToolkits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO dots (id, spaceId, name, instructions, researchAllowed, memoryAllowed, createdAt, appsAllowed, composioToolkits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           dot.id,
@@ -179,8 +178,6 @@ export class WorkspaceStore {
           +researchAllowed,
           +memoryAllowed,
           dot.createdAt,
-          learningContainerId,
-          +skillDeliveryEnabled,
           +appsAllowed,
           JSON.stringify(dot.composioToolkits),
         );
@@ -218,8 +215,6 @@ export class WorkspaceStore {
     > & {
       spaceId?: string;
       spaceIds?: string[];
-      learningContainerId?: string | null;
-      skillDeliveryEnabled?: boolean;
     },
   ): Dot {
     const current = this.dot(id);
@@ -227,26 +222,17 @@ export class WorkspaceStore {
     const defaultSpace = patch.spaceId ?? current.spaceId;
     const spaceIds = patch.spaceIds ?? current.spaceIds;
     this.validateSpaceAccess(defaultSpace, spaceIds);
-    const learningContainerId =
-      patch.learningContainerId === undefined
-        ? (current.learningContainerId ?? null)
-        : patch.learningContainerId;
-    const skillDeliveryEnabled =
-      patch.skillDeliveryEnabled ?? current.skillDeliveryEnabled ?? false;
-    validateLearningSettings(learningContainerId, skillDeliveryEnabled);
     this.db.exec('BEGIN');
     try {
       this.db
         .prepare(
-          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, learningContainerId=?, skillDeliveryEnabled=?, appsAllowed=?, composioToolkits=? WHERE id=?',
+          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, appsAllowed=?, composioToolkits=? WHERE id=?',
         )
         .run(
           patch.name,
           patch.instructions,
           +patch.researchAllowed,
           +patch.memoryAllowed,
-          learningContainerId,
-          +skillDeliveryEnabled,
           +patch.appsAllowed,
           JSON.stringify([...new Set(patch.composioToolkits)].sort()),
           id,
@@ -314,9 +300,13 @@ export class WorkspaceStore {
   conversations(): Conversation[] {
     return this.db
       .prepare(
-        'SELECT * FROM thread_bindings WHERE ownerId=? ORDER BY createdAt DESC',
+        'SELECT id, dotId, ownerId, title, createdAt, source FROM thread_bindings WHERE ownerId=? ORDER BY createdAt DESC',
       )
-      .all(this.ownerId) as unknown as Conversation[];
+      .all(this.ownerId)
+      .map(({ source, ...row }) => ({
+        ...row,
+        ...(source ? { source } : {}),
+      })) as unknown as Conversation[];
   }
   /**
    * Each Dot is one continuing chat. Its main conversation is the latest
@@ -326,6 +316,8 @@ export class WorkspaceStore {
     return this.conversations().find(
       (thread) =>
         thread.dotId === dotId &&
+        !thread.source &&
+        // Slack threads from before threads recorded their source.
         thread.title !== 'Slack conversation' &&
         !this.isDelegateThread(thread.id),
     );
@@ -339,29 +331,27 @@ export class WorkspaceStore {
     }
     return result;
   }
-  bindThread(id: string, dotId: string, title: string): Conversation {
-    const dot = this.dot(dotId);
-    if (!dot) throw new Error('Dot not found.');
+  /** `source` marks a background thread, such as one mirroring Slack. */
+  bindThread(
+    id: string,
+    dotId: string,
+    title: string,
+    source?: string,
+  ): Conversation {
+    if (!this.dot(dotId)) throw new Error('Dot not found.');
     const value: Conversation = {
       id,
       dotId,
       ownerId: this.ownerId,
       title,
       createdAt: Date.now(),
-      learningContainerId: dot.learningContainerId ?? null,
+      ...(source ? { source } : {}),
     };
     this.db
       .prepare(
-        'INSERT INTO thread_bindings (id, dotId, ownerId, title, createdAt, learningContainerId) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO thread_bindings (id, dotId, ownerId, title, createdAt, source) VALUES (?, ?, ?, ?, ?, ?)',
       )
-      .run(
-        id,
-        dotId,
-        this.ownerId,
-        title,
-        value.createdAt,
-        value.learningContainerId ?? null,
-      );
+      .run(id, dotId, this.ownerId, title, value.createdAt, source ?? null);
     return value;
   }
   retitleThread(id: string, title: string) {

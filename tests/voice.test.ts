@@ -21,7 +21,6 @@ function fixture() {
     voiceKey: 'test-secret',
     voiceModel: 'voice-model',
     voiceName: 'marin',
-    runtimeUrl: '',
     slackUsers: [],
   };
   const turn = vi.fn(
@@ -182,7 +181,7 @@ it('defers paused transcript synchronization and resumes it once without a dupli
     'Speech saved while paused',
   );
   expect(f.workspace.call(call.id).error).toContain(
-    'pending Intelligence sync',
+    'pending conversation sync',
   );
   f.store.updateSettings({ paused: false });
   await f.voice.resumePending();

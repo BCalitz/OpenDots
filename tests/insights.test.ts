@@ -36,7 +36,6 @@ function start() {
       apiKey: 'fixture',
       model: 'custom-model',
       baseUrl: 'https://unused.invalid/v1',
-      runtimeUrl: '',
       voiceName: 'marin',
       slackUsers: [],
     },
