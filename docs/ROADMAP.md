@@ -173,7 +173,7 @@ interface InboxEvent {
 - **Slack** uses Socket Mode (an outbound WebSocket) and the Web API with no new dependency, configured by `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`. `SLACK_CHANNEL_NAME` is gone.
 - **History window:** each Dot is one continuing chat, so the model now sees a recent window of it (80 messages / about 120,000 characters, starting at a user message) instead of the whole thread.
 - **Headless turns** wait for a running chat on the same thread instead of failing.
-- **Intelligence** conversations are not imported. Learning container settings are removed until phase 8. The SDK's runtime telemetry (`oss.runtime.instance_created`, `oss.runtime.copilot_request_created`) is gone, so the signup and daily-usage PostHog queries only cover earlier releases; setup telemetry continues.
+- **Intelligence** conversations are not imported (see [Open questions](#open-questions)). Learning container settings are removed until phase 8. The SDK's runtime telemetry (`oss.runtime.instance_created`, `oss.runtime.copilot_request_created`) is gone, so the signup and daily-usage PostHog queries only cover earlier releases; setup telemetry continues.
 - **Web bundle:** 2,783 kB to 1,094 kB (804 kB to 334 kB gzipped).
 
 **Goal:** no `@copilotkit/*` package is left in `package.json` or `mobile/package.json`. Chat, tools, approvals, voice, schedules, delegation, the mobile app and Slack keep working, and existing local threads still open.
@@ -372,4 +372,5 @@ Estimates assume one TypeScript developer working in this repo and exclude multi
 - Which ticket system comes first, and does it have an MCP server or API token we can use?
 - Gmail or Outlook first?
 - Which messaging tool matters most: Teams, WhatsApp, or something else?
+- Phase 4 does not import conversations stored in Intelligence. Is a one-time import tool needed for installs that used it?
 - One "Chief of staff" Dot that triages everything, or route each event to the specialist Dot that owns that area?
