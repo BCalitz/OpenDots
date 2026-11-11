@@ -500,3 +500,53 @@ it('renames, archives and deletes threads for the owner only', () => {
   expect(runner.deleteThread('t')).toBe(true);
   expect(runner.thread('t')).toBeUndefined();
 });
+
+it('reports setup activation once an answer streams, and failures by class', async () => {
+  const capture = vi.fn();
+  const make = (overrides = {}) => {
+    const f = fixture(':memory:', overrides);
+    const engine = new DotEngine({
+      store: f.store,
+      workspace: f.workspace,
+      runner: f.runner,
+      config: { ...config, ...overrides },
+      setupTelemetry: { capture } as never,
+    });
+    return { ...f, engine };
+  };
+  const ok = make();
+  vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(say('Hello'));
+  await ok.engine.start({ threadId: ok.thread.id, message: { content: 'Hi' } })
+    .done;
+  expect(capture).toHaveBeenCalledWith({ kind: 'activated' });
+
+  capture.mockClear();
+  const unconfigured = make({ model: undefined });
+  await unconfigured.engine.start({
+    threadId: unconfigured.thread.id,
+    message: { content: 'Hi' },
+  }).done;
+  expect(capture.mock.calls).toEqual([
+    [
+      {
+        kind: 'setup_failed',
+        step: 'setup_required',
+        error_class: 'configuration_missing',
+      },
+    ],
+  ]);
+
+  capture.mockClear();
+  const failing = make();
+  vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    new Response('nope', { status: 500 }),
+  );
+  await failing.engine.start({
+    threadId: failing.thread.id,
+    message: { content: 'Hi' },
+  }).done;
+  expect(capture).toHaveBeenCalledWith(
+    expect.objectContaining({ error_class: 'assistant_run_failed' }),
+  );
+  expect(capture).not.toHaveBeenCalledWith({ kind: 'activated' });
+});

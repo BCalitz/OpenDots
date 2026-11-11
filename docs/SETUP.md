@@ -1,6 +1,6 @@
 # Running the template
 
-OpenDots runs a React app and a Node server. The server stores pages, Space and Dot configuration, and thread bindings in SQLite and connects to your configured conversation, model, and messaging services.
+OpenDots runs a React app and a Node server. The server stores pages, Space and Dot configuration, and thread bindings in SQLite and stores conversations in the same SQLite database, and connects to your configured model and messaging services.
 
 ## Local development
 
@@ -25,68 +25,33 @@ npm start
 
 Open http://127.0.0.1:4310. Keep the server running for background work.
 
-## Conversation services
+## Conversations
 
-By default OpenDots stores conversations itself, in the same SQLite file as pages and workspace metadata (`DATABASE_PATH`). You only need an OpenAI-compatible model key; no CopilotKit account is required. History survives restarts, refreshing during an answer reconnects to it, and scheduled tasks and voice calls write into the same conversation.
+OpenDots stores conversations itself, in the same SQLite file as pages and workspace metadata (`DATABASE_PATH`). You only need an OpenAI-compatible model key. History survives restarts, refreshing during an answer reconnects to it, and a turn started elsewhere (a schedule, a voice call, another device) appears live in an open chat. Back up `DATABASE_PATH` to back up conversations.
 
-To use CopilotKit Intelligence instead, set `CONVERSATION_BACKEND=intelligence` and choose local evaluation below, a licensed [self-hosted deployment](https://docs.copilotkit.ai/intelligence/self-hosting), or hosted Intelligence. Intelligence is required for Slack Channels and Automatic Learning. When `CONVERSATION_BACKEND` is unset, OpenDots uses Intelligence if an Intelligence key is present, so existing installs keep reaching their stored conversations. Conversations are not copied between backends. See [Data and privacy](../README.md#data-and-privacy).
+Each Dot has one continuing chat. The model sees a recent window of it (about the last 80 messages, up to roughly 120,000 characters, starting at a user message) rather than all of it, so long-running chats keep working and their cost stays bounded.
 
-### Hosted Intelligence
-
-To get a hosted project key, run these commands in the OpenDots folder after `cp .env.example .env`:
-
-```sh
-npx copilotkit@latest login
-npx copilotkit@latest project select
-```
-
-`login` opens the browser to sign in or create an account. `project select` lets you select or create a project, and writes a project-scoped key to `.env` as `CPK_INTELLIGENCE_API_KEY`. Keep the generated `CPK_TELEMETRY_ID` together with the project key when deploying, including Docker. It connects SDK telemetry to the selected Intelligence account; see [signup and usage tracking](TELEMETRY.md). It removes an `INTELLIGENCE_API_KEY` line, so that the file holds one credential. Use the same project for Slack and Automatic Learning below.
-
-Do not run `copilotkit onboard` in this folder. Onboarding is for apps that do not have CopilotKit yet. OpenDots already has its integration.
-
-### Local Intelligence evaluation
-
-The [local evaluation preview](https://docs.copilotkit.ai/intelligence/self-hosting-local) runs Intelligence in Docker Desktop on macOS. Allocate at least 4 CPUs, 12 GiB RAM, and 40 GiB free storage. OpenDots needs Node.js 24. A CopilotKit account is required; the free Developer plan qualifies for a renewable 30-day evaluation license. This is not a production installation.
-
-Run from the OpenDots folder after `cp .env.example .env`, with Docker Desktop running:
-
-```sh
-npx copilotkit@latest login
-npx copilotkit@latest local setup
-npx copilotkit@latest local connect
-npx copilotkit@latest local connect --approve-connection
-```
-
-`local connect` previews the changes; the approved command writes the local API URL, gateway WebSocket URL, and project key to `.env`. OpenDots accepts these directly. Do not run `project select` afterward: it selects a hosted project. Add `OPENAI_API_KEY` and `OPENAI_MODEL` for the app, then restart `npm run dev`. Setup's Learning model is separate from the app's model.
-
-Send a message and verify it appears in the local dashboard (`npx copilotkit@latest local login`). Use `local status` to inspect service health. Threads, Automatic Learning, and Channels are included; User Memory and Product Analytics are not. Channels require a public HTTPS address reachable by Slack or Teams.
-
-To restore the previous app connection, run `npx copilotkit@latest local cancel` and restart the app. This keeps the stack and its data. Use `local stop` to stop the stack, or `local renew` to renew its evaluation license. Existing hosted conversations are not copied into the local project.
-
-For this preview, run OpenDots directly on your Mac with `npm run dev`; Intelligence runs in Docker. The CLI's `localhost` URLs do not work from an OpenDots container. A containerized app needs an API address reachable from its container and a gateway address reachable from both the server and the browser, because the runtime advertises that gateway to browser clients. Changing the gateway to a Docker-only hostname is not sufficient.
+Earlier releases could store conversations in CopilotKit Intelligence (`CONVERSATION_BACKEND=intelligence`). That option is gone: conversations kept there are not imported, and the server prints a notice at startup naming any `INTELLIGENCE_*`, `CPK_INTELLIGENCE_API_KEY`, `CONVERSATION_BACKEND` or `SLACK_CHANNEL_NAME` setting that is still present, so you can remove it.
 
 ### Connection settings
 
 Edit `.env` on the server and restart after changes:
 
-| Variable                                             | Purpose                                                                |
-| ---------------------------------------------------- | ---------------------------------------------------------------------- |
-| `CONVERSATION_BACKEND`                               | `local` (SQLite, no account) or `intelligence`                         |
-| `INTELLIGENCE_API_KEY`                               | Project credential for Intelligence conversations                      |
-| `INTELLIGENCE_API_URL`                               | API endpoint override for your Intelligence deployment                 |
-| `INTELLIGENCE_GATEWAY_WS_URL`, `INTELLIGENCE_WS_URL` | Gateway WebSocket override (CLI name preferred; legacy name supported) |
-| `OPENAI_API_KEY`, `OPENAI_MODEL`                     | Model credential and model identifier                                  |
-| `OPENAI_BASE_URL`                                    | Compatible model API endpoint                                          |
-| `OWNER_ID`                                           | Stable identity used for this deployment's conversations               |
-| `DATABASE_PATH`                                      | SQLite file containing pages, workspace and work metadata              |
-| `OWNER_TOKEN`                                        | Application access token; required for external bindings               |
-| `APP_ORIGIN`                                         | Comma-separated exact browser origins for a proxy or custom domain     |
+| Variable                         | Purpose                                                            |
+| -------------------------------- | ------------------------------------------------------------------ |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Model credential and model identifier                              |
+| `OPENAI_BASE_URL`                | Compatible model API endpoint                                      |
+| `AGENT_RUN_TIMEOUT_MS`           | Longest a turn may run, excluding time spent waiting for approvals |
+| `OWNER_ID`                       | Stable identity used for this deployment's conversations           |
+| `DATABASE_PATH`                  | SQLite file with conversations, pages, workspace and work metadata |
+| `OWNER_TOKEN`                    | Application access token; required for external bindings           |
+| `APP_ORIGIN`                     | Comma-separated exact browser origins for a proxy or custom domain |
 
-`npx copilotkit project select` deletes an `INTELLIGENCE_API_KEY` line and writes the same credential as `CPK_INTELLIGENCE_API_KEY`. The server reads either name. A non-empty `CPK_INTELLIGENCE_API_KEY` takes precedence over `INTELLIGENCE_API_KEY`.
+Provider credentials belong in `.env`, not client-side variables or source code.
 
-A non-empty `INTELLIGENCE_GATEWAY_WS_URL` takes precedence over `INTELLIGENCE_WS_URL`. Without either WebSocket override, OpenDots uses the hosted gateway. Set both the API and gateway endpoints when connecting a self-hosted deployment.
+### Approvals
 
-The model environment variable names follow the configured provider adapter. Provider credentials belong in `.env`, not client-side variables or source code. Conversation history lives in the configured Intelligence project; copying the SQLite file alone does not back up that history.
+Tools that change things wait for you. When a Dot wants to save a page you asked to review, or run a connected-service tool set to **Ask first**, the chat shows a card with exactly what will happen. **Approve** runs it once on the server and the Dot carries on; **Decline** tells the Dot not to. The Dot waits up to 30 minutes, and the wait does not count toward `AGENT_RUN_TIMEOUT_MS`. Cards work the same in the web and mobile apps, and survive a page refresh. Stopping the answer, or restarting the server, closes any request still waiting. Schedules, voice and Slack cannot ask, so those tools stay unavailable there.
 
 ## Pages and page conversations
 
@@ -94,11 +59,11 @@ Select a Space to open its page library. Search for a document, switch between g
 
 Page actions include creating subpages, moving a page within its Space, deleting a page (its subpages move up to the deleted page's parent), and editing Markdown source. Existing documents with unsupported visual-editor syntax stay in source mode to preserve their content. Manual editing works without conversation credentials.
 
-Open a page's chat and choose a specialist with access to that Space. Grant access from the Dot’s settings in the sidebar. The server creates or reuses a CopilotKit Thread for that page and specialist. The Dot receives the current saved page as context and can read, create, and edit pages in its authorized Spaces. The page conversation uses that page’s Space by default; other chats use the Dot’s default page destination. Save your manual edits before asking it to revise the document. Revision checks reject stale writes; a conflict keeps your local draft available for recovery. Failed saves stop automatic retries until you retry or resolve the conflict, so a disconnected session does not silently replace newer content.
+Open a page's chat and choose a specialist with access to that Space. Grant access from the Dot’s settings in the sidebar. The server creates or reuses a conversation for that page and specialist. The Dot receives the current saved page as context and can read, create, and edit pages in its authorized Spaces. The page conversation uses that page’s Space by default; other chats use the Dot’s default page destination. Save your manual edits before asking it to revise the document. Revision checks reject stale writes; a conflict keeps your local draft available for recovery. Failed saves stop automatic retries until you retry or resolve the conflict, so a disconnected session does not silently replace newer content.
 
 Use the conversation's save-to-page action to create a document from its saved text history. This requires a working conversation service. Pages retain a link to the source conversation, and page links in chat open the document workspace.
 
-Back up both storage layers: SQLite contains page content and thread bindings; the Intelligence project contains conversation history. The template does not include multi-user page sharing, realtime collaboration, file uploads, or arbitrary interactive embeds.
+Back up `DATABASE_PATH`: it contains page content and conversation history. The template does not include multi-user page sharing, realtime collaboration, file uploads, or arbitrary interactive embeds.
 
 ## Browser tool
 
@@ -131,45 +96,66 @@ For a separate browser, persistent files, and optional shell for each specialist
 
 ## Slack
 
-OpenDots uses `@copilotkit/channels` with a managed Slack connection, following the runtime and channel pattern in [OpenTag](https://github.com/CopilotKit/OpenTag). The application declares the channel and its specialist agent; Intelligence manages the Slack adapter and delivery. You do not need a separate Slack webhook server or Socket Mode connection in OpenDots.
+A Dot can answer in Slack. OpenDots connects with [Socket Mode](https://api.slack.com/apis/socket-mode): the server opens an outbound connection to Slack, so it needs no public address or webhook. Replies use Slack's Web API.
 
-The CLI project-selection commands below are for hosted Intelligence. For local evaluation, configure Channels in the local dashboard and follow the [local Channels requirements](https://docs.copilotkit.ai/intelligence/self-hosting-local#connect-slack-or-microsoft-teams), including a public HTTPS address. Do not replace the local project key with `project select`.
+### Create the Slack app
 
-### Create the managed channel
+1. At [api.slack.com/apps](https://api.slack.com/apps), create an app **from a manifest** in your workspace and paste:
 
-Select the same Intelligence project used by this application, then create a uniquely named channel:
+   ```yaml
+   display_information:
+     name: OpenDots
+   features:
+     bot_user:
+       display_name: OpenDots
+     app_home:
+       messages_tab_enabled: true
+       messages_tab_read_only_enabled: false
+   oauth_config:
+     scopes:
+       bot:
+         - app_mentions:read
+         - chat:write
+         - channels:history
+         - groups:history
+         - im:history
+   settings:
+     event_subscriptions:
+       bot_events:
+         - app_mention
+         - message.channels
+         - message.groups
+         - message.im
+     socket_mode_enabled: true
+   ```
 
-```sh
-npx --yes copilotkit@latest project select
-npx --yes copilotkit@latest channels add --name opendots --display-name "OpenDots" --adapter slack --json
-```
-
-Follow the CLI's returned `nextAction` to create the Slack app from its generated manifest, supply credentials through the managed setup flow, and run its `resumeCommand`. A `blocked` response means a Slack-console step is still needed; a `failed` response must be resolved before continuing. Keep Socket Mode off. Install or reinstall the generated app in your workspace with its requested scopes. Use a distinct channel name for separate deployments so they do not compete for deliveries.
-
-See [OpenTag's setup guide](https://github.com/CopilotKit/OpenTag/blob/main/setup.md) for the Slack-console walkthrough. Slack bot tokens and signing secrets belong in the managed adapter configuration, not the browser or this application's `.env`.
+2. Under **Basic Information → App-Level Tokens**, create a token with the `connections:write` scope. This is `SLACK_APP_TOKEN` (`xapp-…`).
+3. Install the app to your workspace. The **Bot User OAuth Token** is `SLACK_BOT_TOKEN` (`xoxb-…`).
+4. Invite the bot to the channels where you want to use it.
 
 ### Connect a specialist
 
-Configure the application server's `.env` alongside its Intelligence and model credentials:
-
 ```dotenv
-SLACK_CHANNEL_NAME=opendots
+SLACK_BOT_TOKEN=xoxb-REPLACE
+SLACK_APP_TOKEN=xapp-REPLACE
 SLACK_TEAM_ID=T_REPLACE_WITH_WORKSPACE_ID
 SLACK_USER_IDS=U_REPLACE_WITH_YOUR_USER_ID
 SLACK_DOT_ID=REPLACE_WITH_DOT_ID
 ```
 
-`SLACK_CHANNEL_NAME` must exactly match the managed channel name, not a Slack conversation name such as `#general`. OpenTag calls this setting `INTELLIGENCE_CHANNEL_NAME`; OpenDots uses `SLACK_CHANNEL_NAME`. `SLACK_TEAM_ID` and the comma-separated `SLACK_USER_IDS` restrict who may invoke the specialist. `SLACK_DOT_ID` selects an existing Dot; find IDs in the authenticated `/api/workspace` response. If omitted, it defaults to the initial Dot.
+`SLACK_TEAM_ID` and the comma-separated `SLACK_USER_IDS` restrict who may talk to the specialist. `SLACK_DOT_ID` selects an existing Dot; find IDs in the authenticated `/api/workspace` response. If omitted, it defaults to the initial Dot. Keep both tokens on the server.
 
-Restart OpenDots after changing environment settings and inspect Slack status in Settings & setup. Channel activation must complete before trying a message. Mention the installed bot in a channel it can access; subsequent messages in that followed thread go to the same specialist. Unrelated threads, bot events, edits, deletions, and users outside the allowlist do not start agent runs. Editing a message to add a mention is not supported; send a new message instead.
+Restart OpenDots and check Slack status in Settings & setup: `connecting`, then `online`. `activation_failed` means Slack rejected a token at startup.
+
+Mention the bot in a channel, or send it a direct message, to start a conversation. Each Slack thread is one OpenDots conversation: replies in that thread continue it, one answer at a time, and you can open it in the app. Unrelated threads, bot messages, edits, deletions and users outside the allowlist are ignored. When OpenDots is paused, the bot says so instead of answering. Errors never include details in Slack.
 
 This template maps permitted Slack users to the single OpenDots owner. Replies are visible to the Slack conversation's audience, so choose the specialist's Space access and permitted tools accordingly. This is not a multi-user identity model.
 
 ### Verify your deployment
 
-From an allowed user, mention the bot and verify a response in the same Slack thread. Reply in that thread and confirm continuity. Check that an unrelated thread and an unapproved user cannot invoke it. Pause the assistant in OpenDots and verify that a permitted request receives a paused notice. Check Settings & setup for channel connection failures.
+From an allowed user, mention the bot and verify a reply in the same thread. Reply in that thread and confirm continuity. Check that an unrelated thread and an unapproved user get no answer. Pause the assistant in OpenDots and verify that a permitted request receives the paused notice.
 
-Local tests exercise channel behavior with fixtures. A live Slack mention/reply remains unverified until you provision the managed connection and model credentials. [Channels SDK documentation](https://github.com/CopilotKit/channels-sdk) describes extending the adapter and channel behavior.
+Local tests exercise the adapter and the channel service with a fake Slack connection. A live mention and reply remain unverified until you connect your own Slack app.
 
 ## Calls
 
@@ -196,49 +182,7 @@ For remote hosting, configure an HTTPS reverse proxy and the matching `APP_ORIGI
 
 ## Automatic Learning
 
-OpenDots connects [CopilotKit Automatic Learning](https://docs.copilotkit.ai/learning)
-to individual Dots. It uses the server-side Intelligence credential
-(`CPK_INTELLIGENCE_API_KEY` or `INTELLIGENCE_API_KEY`) and optional
-`INTELLIGENCE_API_URL`; no additional model key or frontend key is needed.
-
-1. Open **Learning** in the same Intelligence project and create a container for
-   one focused workflow, such as `research-workflow`. IDs use 1–64 lowercase
-   letters, numbers, and single hyphens.
-2. In OpenDots, edit the Dot and enter that ID under **Automatic Learning**.
-   Saving the ID configures routing; it does not create or verify the remote container.
-3. Start new conversations and complete related workflows. Each conversation keeps
-   the container assigned when it was created. Existing conversations, including
-   ones created before this integration, are not enrolled retroactively. Changing
-   or clearing the Dot's ID affects only new conversations. This applies to page
-   chat, scheduled and voice compute in those conversations, and new Slack threads.
-4. In Intelligence, inspect the evidence, run Learning manually or use its schedule,
-   and review and publish proposed skills. The default automatic threshold is 15
-   eligible threads; use the readiness count shown in your deployment.
-5. Enable **Skill delivery** on the Intelligence container, then enable **Use
-   published skills** in the Dot's settings. Start a new turn in an enrolled
-   conversation. BuiltInAgent loads the latest verified published catalog; its
-   TanStack AI factory runs the model and exposes `copilotkit_load_skill` and `copilotkit_read_skill_file`.
-   The model decides which relevant skills to load. Check the run's tool calls to
-   verify actual use; saving settings alone does not establish connectivity.
-
-Skill delivery always uses the conversation's original container, even after the
-Dot is pointed at another container. The Dot's delivery checkbox applies to all its
-conversations. Unchecking it stops delivery on subsequent turns; changing Learning
-settings also stops active work. Conversations without a container do not request
-skills. Existing research, memory, page, and computer permissions still apply.
-
-Ingestion and delivery are separate. Clearing the container does not unenroll older
-conversations; pause Learning in Intelligence to stop its analysis. Turning off
-delivery does not stop evidence collection. A delivery denial or an unavailable
-initial skill snapshot fails the turn rather than silently continuing without the
-configured skills. Restore delivery or uncheck **Use published skills** to continue
-without them. Skills require review and publication in Intelligence; OpenDots does
-not automatically approve them.
-
-The integration uses an explicit container list, so ambient
-`CPK_INTELLIGENCE_LEARNING_CONTAINER_ID` and `CPK_INTELLIGENCE_SKILLS_REVISION`
-variables do not override a conversation's configuration. Self-hosted Intelligence
-must support the [skill delivery endpoints](https://docs.copilotkit.ai/intelligence/learned-skills).
+Automatic Learning was a CopilotKit Intelligence feature and is not available now that conversations are stored locally. An OpenDots learning loop that drafts skills for your review is planned (see [ROADMAP.md](ROADMAP.md), phase 8).
 
 ## Development checks
 
@@ -250,4 +194,4 @@ npm test
 npm run build
 ```
 
-Automated tests use service fixtures. Live model, Intelligence, Slack, and voice verification requires your own configured services.
+Automated tests use service fixtures. Live model, Slack, and voice verification requires your own configured services.

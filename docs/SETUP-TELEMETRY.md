@@ -2,7 +2,7 @@
 
 OpenDots tracks its existing browser setup flow through the server's CopilotKit ingest contract. This is the web distribution; OpenDots has no native installer, engine installation, Windows prerequisite, image-pull wizard, or model/harness picker. Those desktop events are not applicable.
 
-Telemetry is enabled by default. Either `DO_NOT_TRACK=true|1` or `COPILOTKIT_TELEMETRY_DISABLED=true|1` disables the setup emitter and runtime. Restart after changing the server environment. Opt-out deletes the setup tracking row, including its pending queue and fallback installation identity. It does not change the owner, conversations, or application settings. Sampling rate zero also suppresses setup events.
+Telemetry is enabled by default. Either `DO_NOT_TRACK=true|1` or `COPILOTKIT_TELEMETRY_DISABLED=true|1` disables setup telemetry. Restart after changing the server environment. Opt-out deletes the setup tracking row, including its pending queue and fallback installation identity. It does not change the owner, conversations, or application settings. Sampling rate zero also suppresses setup events.
 
 | Event                           | Closed properties                                                                                                    |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -17,7 +17,7 @@ The authenticated `/api/setup-telemetry` route accepts only strict step-view and
 
 Metadata names OpenDots, `opendots_distribution=web`, numeric release `opendots_version=0.1.0`, `runtime_env=node`, server platform (`macos|windows|linux|other`) and architecture (`aarch64|x86_64|other`), and a random persistent `installation_id`. Server platform identifies the server, including its container; it does not infer the browser OS. There are no prompts, answers, raw errors, keys, URLs, file paths, model names, emails, owner IDs, browser user agents, or machine-derived identifiers in setup events.
 
-The current nonblank `CPK_TELEMETRY_ID` takes precedence as the ingest header and runtime `telemetryId`, preserving the CLI project/account identity. If absent, both use the persistent random installation UUID. The installation UUID remains separate metadata even when the CLI identity is present. Removing the CLI variable returns to the installation fallback. The runtime receives matching metadata through `telemetryProperties`; no PostHog SDK, public capture key, or separate signup event is added.
+A nonblank `CPK_TELEMETRY_ID` takes precedence as the ingest header. If absent, the persistent random installation UUID is used. The installation UUID remains separate metadata even when `CPK_TELEMETRY_ID` is present. Removing the variable returns to the installation fallback. No PostHog SDK, public capture key, or separate signup event is added.
 
 Events persist in the existing SQLite database before delivery. The queue holds at most 256 events, dropping oldest entries on overflow. UUID event IDs and Unix-second timestamps survive replay and retries. Delivery starts with server startup, retries every 15 seconds, and preserves events after a network or HTTP failure. Each pass has a two-second budget with a 1.5-second per-request timeout; shutdown delivery therefore finishes within approximately 3.5 seconds and leaves remaining events for restart. Diagnostics use bounded categories and never include transport exception details.
 
@@ -26,8 +26,8 @@ Browser `pagehide` sends a best-effort authenticated keepalive abandonment event
 Local regression coverage includes offline replay across reopened databases, stable event IDs/identity, timestamp units, queue bounds, both opt-out variables and values, fallback/CLI precedence, recovered abandonment, activation deduplication, agent success/startup failures, assistant-role gating, timeout/abort suppression, bounded shutdown, schema rejection, and authenticated origin-protected routing. Tests intercept transports or inject a local recorder and do not send validation events to production:
 
 ```sh
-DO_NOT_TRACK=1 npm exec vitest run tests/setup-telemetry.test.ts tests/dot-agent-channel.test.ts tests/telemetry.test.ts tests/app.test.ts
+DO_NOT_TRACK=1 npm exec vitest run tests/setup-telemetry.test.ts tests/engine.test.ts tests/app.test.ts
 npm run typecheck
 ```
 
-Production delivery and PostHog attribution are separate from these local checks; see [TELEMETRY.md](TELEMETRY.md) for live validation and reporting.
+Production delivery is separate from these local checks; see [TELEMETRY.md](TELEMETRY.md) for reporting.

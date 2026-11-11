@@ -2,20 +2,21 @@
 
 This plan takes OpenDots from "needs a CopilotKit account" to a self-contained personal assistant that watches your work, tells you what matters, and offers to prepare or handle it. Each phase ships something usable on its own, and each one adds a seam the next phase plugs into.
 
-Phase 1 replaced the hosted Intelligence service. Phase 4 removes the CopilotKit SDK itself (`@copilotkit/runtime`, `@copilotkit/react-core`, `@copilotkit/core`, `@copilotkit/channels`), so OpenDots runs on its own code plus a model provider. Managed Channels stay out of scope.
+Phase 1 replaced the hosted Intelligence service. Phase 4 removed the CopilotKit SDK itself (`@copilotkit/runtime`, `@copilotkit/react-core`, `@copilotkit/core`, `@copilotkit/channels`), so OpenDots runs on its own code plus a model provider.
 
 ## Where we are today
 
-| Piece                               | Provided by                    | Code                                       |
-| ----------------------------------- | ------------------------------ | ------------------------------------------ |
-| Conversation storage (Threads)      | CopilotKit Intelligence (paid) | `src/server/platform.ts`                   |
-| Live streaming and resume (Gateway) | CopilotKit Intelligence        | `INTELLIGENCE_GATEWAY_WS_URL`              |
-| Headless turns (voice, schedules)   | `IntelligenceAgent`            | `src/server/headless.ts`                   |
-| Automatic Learning                  | CopilotKit Intelligence        | `src/server/learning.ts`                   |
-| Agent loop, tools, approvals        | Open-source SDK + our code     | `dot-agent.ts`, `*-tools.ts`, `Chat.tsx`   |
-| Pages, Dots, schedules, MCP, push   | Our code + SQLite              | `store.ts`, `workspace.ts`, `push.ts`, ... |
+| Piece                                 | Provided by            | Code                                                    |
+| ------------------------------------- | ---------------------- | ------------------------------------------------------- |
+| Conversation storage, streaming, stop | Our code + SQLite      | `src/server/engine/thread-runner.ts`, `chat-routes.ts`  |
+| Agent loop, tools                     | Our code + TanStack AI | `src/server/engine/index.ts`, `engine/tools.ts`         |
+| Approvals                             | Our code + SQLite      | `src/server/engine/approvals.ts`                        |
+| Web and mobile chat client            | Our code               | `src/shared/thread-client.ts`, `useThread.ts`           |
+| Slack                                 | Our code (Socket Mode) | `src/server/channels/`                                  |
+| Event engine, insights, delegation    | Our code + SQLite      | `src/server/inbox/`, `insight-routes.ts`, `platform.ts` |
+| Pages, Dots, schedules, MCP, push     | Our code + SQLite      | `store.ts`, `workspace.ts`, `push.ts`, ...              |
 
-Chat refuses to start without `CPK_INTELLIGENCE_API_KEY` (`Platform.requireReady`).
+No CopilotKit package or account is needed. `@ag-ui/core` remains for event types.
 
 ## Where we are going
 
@@ -165,7 +166,15 @@ interface InboxEvent {
 
 ## Phase 4: Own the engine (remove CopilotKit)
 
-**Status:** next.
+**Status:** implemented. See `src/server/engine/` (`DotEngine`, `ThreadRunner`, `Approvals`, `Tool`), `src/server/chat-routes.ts`, `src/shared/thread-client.ts`, `src/server/channels/` and `tests/engine.test.ts`, `tests/approvals.test.ts`, `tests/channels.test.ts`, `tests/thread-events.test.ts`.
+
+- **Streaming:** `GET /api/chat/:threadId/events` replays the thread's history, sends a `ready` frame, then stays open for every later event, including turns started elsewhere (schedules, voice, another device). There is no `after=<seq>` parameter: stored events are compacted when a run ends, which renumbers them, so a reconnect replays the (compacted) history instead.
+- **Approvals** wait up to 30 minutes and pause the turn's time limit while waiting. Only chat turns can ask; schedules, voice, delegation and Slack still cannot run gated tools. Stopping a turn or restarting the server closes waiting requests.
+- **Slack** uses Socket Mode (an outbound WebSocket) and the Web API with no new dependency, configured by `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`. `SLACK_CHANNEL_NAME` is gone.
+- **History window:** each Dot is one continuing chat, so the model now sees a recent window of it (80 messages / about 120,000 characters, starting at a user message) instead of the whole thread.
+- **Headless turns** wait for a running chat on the same thread instead of failing.
+- **Intelligence** conversations are not imported. Learning container settings are removed until phase 8. The SDK's runtime telemetry (`oss.runtime.instance_created`, `oss.runtime.copilot_request_created`) is gone, so the signup and daily-usage PostHog queries only cover earlier releases; setup telemetry continues.
+- **Web bundle:** 2,783 kB to 1,094 kB (804 kB to 334 kB gzipped).
 
 **Goal:** no `@copilotkit/*` package is left in `package.json` or `mobile/package.json`. Chat, tools, approvals, voice, schedules, delegation, the mobile app and Slack keep working, and existing local threads still open.
 
@@ -363,5 +372,4 @@ Estimates assume one TypeScript developer working in this repo and exclude multi
 - Which ticket system comes first, and does it have an MCP server or API token we can use?
 - Gmail or Outlook first?
 - Which messaging tool matters most: Teams, WhatsApp, or something else?
-- Should existing Intelligence conversations be imported into local threads, or start fresh?
 - One "Chief of staff" Dot that triages everything, or route each event to the specialist Dot that owns that area?

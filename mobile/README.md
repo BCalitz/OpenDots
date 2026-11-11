@@ -2,7 +2,7 @@
 
 An Expo / React Native app for iPhone and Android. It connects to your own OpenDots server and lets you:
 
-- chat with your Dots, with streaming replies over the same CopilotKit Intelligence runtime the web app uses;
+- chat with your Dots, with streaming replies over the same `/api/chat` routes the web app uses;
 - approve or decline connected-service actions (**Approve & run**) and page drafts (**Approve & save**);
 - get a push notification when a scheduled task finishes or fails, and tap it to open that conversation.
 

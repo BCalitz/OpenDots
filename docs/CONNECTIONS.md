@@ -18,7 +18,7 @@ When a Dot calls an **Ask first** tool, the tool does not run. The server stores
 
 The read-only hint comes from the server, so it is only a hint. Turn on **Ask first** for any tool you do not fully trust, and turn off tools a Dot does not need.
 
-Approval cards appear only in the web app. Through Slack or in scheduled runs, an **Ask first** tool tells the Dot to ask you to continue in the web app.
+Approval cards appear in chats in the web and mobile apps. The Dot waits up to 30 minutes for your decision, and the wait does not count toward the turn's time limit. Approving runs the exact stored call once on the server. Through Slack, voice or scheduled runs, an **Ask first** tool tells the Dot to ask you to continue in a chat.
 
 Changing a Dot's connections or tool settings stops that Dot's active turn.
 

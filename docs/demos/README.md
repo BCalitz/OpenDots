@@ -2,6 +2,8 @@
 
 Recorded from the local OpenDots app on September 29, 2026. The recordings use a dedicated `opendots` Intelligence project, a live `gpt-5.4-mini` model, and example content in a separate Launch studio Space. No customer data or credentials are shown.
 
+> These recordings predate phase 4, when chat still ran on the CopilotKit SDK and Intelligence. The flows look the same today; the descriptions below of how they were built are historical.
+
 | Recording                                    | Flow                                                                                | Duration   | Framing |
 | -------------------------------------------- | ----------------------------------------------------------------------------------- | ---------- | ------- |
 | [Chat to Space](chat-to-space.mp4)           | Ask Scout to browse, review the proposed draft, approve it, and open the saved page | 23 seconds | 150%    |
