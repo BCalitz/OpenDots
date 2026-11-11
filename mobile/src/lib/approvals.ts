@@ -5,7 +5,7 @@
  * tests/thread-events.test.ts fails if the two drift apart.
  */
 export const APPROVAL_EVENT = 'opendots.approval';
-export type ApprovalKind = 'page_review' | 'connection_action';
+export type ApprovalKind = 'page_review' | 'connection_action' | 'action';
 export type ApprovalStatus = 'pending' | 'approved' | 'declined' | 'expired';
 export interface ApprovalView {
   id: string;
@@ -16,6 +16,7 @@ export interface ApprovalView {
    * page_review: { title, content, spaceId }.
    * connection_action: { connection, title, description, arguments }, the
    * server's record of exactly what will run.
+   * action: { title, description, link? }, from the request_approval tool.
    */
   payload: unknown;
   status: ApprovalStatus;

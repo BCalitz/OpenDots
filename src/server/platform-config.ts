@@ -5,6 +5,17 @@ import type { ChannelStatus } from './channels/adapter.js';
 export const DEFAULT_AGENT_RUN_TIMEOUT_MS = 90_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+export function discoveryThresholdFromEnv(
+  env: Record<string, string | undefined>,
+): number | undefined {
+  const raw = env.DISCOVERY_THRESHOLD?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 1)
+    throw new Error('DISCOVERY_THRESHOLD must be a number from 0 to 1.');
+  return value;
+}
+
 export function agentRunTimeoutMsFromEnv(
   env: Record<string, string | undefined>,
 ): number {
@@ -57,6 +68,15 @@ export interface PlatformConfig extends WebConfig {
   browserUrl?: string;
   browserSecret?: string;
   composioApiKey?: string;
+  /**
+   * The discovery model, which only decides whether an item needs the
+   * owner. Any OpenAI-compatible endpoint; Ollama on this machine by default.
+   */
+  discoveryModel?: string;
+  discoveryBaseUrl?: string;
+  discoveryApiKey?: string;
+  /** Lowest confidence (0 to 1) that still flags an item. Default 0.6. */
+  discoveryThreshold?: number;
   voiceKey?: string;
   voiceModel?: string;
   voiceName: string;

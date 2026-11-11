@@ -5,6 +5,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 vi.mock('../src/client/api', () => ({ api: vi.fn() }));
 import { PageReviewCard } from '../src/client/PageReviewCard';
 import { ConnectionActionCard } from '../src/client/ConnectionActionCard';
+import { ApprovalRequestCard } from '../src/client/ApprovalRequestCard';
 import type { ApprovalView } from '../src/shared/approvals';
 
 const draft = { title: 'Brief', content: 'Evidence', spaceId: 'space' };
@@ -178,4 +179,57 @@ it('shows a service response and keeps old summary-only cards readable', () => {
   );
   expect(legacy).toContain('Send the weekly report');
   expect(legacy).toContain('Nothing ran.');
+});
+
+const request = {
+  title: 'Reply to ticket #42',
+  description: 'Post this reply on the ticket.',
+  output: 'Hi, the export is fixed.',
+  link: { url: 'https://tickets.example/42', label: 'Ticket #42' },
+};
+
+it('shows what a Dot will do, its output and a link, then sends the decision', async () => {
+  const onDecide = vi.fn(async () => undefined);
+  let root!: ReturnType<typeof create>;
+  await act(async () => {
+    root = create(
+      createElement(ApprovalRequestCard, {
+        approval: approval('action', request),
+        running: true,
+        onDecide,
+      }),
+    );
+  });
+  const shown = text(root.toJSON());
+  expect(shown).toContain('Reply to ticket #42');
+  expect(shown).toContain('Post this reply on the ticket.');
+  expect(shown).toContain('Hi, the export is fixed.');
+  expect(shown).toContain('Ticket #42');
+  const link = root.root.findByType('a');
+  expect(link.props.href).toBe('https://tickets.example/42');
+  expect(link.props.rel).toBe('noopener noreferrer');
+  expect(buttons(root)).toEqual(['Approve', 'Decline']);
+  const approve = root.root.findAll(
+    (node) => node.type === 'button' && text(node.props.children) === 'Approve',
+  )[0];
+  await act(async () => approve.props.onClick());
+  expect(onDecide).toHaveBeenCalledWith('approval-1', true);
+});
+
+it('drops unsafe links and offers no decision once a request is answered', () => {
+  const html = renderToStaticMarkup(
+    <ApprovalRequestCard
+      approval={approval(
+        'action',
+        { ...request, link: { url: 'javascript:alert(1)' } },
+        'declined',
+      )}
+      result={JSON.stringify({ approved: false, status: 'declined' })}
+      running={false}
+      onDecide={async () => {}}
+    />,
+  );
+  expect(html).not.toContain('javascript:');
+  expect(html).toContain('Declined');
+  expect(html).not.toContain('Approve');
 });

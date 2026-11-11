@@ -90,6 +90,29 @@ To test the integration, configure a working model, limit a Dot to one toolkit, 
 
 Tool arguments and results pass through Composio and the connected app provider. Keep credentials in the server environment and review [Composio’s documentation](https://docs.composio.dev) and each provider’s privacy and retention terms.
 
+## Discovery
+
+Discovery watches chosen accounts and tells you when something needs you, without being asked. Turn it on per account on the **Accounts** page (Gmail, Outlook and Microsoft Teams today) and pick the Dot that looks into what it finds.
+
+1. **Read.** Every five minutes OpenDots reads new items on that account with read-only Composio tools (`GMAIL_FETCH_EMAILS`, `OUTLOOK_LIST_MESSAGES`, or Teams chats and their messages). The first check looks back one day. Items appear in the **Inbox**.
+2. **Flag.** A small, fast model decides for each item whether you should see it, with a category, a confidence and a one-line reason. Mail the provider already filed as promotions, social or spam is skipped without a model call. Items below `DISCOVERY_THRESHOLD` (0.6) are not flagged.
+3. **Investigate, read-only.** Each flagged item gets its own conversation with the chosen Dot (up to five per check, highest confidence first). The Dot can only read: Composio is limited to tools tagged `readOnlyHint`, every app tool is checked again before it runs, the remote workbench and new sign-ins are off, and only connection tools marked read-only that run without asking are offered. It cannot write pages, use the computer or ask other Dots. It replies with what came in, what it found and what it suggests, and you get a push notification.
+4. **You decide.** Nothing changes until you reply in that conversation. From then on it is an ordinary chat with the Dot's normal tools and approvals.
+
+Set `DISCOVERY_MODEL` to run step 2 on a model of your choice. Any OpenAI-compatible endpoint works; the default `DISCOVERY_BASE_URL` is Ollama on this machine (`http://127.0.0.1:11434/v1`), for example:
+
+```sh
+ollama pull qwen3:4b
+# .env
+DISCOVERY_MODEL=qwen3:4b
+```
+
+Or use [Laya](https://huggingface.co/convaiinnovations/laya), a small decision model that answers typed questions with probabilities instead of writing text. Run its server (`pip install "laya[serve]"`, then `laya-serve`, on `http://127.0.0.1:8000`) and set `DISCOVERY_MODEL=laya`. For a checkpoint you fine-tuned, register it with `LAYA_EXTRA_MODELS='{"opendots":"/path/to/checkpoint"}'` and set `DISCOVERY_MODEL=laya:opendots`. Laya writes no text, so the reason on a finding is built from its category, the sender and the subject.
+
+The model must support JSON-schema output (`response_format`); Ollama, llama.cpp and vLLM do. Without `DISCOVERY_MODEL`, the main `OPENAI_MODEL` is used, which sends every new item to that provider. For the investigation to check other apps, such as matching a payment notice against QuickBooks, turn on Connected apps in Settings and for that Dot, and include those toolkits in its list.
+
+Items are untrusted data: both models are told never to follow instructions inside them, and claims such as "payment made" are treated as claims until another source confirms them. Discovery does not change the Inbox notification setting of other sources; discovery sources notify when a Dot has something to say, not per item.
+
 ## Persistent Dot computers
 
 For a separate browser, persistent files, and optional shell for each specialist, follow [Computer setup](COMPUTERS.md). This uses pinned OpenBot computer/supervisor services and per-Dot permissions. Parallel research tools remain available alongside configured computer tools. With the browser provider selected, Dots use their computer tools in place of the read-only public-page tool; enable each Dot's required capabilities before use.
@@ -179,6 +202,31 @@ docker compose down
 ```
 
 For remote hosting, configure an HTTPS reverse proxy and the matching `APP_ORIGIN`. See [Security](../SECURITY.md) for the template's deployment boundary.
+
+### Cloudflare Tunnel
+
+To reach OpenDots on a machine that cannot accept incoming connections, such as a home PC behind a router without port forwarding, use a Cloudflare Tunnel. The PC connects out to Cloudflare; no ports are opened, and Cloudflare serves HTTPS on your domain. The tunnel is free, but on Cloudflare's free plan the domain's DNS must be managed by Cloudflare.
+
+1. Add the domain to Cloudflare (free plan) and change its nameservers at your registrar to the two Cloudflare shows. Existing DNS records are copied; check any mail records before switching.
+2. In the Cloudflare dashboard open **Zero Trust → Networks → Tunnels → Create a tunnel**, choose **Cloudflared**, name it, and copy the token from the install command.
+3. On the tunnel's **Public hostname** tab add `dots.yourdomain.co.za` with service type `HTTP` and URL `app:4310`.
+4. In `.env`:
+
+   ```sh
+   OWNER_TOKEN=<24+ random characters>
+   APP_ORIGIN=https://dots.yourdomain.co.za,http://localhost:4310
+   CLOUDFLARE_TUNNEL_TOKEN=<token from step 2>
+   ```
+
+5. Start the app with the tunnel:
+
+   ```sh
+   docker compose --profile tunnel up --build -d
+   ```
+
+Open `https://dots.yourdomain.co.za` and sign in with `OWNER_TOKEN`. Cloudflare decrypts traffic at its edge before passing it through the tunnel, so it can see what the app shows. You can put Cloudflare Access (free for up to 50 users) in front as an extra sign-in; if you do, bypass it for `/api/inbox/hooks/*` and for the mobile app, which cannot complete a browser sign-in.
+
+The site is only up while the PC is on and awake. To run the discovery model on the same PC, install Ollama on the host and set `DISCOVERY_BASE_URL=http://host.docker.internal:11434/v1`; on Linux hosts, also start Ollama with `OLLAMA_HOST=0.0.0.0` so containers can reach it, and keep port 11434 closed to the network.
 
 ## Automatic Learning
 

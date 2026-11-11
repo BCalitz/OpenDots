@@ -259,6 +259,8 @@ Routes: `GET /api/chat/:threadId/events?after=<seq>` (Server-Sent Events: histor
 
 ## Phase 5: Inbox, triage and "prepare or handle?"
 
+**Status:** first part implemented as **discovery** (see [SETUP.md](SETUP.md#discovery), `src/server/discovery/`, `src/server/inbox/composio-source.ts` and `tests/discovery.test.ts`): per-account sources on Composio apps (Gmail, Outlook, Teams), a small model that flags what needs the owner (`Classifier`, any OpenAI-compatible endpoint, Ollama by default), and a read-only investigation per flagged item in its own thread (`TurnSource` `discovery`). "Handle it" is the owner replying in that thread. Not done yet: the proposals table and three-button choices, actionable push, snoozing, and dismissals feeding the rules. Every judged item is stored in `discovery_findings`, which is the labelled data a small trained classifier (SetFit or ModernBERT) needs later.
+
 **Goal:** the scenario that started this plan.
 
 > Someone assigns you a high-priority ticket. Your phone buzzes: _"New urgent ticket: Payment export failing for client X. Want me to prepare it for you, or handle it?"_

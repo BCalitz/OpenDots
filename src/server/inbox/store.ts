@@ -6,12 +6,17 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import type {
+  ComposioSourceConfig,
+  FindingState,
+  FindingView,
   InboxEventState,
   InboxEventView,
   InboxNotify,
   InboxSourceView,
   McpSourceConfig,
+  SourceConfig,
   SourceKind,
+  SourceType,
 } from '../../shared/inbox-types.js';
 import type { InboxEvent } from './source.js';
 
@@ -21,8 +26,8 @@ export interface SourceRecord {
   id: string;
   name: string;
   kind: SourceKind;
-  type: 'mcp' | 'webhook';
-  config: McpSourceConfig | Record<string, never>;
+  type: SourceType;
+  config: SourceConfig;
   enabled: boolean;
   notify: InboxNotify;
   intervalSeconds: number;
@@ -47,12 +52,24 @@ const hash = (secret: string) =>
   createHash('sha256').update(secret).digest('hex');
 const clip = (value: string, max = MAX_TEXT) =>
   value.length > max ? `${value.slice(0, max - 1)}…` : value;
+/** Sources the poller runs on a timer. */
+const POLLED = "type IN ('mcp', 'composio')";
+type FindingRow = Omit<FindingView, 'attention'> & { attention: number };
+const findingView = (row: FindingRow): FindingView => ({
+  ...row,
+  attention: !!row.attention,
+});
+type EventRow = Omit<InboxEventView, 'finding'> & {
+  findingId: string | null;
+};
 
 export class InboxStore {
   constructor(private db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS inbox_sources(id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notify TEXT NOT NULL DEFAULT 'urgent', intervalSeconds INTEGER NOT NULL DEFAULT 300, secretHash TEXT, cursor TEXT, lease TEXT, leaseUntil INTEGER, lastPolledAt INTEGER, nextPollAt INTEGER, lastError TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox_events(id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, externalId TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL, priority TEXT NOT NULL, sender TEXT, url TEXT, payload TEXT NOT NULL, occurredAt INTEGER NOT NULL, receivedAt INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'new', UNIQUE(sourceId, externalId));
-      CREATE INDEX IF NOT EXISTS inbox_events_time ON inbox_events(receivedAt);`);
+      CREATE INDEX IF NOT EXISTS inbox_events_time ON inbox_events(receivedAt);
+      CREATE TABLE IF NOT EXISTS discovery_findings(id TEXT PRIMARY KEY, eventId TEXT NOT NULL UNIQUE, attention INTEGER NOT NULL, category TEXT NOT NULL, confidence REAL NOT NULL, reason TEXT NOT NULL, judgedBy TEXT NOT NULL, state TEXT NOT NULL, dotId TEXT, threadId TEXT, error TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS discovery_findings_state ON discovery_findings(state);`);
   }
   private transaction<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -114,7 +131,7 @@ export class InboxStore {
         config: record.config,
         hasSecret: !!row.secretHash,
         lastPolledAt: record.lastPolledAt,
-        nextPollAt: record.type === 'mcp' ? record.nextPollAt : null,
+        nextPollAt: record.type === 'webhook' ? null : record.nextPollAt,
         lastError: record.lastError,
         eventCount: Number(row.eventCount),
         newCount: Number(row.newCount),
@@ -126,8 +143,8 @@ export class InboxStore {
   create(value: {
     name: string;
     kind: SourceKind;
-    type: 'mcp' | 'webhook';
-    config: McpSourceConfig | Record<string, never>;
+    type: SourceType;
+    config: SourceConfig;
     notify: InboxNotify;
     intervalSeconds: number;
   }) {
@@ -150,7 +167,7 @@ export class InboxStore {
         value.notify,
         value.intervalSeconds,
         secret ? hash(secret) : null,
-        value.type === 'mcp' ? now : null,
+        value.type === 'webhook' ? null : now,
         now,
         now,
       );
@@ -160,7 +177,7 @@ export class InboxStore {
     id: string,
     patch: Partial<
       Pick<SourceRecord, 'name' | 'enabled' | 'notify' | 'intervalSeconds'>
-    > & { config?: McpSourceConfig },
+    > & { config?: McpSourceConfig | ComposioSourceConfig },
   ) {
     const current = this.source(id);
     if (!current) return undefined;
@@ -183,6 +200,11 @@ export class InboxStore {
   }
   remove(id: string) {
     return this.transaction(() => {
+      this.db
+        .prepare(
+          'DELETE FROM discovery_findings WHERE eventId IN (SELECT id FROM inbox_events WHERE sourceId=?)',
+        )
+        .run(id);
       this.db.prepare('DELETE FROM inbox_events WHERE sourceId=?').run(id);
       return (
         this.db.prepare('DELETE FROM inbox_sources WHERE id=?').run(id)
@@ -211,7 +233,7 @@ export class InboxStore {
     return (
       this.db
         .prepare(
-          "UPDATE inbox_sources SET nextPollAt=? WHERE id=? AND type='mcp'",
+          `UPDATE inbox_sources SET nextPollAt=? WHERE id=? AND ${POLLED}`,
         )
         .run(Date.now(), id).changes > 0
     );
@@ -224,7 +246,7 @@ export class InboxStore {
     return this.transaction(() => {
       const row = this.db
         .prepare(
-          "SELECT * FROM inbox_sources WHERE type='mcp' AND enabled=1 AND COALESCE(nextPollAt, 0)<=? AND (lease IS NULL OR leaseUntil<=?) ORDER BY COALESCE(nextPollAt, 0), rowid LIMIT 1",
+          `SELECT * FROM inbox_sources WHERE ${POLLED} AND enabled=1 AND COALESCE(nextPollAt, 0)<=? AND (lease IS NULL OR leaseUntil<=?) ORDER BY COALESCE(nextPollAt, 0), rowid LIMIT 1`,
         )
         .get(now, now) as SourceRow | undefined;
       if (!row) return undefined;
@@ -300,15 +322,25 @@ export class InboxStore {
             `DELETE FROM inbox_events WHERE sourceId=? AND id NOT IN (SELECT id FROM inbox_events WHERE sourceId=? ORDER BY receivedAt DESC, rowid DESC LIMIT ${MAX_EVENTS_PER_SOURCE})`,
           )
           .run(sourceId, sourceId);
+      this.db.exec(
+        'DELETE FROM discovery_findings WHERE eventId NOT IN (SELECT id FROM inbox_events)',
+      );
     });
     return inserted
       .map((id) => this.event(id))
       .filter((event): event is InboxEventView => !!event);
   }
-  private eventQuery = `SELECT e.id, e.sourceId, COALESCE(s.name, 'Removed source') AS sourceName, e.externalId, e.kind, e.title, e.summary, e.priority, e.sender AS "from", e.url, e.occurredAt, e.receivedAt, e.state FROM inbox_events e LEFT JOIN inbox_sources s ON s.id=e.sourceId`;
+  private eventQuery = `SELECT e.id, e.sourceId, COALESCE(s.name, 'Removed source') AS sourceName, e.externalId, e.kind, e.title, e.summary, e.priority, e.sender AS "from", e.url, e.occurredAt, e.receivedAt, e.state, f.id AS findingId FROM inbox_events e LEFT JOIN inbox_sources s ON s.id=e.sourceId LEFT JOIN discovery_findings f ON f.eventId=e.id`;
+  private toEvent({ findingId, ...row }: EventRow): InboxEventView {
+    return {
+      ...row,
+      finding: findingId ? (this.finding(findingId) ?? null) : null,
+    };
+  }
   event(id: string) {
-    return this.db.prepare(`${this.eventQuery} WHERE e.id=?`).get(id) as
-      InboxEventView | undefined;
+    const row = this.db.prepare(`${this.eventQuery} WHERE e.id=?`).get(id) as
+      EventRow | undefined;
+    return row ? this.toEvent(row) : undefined;
   }
   /** The stored raw payload, as untrusted data. */
   payload(id: string): unknown {
@@ -336,11 +368,12 @@ export class InboxStore {
       values.push(filter.state);
     } else if (!filter.includeDismissed) where.push("e.state<>'dismissed'");
     const limit = Math.min(Math.max(filter.limit ?? 100, 1), 500);
-    return this.db
+    const rows = this.db
       .prepare(
         `${this.eventQuery} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY CASE e.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, e.receivedAt DESC LIMIT ${limit}`,
       )
-      .all(...values) as unknown as InboxEventView[];
+      .all(...values) as unknown as EventRow[];
+    return rows.map((row) => this.toEvent(row));
   }
   setState(id: string, state: InboxEventState) {
     return this.db
@@ -348,5 +381,91 @@ export class InboxStore {
       .run(state, id).changes > 0
       ? this.event(id)
       : undefined;
+  }
+  /** The discovery source for a connected account, if there is one. */
+  composioSource(accountId: string) {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM inbox_sources WHERE type='composio' AND json_extract(config, '$.accountId')=? ORDER BY createdAt LIMIT 1",
+      )
+      .get(accountId) as SourceRow | undefined;
+    return row ? this.record(row) : undefined;
+  }
+  composioSources() {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM inbox_sources WHERE type='composio' ORDER BY createdAt",
+        )
+        .all() as unknown as SourceRow[]
+    ).map((row) => this.record(row));
+  }
+  finding(id: string) {
+    const row = this.db
+      .prepare('SELECT * FROM discovery_findings WHERE id=?')
+      .get(id) as FindingRow | undefined;
+    return row ? findingView(row) : undefined;
+  }
+  findingForEvent(eventId: string) {
+    const row = this.db
+      .prepare('SELECT * FROM discovery_findings WHERE eventId=?')
+      .get(eventId) as FindingRow | undefined;
+    return row ? findingView(row) : undefined;
+  }
+  findings(state: FindingState) {
+    return (
+      this.db
+        .prepare(
+          'SELECT * FROM discovery_findings WHERE state=? ORDER BY createdAt, rowid',
+        )
+        .all(state) as unknown as FindingRow[]
+    ).map(findingView);
+  }
+  /** Records the discovery model's verdict on an event, once per event. */
+  saveFinding(value: {
+    eventId: string;
+    attention: boolean;
+    category: string;
+    confidence: number;
+    reason: string;
+    judgedBy: string;
+    dotId: string | null;
+  }) {
+    const now = Date.now();
+    this.db
+      .prepare(
+        'INSERT INTO discovery_findings (id, eventId, attention, category, confidence, reason, judgedBy, state, dotId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(eventId) DO NOTHING',
+      )
+      .run(
+        randomUUID(),
+        value.eventId,
+        value.attention ? 1 : 0,
+        clip(value.category, 40),
+        Math.min(Math.max(value.confidence, 0), 1),
+        clip(value.reason, 500),
+        clip(value.judgedBy, 120),
+        value.attention ? 'flagged' : 'ignored',
+        value.dotId,
+        now,
+        now,
+      );
+    return this.findingForEvent(value.eventId)!;
+  }
+  updateFinding(
+    id: string,
+    patch: { state: FindingState; threadId?: string; error?: string | null },
+  ) {
+    this.db
+      .prepare(
+        'UPDATE discovery_findings SET state=?, threadId=COALESCE(?, threadId), error=?, updatedAt=? WHERE id=?',
+      )
+      .run(
+        patch.state,
+        patch.threadId ?? null,
+        patch.error ? clip(patch.error, 500) : null,
+        Date.now(),
+        id,
+      );
+    return this.finding(id);
   }
 }

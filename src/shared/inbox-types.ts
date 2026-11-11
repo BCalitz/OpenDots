@@ -19,15 +19,30 @@ export interface McpSourceConfig {
     >
   >;
 }
+/**
+ * Discovery on an app account connected through Composio: new items are
+ * read on a timer, a small model flags the ones that need attention, and
+ * `dotId` investigates them read-only.
+ */
+export interface ComposioSourceConfig {
+  dotId: string;
+  /** Composio connected account id. */
+  accountId: string;
+  /** Composio toolkit slug, one of DISCOVERY_TOOLKITS. */
+  toolkit: string;
+}
+export type SourceType = 'mcp' | 'webhook' | 'composio';
+export type SourceConfig =
+  McpSourceConfig | ComposioSourceConfig | Record<string, never>;
 export interface InboxSourceView {
   id: string;
   name: string;
   kind: SourceKind;
-  type: 'mcp' | 'webhook';
+  type: SourceType;
   enabled: boolean;
   notify: InboxNotify;
   intervalSeconds: number;
-  config: McpSourceConfig | Record<string, never>;
+  config: SourceConfig;
   hasSecret: boolean;
   lastPolledAt: number | null;
   nextPollAt: number | null;
@@ -50,8 +65,63 @@ export interface InboxEventView {
   occurredAt: number;
   receivedAt: number;
   state: InboxEventState;
+  /** Set once discovery has looked at the event. */
+  finding?: FindingView | null;
+}
+/**
+ * - ignored: the discovery model saw nothing that needs the owner.
+ * - flagged: it needs attention; waiting for a Dot to investigate.
+ * - investigating: a Dot is looking into it, read-only.
+ * - ready: the Dot's findings and proposal are in `threadId`.
+ * - failed: the investigation did not finish; see `error`.
+ */
+export type FindingState =
+  'ignored' | 'flagged' | 'investigating' | 'ready' | 'failed';
+export interface FindingView {
+  id: string;
+  eventId: string;
+  attention: boolean;
+  /** What the item is, such as payment or meeting. */
+  category: string;
+  /** 0 to 1, as reported by the discovery model. */
+  confidence: number;
+  reason: string;
+  /** The model that judged it, or "rules" when no model was needed. */
+  judgedBy: string;
+  state: FindingState;
+  dotId: string | null;
+  threadId: string | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 export interface InboxState {
   sources: InboxSourceView[];
   events: InboxEventView[];
+}
+
+/** Apps discovery can read, with what their items are. */
+export const DISCOVERY_TOOLKITS: Record<
+  string,
+  { name: string; kind: SourceKind }
+> = {
+  gmail: { name: 'Gmail', kind: 'mail' },
+  outlook: { name: 'Outlook', kind: 'mail' },
+  microsoft_teams: { name: 'Microsoft Teams', kind: 'message' },
+};
+/** Discovery settings for one connected account. */
+export interface DiscoveryAccountView {
+  sourceId: string;
+  accountId: string;
+  toolkit: string;
+  dotId: string;
+  enabled: boolean;
+  intervalSeconds: number;
+  lastPolledAt: number | null;
+  lastError: string | null;
+}
+export interface DiscoveryState {
+  accounts: DiscoveryAccountView[];
+  /** The model that decides what needs attention. */
+  model: { configured: boolean; name: string | null; local: boolean };
 }

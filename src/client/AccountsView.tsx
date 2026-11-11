@@ -9,9 +9,15 @@ import {
   Plug,
   Plus,
   RefreshCw,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
-import type { ConnectedAccount } from '../shared/types';
+import type { ConnectedAccount, Dot } from '../shared/types';
+import {
+  DISCOVERY_TOOLKITS,
+  type DiscoveryAccountView,
+  type DiscoveryState,
+} from '../shared/inbox-types';
 import { api } from './api';
 
 /** Common apps, offered as one-click buttons. Any Composio app slug works. */
@@ -45,12 +51,27 @@ function iconFor(toolkit: string) {
 }
 
 /** Apps connected for the owner through Composio. */
-export function AccountsView({ configured }: { configured: boolean }) {
+export function AccountsView({
+  configured,
+  dots,
+}: {
+  configured: boolean;
+  dots: Dot[];
+}) {
   const [accounts, setAccounts] = useState<ConnectedAccount[]>();
+  const [discovery, setDiscovery] = useState<DiscoveryState>();
+  const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [custom, setCustom] = useState('');
   const [waiting, setWaiting] = useState<string>();
+  const loadDiscovery = useCallback(
+    () =>
+      api<DiscoveryState>('/discovery')
+        .then(setDiscovery)
+        .catch(() => undefined),
+    [],
+  );
   const load = useCallback(
     () =>
       api<ConnectedAccount[]>('/accounts')
@@ -68,10 +89,11 @@ export function AccountsView({ configured }: { configured: boolean }) {
   useEffect(() => {
     if (!configured) return;
     void load();
+    void loadDiscovery();
     const onFocus = () => void load();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [configured, load]);
+  }, [configured, load, loadDiscovery]);
   // After opening a sign-in page, check back until the account shows up.
   useEffect(() => {
     if (!waiting) return;
@@ -112,6 +134,26 @@ export function AccountsView({ configured }: { configured: boolean }) {
       setError('');
     } catch (e) {
       tab?.close();
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy('');
+    }
+  };
+  const setDiscoveryFor = async (
+    account: ConnectedAccount,
+    value: { enabled: boolean; dotId: string },
+  ) => {
+    setBusy(account.id);
+    try {
+      const result = await api<{ warning?: string }>(
+        `/discovery/accounts/${encodeURIComponent(account.id)}`,
+        'PUT',
+        value,
+      );
+      setNotice(result.warning ?? '');
+      setError('');
+      await loadDiscovery();
+    } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy('');
@@ -183,6 +225,30 @@ export function AccountsView({ configured }: { configured: boolean }) {
           {error}
         </p>
       )}
+      {notice && (
+        <p className="notice" role="status">
+          {notice}
+        </p>
+      )}
+      {discovery && (
+        <p className="muted discovery-model">
+          <Sparkles size={14} aria-hidden />{' '}
+          {discovery.model.configured ? (
+            <>
+              Discovery decides what needs you with{' '}
+              <strong>{discovery.model.name}</strong>
+              {discovery.model.local ? ' on this machine' : ''}. A Dot then
+              looks into what it flags with read-only access and suggests what
+              to do. Nothing changes until you reply.
+            </>
+          ) : (
+            <>
+              Discovery needs a model. Set <code>DISCOVERY_MODEL</code> (for
+              example a small model in Ollama) or <code>OPENAI_MODEL</code>.
+            </>
+          )}
+        </p>
+      )}
       {waiting && (
         <p className="notice" role="status">
           Finish signing in on the page that opened. This list updates when
@@ -237,6 +303,18 @@ export function AccountsView({ configured }: { configured: boolean }) {
                   </button>
                 </span>
               </div>
+              {DISCOVERY_TOOLKITS[account.toolkit] &&
+                account.status === 'ACTIVE' && (
+                  <DiscoveryControls
+                    account={account}
+                    dots={dots}
+                    current={discovery?.accounts.find(
+                      (item) => item.accountId === account.id,
+                    )}
+                    disabled={!!busy || !discovery}
+                    onChange={(value) => void setDiscoveryFor(account, value)}
+                  />
+                )}
             </article>
           );
         })}
@@ -297,5 +375,60 @@ export function AccountsView({ configured }: { configured: boolean }) {
         </p>
       </form>
     </main>
+  );
+}
+
+/** Turns discovery on or off for one account and picks the Dot that investigates. */
+function DiscoveryControls({
+  account,
+  dots,
+  current,
+  disabled,
+  onChange,
+}: {
+  account: ConnectedAccount;
+  dots: Dot[];
+  current?: DiscoveryAccountView;
+  disabled: boolean;
+  onChange: (value: { enabled: boolean; dotId: string }) => void;
+}) {
+  const dotId = current?.dotId ?? dots[0]?.id ?? '';
+  const enabled = !!current?.enabled;
+  const id = `discovery-${account.id}`;
+  return (
+    <div className="discovery-controls">
+      <label className="permission-row inline" htmlFor={id}>
+        <input
+          id={id}
+          type="checkbox"
+          checked={enabled}
+          disabled={disabled || !dotId}
+          onChange={(event) =>
+            onChange({ enabled: event.target.checked, dotId })
+          }
+        />
+        <span>Flag what needs me</span>
+      </label>
+      <label className="discovery-dot">
+        <span>Looked into by</span>
+        <select
+          value={dotId}
+          disabled={disabled || !dots.length}
+          aria-label={`Dot that looks into what ${account.name} discovery flags`}
+          onChange={(event) => onChange({ enabled, dotId: event.target.value })}
+        >
+          {dots.map((dot) => (
+            <option key={dot.id} value={dot.id}>
+              {dot.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      {current?.lastError && (
+        <small className="chat-error" role="alert">
+          {current.lastError}
+        </small>
+      )}
+    </div>
   );
 }

@@ -4193,6 +4193,27 @@ h3 {
   font-size: 15px;
   letter-spacing: -0.2px;
 }
+.approval-request-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.approval-request-output {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--panel, #f4f7f4);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 12px;
+}
+.approval-request-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
 .connection-action-args {
   display: grid;
   gap: 8px;
@@ -4750,4 +4771,44 @@ h3 {
 .account-custom input {
   flex: 1;
   min-width: 0;
+}
+/* Discovery: per-account switch and what the model flagged. */
+.discovery-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.discovery-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #6f727e;
+}
+.discovery-dot select {
+  max-width: 160px;
+}
+.discovery-model {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.inbox-event p.discovery-finding {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--blue);
+}
+.inbox-event p.discovery-finding.failed {
+  color: #b42318;
+}
+.inbox-event p.discovery-finding strong {
+  display: inline;
+  font-size: 11px;
 }

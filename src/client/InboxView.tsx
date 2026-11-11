@@ -11,6 +11,8 @@ import {
   MessageSquare,
   Plus,
   RefreshCw,
+  Search,
+  Sparkles,
   Ticket,
   Trash2,
   X,
@@ -52,8 +54,21 @@ const priorityClass = {
   low: '',
 };
 
+const findingText: Record<string, string> = {
+  flagged: 'Needs you',
+  investigating: 'Looking into it…',
+  ready: 'Findings ready',
+  failed: 'Could not finish',
+};
+
 /** The event log and the sources that feed it (roadmap phase 3). */
-export function InboxView({ dots }: { dots: Dot[] }) {
+export function InboxView({
+  dots,
+  onThread,
+}: {
+  dots: Dot[];
+  onThread: (threadId: string) => void;
+}) {
   const [state, setState] = useState<InboxState>();
   const [error, setError] = useState('');
   const [adding, setAdding] = useState(false);
@@ -98,8 +113,9 @@ export function InboxView({ dots }: { dots: Dot[] }) {
           <h1>Inbox</h1>
           <p>
             Tickets, mail and messages your sources picked up, most important
-            first. Outside content is shown as data; nothing here acts on its
-            own yet.
+            first. Outside content is shown as data. Accounts with discovery on
+            are checked by a small model; what it flags, a Dot looks into
+            read-only and suggests what to do.
           </p>
         </div>
         <button className="primary" onClick={() => setAdding(true)}>
@@ -194,8 +210,48 @@ export function InboxView({ dots }: { dots: Dot[] }) {
                 {event.from ? ` · from ${event.from}` : ''} ·{' '}
                 {relative(event.occurredAt)}
               </span>
+              {event.finding?.attention && (
+                <p className={`discovery-finding ${event.finding.state}`}>
+                  <Sparkles size={13} aria-hidden />
+                  <strong>{findingText[event.finding.state]}</strong> ·{' '}
+                  {event.finding.category} ·{' '}
+                  {Math.round(event.finding.confidence * 100)}% ·{' '}
+                  {event.finding.reason}
+                  {event.finding.state === 'failed' && event.finding.error
+                    ? ` (${event.finding.error})`
+                    : ''}
+                </p>
+              )}
             </div>
             <div className="inbox-event-actions">
+              {event.finding?.threadId && (
+                <button
+                  className="text-button"
+                  onClick={() => onThread(event.finding!.threadId!)}
+                >
+                  Open findings
+                </button>
+              )}
+              {event.finding &&
+                ['flagged', 'failed', 'ignored'].includes(
+                  event.finding.state,
+                ) && (
+                  <button
+                    className="icon-button"
+                    aria-label={`Have a Dot look into ${event.title}`}
+                    title="Have a Dot look into this (read-only)"
+                    onClick={() =>
+                      void act(() =>
+                        api(
+                          `/inbox/findings/${event.finding!.id}/investigate`,
+                          'POST',
+                        ),
+                      )
+                    }
+                  >
+                    <Search size={15} />
+                  </button>
+                )}
               {event.url && (
                 <a
                   className="icon-button"
@@ -290,7 +346,9 @@ function SourceCard({
         <small>
           {source.type === 'mcp'
             ? `${'tool' in source.config ? source.config.tool : ''}${dot ? ` · ${dot.name}` : ''} · every ${Math.round(source.intervalSeconds / 60)} min`
-            : 'Webhook'}
+            : source.type === 'composio'
+              ? `Discovery${dot ? ` · ${dot.name}` : ''} · every ${Math.round(source.intervalSeconds / 60)} min`
+              : 'Webhook'}
         </small>
       </header>
       <p className="muted">
@@ -335,7 +393,7 @@ function SourceCard({
             ))}
           </select>
         </label>
-        {source.type === 'mcp' ? (
+        {source.type !== 'webhook' ? (
           <button
             className="icon-button"
             aria-label={`Check ${source.name} now`}

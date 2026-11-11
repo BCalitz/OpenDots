@@ -208,6 +208,7 @@ it('offers approvals only in chats, never to schedules', async () => {
     },
   );
   expect(tools[0]).not.toContain('review_space_page');
+  expect(tools[0]).not.toContain('request_approval');
 });
 
 it('expires requests that were waiting when the server stopped', async () => {
@@ -242,4 +243,98 @@ it('gives up after the wait time and lets the turn carry on', async () => {
   await vi.advanceTimersByTimeAsync(1_001);
   await expect(waiting).resolves.toBe('expired');
   expect([...approvalsFrom(emitted).values()][0]?.status).toBe('expired');
+});
+
+const requestCall = (args: Record<string, unknown>) =>
+  completion(
+    {
+      role: 'assistant',
+      tool_calls: [
+        {
+          index: 0,
+          id: 'ask-1',
+          type: 'function',
+          function: {
+            name: 'request_approval',
+            arguments: JSON.stringify(args),
+          },
+        },
+      ],
+    },
+    'tool_calls',
+  );
+/** Starts a chat turn whose model asks the owner with request_approval. */
+async function requestTurn(
+  server: ReturnType<typeof start>,
+  args: Record<string, unknown>,
+) {
+  const dot = server.workspace.dots()[0];
+  const bodies: { messages: { role: string; content: unknown }[] }[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (!body.stream)
+      return Response.json({ choices: [{ message: { content: 'Named' } }] });
+    bodies.push(body);
+    return bodies.length === 1
+      ? requestCall(args)
+      : completion({ role: 'assistant', content: 'Done.' });
+  });
+  const { conversation } = await server.platform.dotConversation(dot.id);
+  const events: BaseEvent[] = [];
+  const view = server.platform.engine!.watch(conversation.id, (event) =>
+    events.push(event),
+  );
+  cleanup.push(view.unsubscribe);
+  await server.app.request(
+    `/api/chat/${conversation.id}/messages`,
+    json({ content: 'Reply to the ticket for me' }),
+  );
+  return { conversation, events, bodies };
+}
+
+const ask = {
+  title: 'Reply to ticket #42',
+  description: 'Post this reply on the ticket and mark it resolved.',
+  output: 'Hi, the export is fixed in today’s release.',
+  link: { url: 'https://tickets.example/42', label: 'Ticket #42' },
+};
+
+it('shows a request_approval card with its output and link, and tells the model the answer', async () => {
+  const server = start();
+  const turn = await requestTurn(server, ask);
+  let approval!: ApprovalView;
+  await vi.waitFor(() => {
+    approval = approvalsFrom(turn.events).get('ask-1')!;
+    expect(approval?.status).toBe('pending');
+  });
+  expect(approval.kind).toBe('action');
+  expect(approval.payload).toEqual(ask);
+  await decide(server, approval.id, true);
+  await server.platform.runner!.done(turn.conversation.id);
+  expect(JSON.stringify(turn.bodies[1].messages)).toContain(
+    'The owner approved',
+  );
+});
+
+it('tells the model not to go ahead when the owner declines a request', async () => {
+  const server = start();
+  const turn = await requestTurn(server, ask);
+  let approval!: ApprovalView;
+  await vi.waitFor(() => {
+    approval = approvalsFrom(turn.events).get('ask-1')!;
+    expect(approval?.status).toBe('pending');
+  });
+  await decide(server, approval.id, false);
+  await server.platform.runner!.done(turn.conversation.id);
+  expect(JSON.stringify(turn.bodies[1].messages)).toContain('declined');
+});
+
+it('refuses request_approval links that are not http(s) or OpenDots pages', async () => {
+  const server = start();
+  const turn = await requestTurn(server, {
+    ...ask,
+    link: { url: 'javascript:alert(1)' },
+  });
+  await server.platform.runner!.done(turn.conversation.id);
+  expect(approvalsFrom(turn.events).get('ask-1')).toBeUndefined();
 });

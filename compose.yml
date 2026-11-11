@@ -17,6 +17,10 @@ services:
       VOICE_MODEL: ${VOICE_MODEL:-}
       VOICE_NAME: ${VOICE_NAME:-marin}
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+      DISCOVERY_MODEL: ${DISCOVERY_MODEL:-}
+      DISCOVERY_BASE_URL: ${DISCOVERY_BASE_URL:-}
+      DISCOVERY_API_KEY: ${DISCOVERY_API_KEY:-}
+      DISCOVERY_THRESHOLD: ${DISCOVERY_THRESHOLD:-}
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
       SLACK_TEAM_ID: ${SLACK_TEAM_ID:-}
@@ -32,6 +36,10 @@ services:
       BROWSER_SECRET: ${BROWSER_SECRET:-}
     volumes:
       - opendots-data:/data
+    # Lets the app reach a model server on this machine, such as Ollama, at
+    # http://host.docker.internal:11434/v1 (built into Docker Desktop).
+    extra_hosts:
+      - host.docker.internal:host-gateway
     networks:
       - browser-link
       - app-egress
@@ -57,6 +65,28 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+  # Public HTTPS on your own domain without opening ports: a Cloudflare
+  # Tunnel. Start with `docker compose --profile tunnel up -d`; see
+  # docs/SETUP.md#cloudflare-tunnel.
+  tunnel:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:2026.10.7
+    command: ['tunnel', '--no-autoupdate', 'run']
+    environment:
+      # Not marked required: Compose would then insist on it even when the
+      # tunnel profile is off.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - app
+    networks:
+      - app-egress
+    init: true
+    restart: unless-stopped
+    read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:

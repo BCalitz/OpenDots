@@ -34,77 +34,90 @@ export function connectionTools(
   signal: AbortSignal,
   approve: Approve | undefined,
   log?: UsageStore,
+  /** Only tools the server marks read-only and that run without asking. */
+  readOnly = false,
 ) {
-  return connections.tools(dotId).map((exposed): Tool => ({
-    name: exposed.name,
-    description:
-      `[${exposed.connection.name}${exposed.tool.requiresApproval ? ', needs owner approval' : ''}] ${exposed.tool.title}: ${exposed.tool.description}`.slice(
-        0,
-        1024,
-      ),
-    parameters: exposed.tool.inputSchema as JSONSchema,
-    execute: async (args: unknown, context: ToolContext) => {
-      check();
-      // Re-resolve so a tool the owner just disabled or gated is honored.
-      const current = connections.resolve(dotId, exposed.name);
-      const input = (args ?? {}) as Record<string, unknown>;
-      if (current.tool.requiresApproval) {
-        if (!approve)
+  const readable = (tool: { readOnly: boolean; requiresApproval: boolean }) =>
+    !readOnly || (tool.readOnly && !tool.requiresApproval);
+  return connections
+    .tools(dotId)
+    .filter((exposed) => readable(exposed.tool))
+    .map((exposed): Tool => ({
+      name: exposed.name,
+      description:
+        `[${exposed.connection.name}${exposed.tool.requiresApproval ? ', needs owner approval' : ''}] ${exposed.tool.title}: ${exposed.tool.description}`.slice(
+          0,
+          1024,
+        ),
+      parameters: exposed.tool.inputSchema as JSONSchema,
+      execute: async (args: unknown, context: ToolContext) => {
+        check();
+        // Re-resolve so a tool the owner just disabled or gated is honored.
+        const current = connections.resolve(dotId, exposed.name);
+        const input = (args ?? {}) as Record<string, unknown>;
+        if (!readable(current.tool))
           return {
             status: 'unavailable',
             message:
-              'This action needs owner approval in an OpenDots chat. Ask the owner to continue there.',
+              'This turn is read-only and this tool can change things. Describe it in your proposal instead.',
           };
-        // The stored request is what runs, never arguments sent later.
-        const approvalId = connections.store.createApproval({
-          threadId,
-          dotId,
-          connectionId: current.connection.id,
-          tool: current.tool.name,
-          arguments: input,
-        });
-        const decision = await approve(context, {
-          kind: 'connection_action',
-          payload: {
-            connection: current.connection.name,
-            title: current.tool.title,
-            description: current.tool.description,
-            arguments: input,
-          },
-        });
-        // A permission change while waiting stops the turn here.
-        check();
-        if (decision !== 'approved') return notApproved(decision, 'action');
-        // One run per tool call, even if the decision arrives twice.
-        if (
-          !connections.store.claimAction(
+        if (current.tool.requiresApproval) {
+          if (!approve)
+            return {
+              status: 'unavailable',
+              message:
+                'This action needs owner approval in an OpenDots chat. Ask the owner to continue there.',
+            };
+          // The stored request is what runs, never arguments sent later.
+          const approvalId = connections.store.createApproval({
             threadId,
-            context.toolCallId,
-            approvalId,
-            current.connection.id,
-            current.tool.name,
+            dotId,
+            connectionId: current.connection.id,
+            tool: current.tool.name,
+            arguments: input,
+          });
+          const decision = await approve(context, {
+            kind: 'connection_action',
+            payload: {
+              connection: current.connection.name,
+              title: current.tool.title,
+              description: current.tool.description,
+              arguments: input,
+            },
+          });
+          // A permission change while waiting stops the turn here.
+          check();
+          if (decision !== 'approved') return notApproved(decision, 'action');
+          // One run per tool call, even if the decision arrives twice.
+          if (
+            !connections.store.claimAction(
+              threadId,
+              context.toolCallId,
+              approvalId,
+              current.connection.id,
+              current.tool.name,
+            )
           )
-        )
-          return { approved: true, error: 'This action already ran.' };
+            return { approved: true, error: 'This action already ran.' };
+          const result = await connections.call(current, input, signal);
+          connections.store.finishAction(threadId, context.toolCallId, result);
+          check();
+          return { approved: true, ...result };
+        }
+        // Approved actions keep their own receipts; ungated calls are logged here.
+        const entry = log?.beginAction({
+          dotId,
+          threadId,
+          kind: 'mcp',
+          target: current.connection.name,
+          action: current.tool.name,
+          readOnly: current.tool.readOnly,
+        });
         const result = await connections.call(current, input, signal);
-        connections.store.finishAction(threadId, context.toolCallId, result);
+        if (entry)
+          log!.finishAction(entry, result.isError ? 'failed' : 'succeeded');
         check();
-        return { approved: true, ...result };
-      }
-      // Approved actions keep their own receipts; ungated calls are logged here.
-      const entry = log?.beginAction({
-        dotId,
-        threadId,
-        kind: 'mcp',
-        target: current.connection.name,
-        action: current.tool.name,
-        readOnly: current.tool.readOnly,
-      });
-      const result = await connections.call(current, input, signal);
-      if (entry)
-        log!.finishAction(entry, result.isError ? 'failed' : 'succeeded');
-      check();
-      return result;
-    },
-  }));
+        return result;
+      },
+    }));
 }

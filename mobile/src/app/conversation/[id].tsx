@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ApprovalCard } from '../../components/ApprovalCard';
+import { ApprovalRequestCard } from '../../components/ApprovalRequestCard';
 import { PageReviewCard } from '../../components/PageReviewCard';
 import { api, type Conversation, type Workspace } from '../../lib/api';
 import { isScheduledMessage, useConversation } from '../../lib/chat';
@@ -79,6 +80,7 @@ const textOf = (message: Message) =>
 // Tool names from threads saved before approvals moved to the server.
 const legacyReviewTool = 'review_space_page';
 const legacyApprovalTool = 'request_connection_action';
+const approvalRequestTool = 'request_approval';
 
 function Chat({
   session,
@@ -138,6 +140,13 @@ function Chat({
       running: chat.running,
       onDecide: chat.decide,
     };
+    if (
+      approval?.kind === 'action' ||
+      call.function.name === approvalRequestTool
+    )
+      return (
+        <ApprovalRequestCard key={call.id} {...props} server={session.server} />
+      );
     if (
       approval?.kind === 'connection_action' ||
       call.function.name === legacyApprovalTool

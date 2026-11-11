@@ -1,8 +1,10 @@
 import type { ConnectionService } from '../connections.js';
 import type {
+  ComposioSourceConfig,
   InboxEventView,
   McpSourceConfig,
 } from '../../shared/inbox-types.js';
+import { ComposioListSource, type ComposioExecute } from './composio-source.js';
 import { McpListSource } from './mcp-source.js';
 import type { Source } from './source.js';
 import type { InboxStore, SourceRecord } from './store.js';
@@ -35,6 +37,8 @@ export class InboxEngine {
     private connections: ConnectionService,
     private options: {
       paused: () => boolean;
+      /** Runs Composio tools for discovery sources; unset without a key. */
+      composio?: () => ComposioExecute | undefined;
       tickMs?: number;
       pollTimeoutMs?: number;
     },
@@ -43,6 +47,18 @@ export class InboxEngine {
   sourceFor(record: SourceRecord): Source {
     if (record.type === 'webhook')
       return new WebhookSource(record.id, record.kind);
+    if (record.type === 'composio') {
+      const execute = this.options.composio?.();
+      if (!execute)
+        throw new Error(
+          'Connected apps are not set up. Add COMPOSIO_API_KEY to .env and restart OpenDots.',
+        );
+      return new ComposioListSource(
+        record.id,
+        record.config as ComposioSourceConfig,
+        execute,
+      );
+    }
     if (!('connectionId' in record.config))
       throw new Error('This source is missing its connection settings.');
     return new McpListSource(

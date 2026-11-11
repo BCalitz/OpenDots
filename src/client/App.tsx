@@ -638,9 +638,30 @@ export function App() {
             }}
           />
         ) : view === 'inbox' ? (
-          <InboxView dots={workspace.dots} />
+          <InboxView
+            dots={workspace.dots}
+            onThread={(id) => {
+              const open = (conversations: typeof workspace.conversations) => {
+                const target = conversations.find((t) => t.id === id);
+                if (!target) return false;
+                setSelectedDot(target.dotId);
+                setSelectedThread(id);
+                setView('chat');
+                return true;
+              };
+              // A discovery conversation may be newer than this page.
+              if (!open(workspace.conversations))
+                void api<WorkspaceState>('/workspace').then((next) => {
+                  setWorkspace(next);
+                  open(next.conversations);
+                });
+            }}
+          />
         ) : view === 'accounts' ? (
-          <AccountsView configured={workspace.setup.composio} />
+          <AccountsView
+            configured={workspace.setup.composio}
+            dots={workspace.dots}
+          />
         ) : view === 'space' ? (
           <SpaceWorkspace
             key={spaceId}

@@ -21,6 +21,18 @@ import { ChannelService } from './channels/service.js';
 import { SlackAdapter } from './channels/slack.js';
 import { SetupTelemetry } from './setup-telemetry.js';
 import { InboxEngine } from './inbox/engine.js';
+import { composioReader } from './composio.js';
+import { DiscoveryService, type Investigate } from './discovery/service.js';
+import {
+  chatClassifier,
+  isLayaModel,
+  layaClassifier,
+  type Classifier,
+} from './discovery/classifier.js';
+import { investigationMessage } from './discovery/investigation.js';
+
+/** Ollama's OpenAI-compatible endpoint on this machine. */
+export const DEFAULT_DISCOVERY_URL = 'http://127.0.0.1:11434/v1';
 
 export class Platform {
   readonly setupTelemetry: SetupTelemetry;
@@ -29,6 +41,8 @@ export class Platform {
   readonly connections: ConnectionService;
   /** Event engine: sources, the event log and the poller. */
   readonly inbox: InboxEngine;
+  /** Flags inbox items that need the owner and investigates them read-only. */
+  readonly discovery: DiscoveryService;
   /** Threads, runs and their events, in this server's database. */
   readonly runner: ThreadRunner;
   /** Runs every turn: chat, mobile, voice, schedules, delegation, Slack. */
@@ -59,9 +73,26 @@ export class Platform {
       () => store.settings().paused,
     );
     this.connections = new ConnectionService(workspace.connections);
+    let reader: ReturnType<typeof composioReader> | undefined;
+    let readerKey: string | undefined;
     this.inbox = new InboxEngine(workspace.inbox, this.connections, {
       paused: () => store.settings().paused,
+      composio: () => {
+        const key = config.composioApiKey;
+        if (!key) return undefined;
+        if (!reader || readerKey !== key) {
+          reader = composioReader(key, workspace.ownerId);
+          readerKey = key;
+        }
+        return reader;
+      },
     });
+    this.discovery = new DiscoveryService(workspace.inbox, {
+      classifier: () => this.classifier(),
+      investigate: (input, signal) => this.investigate(input, signal),
+      threshold: config.discoveryThreshold,
+    });
+    this.inbox.onEvents(this.discovery.listener);
     this.pages = new PageService(workspace, () => {
       this.requireReady();
       return this.conversations;
@@ -114,6 +145,7 @@ export class Platform {
   }
   async start() {
     this.setupTelemetry.start();
+    this.discovery.start();
     if (!this.channel) return;
     try {
       await this.channel.start();
@@ -128,11 +160,61 @@ export class Platform {
   }
   async stop() {
     this.inbox.stop();
+    this.discovery.stop();
     await this.setupTelemetry.stop();
     await this.channel?.stop();
     this.approvals.close();
     this.runner.close();
   }
+  /**
+   * The discovery model: DISCOVERY_MODEL (a small model, usually on this
+   * machine), or the main model when that is not set.
+   */
+  classifier(): Classifier | undefined {
+    const { config } = this;
+    if (config.discoveryModel && isLayaModel(config.discoveryModel))
+      return layaClassifier({
+        model: config.discoveryModel,
+        baseUrl: config.discoveryBaseUrl,
+        apiKey: config.discoveryApiKey,
+        fetch: this.options.fetch,
+      });
+    if (config.discoveryModel)
+      return chatClassifier({
+        baseUrl: config.discoveryBaseUrl ?? DEFAULT_DISCOVERY_URL,
+        model: config.discoveryModel,
+        apiKey: config.discoveryApiKey,
+        fetch: this.options.fetch,
+      });
+    if (config.apiKey && config.model)
+      return chatClassifier({
+        baseUrl: config.baseUrl,
+        model: config.model,
+        apiKey: config.apiKey,
+        fetch: this.options.fetch,
+      });
+    return undefined;
+  }
+  /** Opens a discovery conversation and runs the read-only investigation. */
+  private investigate: Investigate = async (input, signal) => {
+    const conversation = await this.createConversation(
+      input.dotId,
+      `${input.app}: ${input.event.title}`.slice(0, 80),
+      'discovery',
+    );
+    try {
+      await this.turn(conversation.id, investigationMessage(input), signal, {
+        opendotsSource: 'discovery',
+        findingId: input.finding.id,
+      });
+    } catch (error) {
+      throw Object.assign(
+        error instanceof Error ? error : new Error('The investigation failed.'),
+        { threadId: conversation.id },
+      );
+    }
+    return { threadId: conversation.id };
+  };
   /** A new thread; `source` marks background threads such as Slack's. */
   async createConversation(dotId: string, title: string, source?: string) {
     this.requireReady();

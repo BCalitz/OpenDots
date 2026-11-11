@@ -2,6 +2,7 @@ import { setupInputSchema } from './setup-telemetry.js';
 import { pageRoutes } from './page-routes.js';
 import { insightRoutes } from './insight-routes.js';
 import { inboxRoutes } from './inbox/routes.js';
+import { discoveryRoutes } from './discovery/routes.js';
 import { chatRoutes } from './chat-routes.js';
 import {
   accountRoutes,
@@ -44,21 +45,20 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   app.route('/', inboxRoutes(platform));
   let accounts: ComposioAccountService | undefined;
   let accountsKey: string | undefined;
-  app.route(
-    '/',
-    accountRoutes(() => {
-      const key = platform.config.composioApiKey;
-      if (!key) return undefined;
-      if (!accounts || accountsKey !== key) {
-        accounts = composioAccountService(
-          composioClient(key),
-          platform.workspace.ownerId,
-        );
-        accountsKey = key;
-      }
-      return accounts;
-    }),
-  );
+  const accountService = () => {
+    const key = platform.config.composioApiKey;
+    if (!key) return undefined;
+    if (!accounts || accountsKey !== key) {
+      accounts = composioAccountService(
+        composioClient(key),
+        platform.workspace.ownerId,
+      );
+      accountsKey = key;
+    }
+    return accounts;
+  };
+  app.route('/', accountRoutes(accountService));
+  app.route('/', discoveryRoutes(platform, accountService));
   app.post('/setup-telemetry', async (c) => {
     const parsed = setupInputSchema.safeParse(
       await c.req.json().catch(() => null),

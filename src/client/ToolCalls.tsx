@@ -6,6 +6,8 @@ import { legacyConnectionActionTool } from '../shared/connection-types';
 import { ComputerToolCard, computerToolResult } from './ComputerToolCard';
 import { PageReviewCard } from './PageReviewCard';
 import { ConnectionActionCard } from './ConnectionActionCard';
+import { ApprovalRequestCard } from './ApprovalRequestCard';
+import { approvalRequestTool } from '../shared/approval-request';
 
 type AssistantMessage = Extract<Message, { role: 'assistant' }>;
 
@@ -94,6 +96,16 @@ export function ToolCalls({
             <PageReviewCard
               key={call.id}
               args={args}
+              result={result}
+              approval={approval}
+              running={running}
+              onDecide={onDecide}
+            />
+          );
+        if (approval?.kind === 'action' || name === approvalRequestTool.name)
+          return (
+            <ApprovalRequestCard
+              key={call.id}
               result={result}
               approval={approval}
               running={running}

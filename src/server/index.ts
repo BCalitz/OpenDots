@@ -13,6 +13,7 @@ import { PushService, scheduledResultMessage } from './push.js';
 import { pushNotifier } from './inbox/notify.js';
 import {
   agentRunTimeoutMsFromEnv,
+  discoveryThresholdFromEnv,
   legacySettingsNotice,
   type PlatformConfig,
 } from './platform-config.js';
@@ -46,6 +47,10 @@ const config: PlatformConfig = {
   browserUrl: process.env.BROWSER_URL,
   browserSecret: process.env.BROWSER_SECRET,
   composioApiKey: process.env.COMPOSIO_API_KEY || undefined,
+  discoveryModel: process.env.DISCOVERY_MODEL || undefined,
+  discoveryBaseUrl: process.env.DISCOVERY_BASE_URL || undefined,
+  discoveryApiKey: process.env.DISCOVERY_API_KEY || undefined,
+  discoveryThreshold: discoveryThresholdFromEnv(process.env),
   computerSupervisorUrl: process.env.COMPUTER_SUPERVISOR_URL,
   computerSupervisorToken: process.env.COMPUTER_SUPERVISOR_TOKEN,
   computerToken: process.env.COMPUTER_TOKEN,
@@ -142,6 +147,17 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`OpenDots template listening on http://${host}:${info.port}`);
   runner.start();
   platform.inbox.onEvents(pushNotifier(push));
+  platform.discovery.onReady((finding, event) => {
+    const dotName =
+      (finding.dotId && workspace.dot(finding.dotId)?.name) || 'Your Dot';
+    return push.send({
+      title: `${dotName} looked into something for you`,
+      body: push.previews
+        ? `${event.title}: ${finding.reason}`.slice(0, 160)
+        : 'Open the conversation to see what it found and suggests.',
+      data: { threadId: finding.threadId ?? undefined },
+    });
+  });
   platform.inbox.start();
   void platform
     .start()
