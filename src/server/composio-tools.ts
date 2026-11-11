@@ -1,4 +1,5 @@
-import { defineTool, type ToolDefinition } from '@copilotkit/runtime/v2';
+import type { JSONSchema } from '@tanstack/ai';
+import type { Tool } from './engine/tools.js';
 import type { composioSession } from './composio.js';
 import { safeFailure } from './slack-channel.js';
 import type { UsageStore } from './usage-store.js';
@@ -30,39 +31,37 @@ export async function composioTools(
   const tools = await cancellable.tools(undefined, { signal });
   return tools
     .filter((tool) => tool.type === 'function')
-    .map(({ function: fn }) =>
-      defineTool({
-        name: fn.name,
-        description: fn.description ?? `Use the Composio ${fn.name} tool.`,
-        parameters: fn.parameters as unknown as ToolDefinition['parameters'],
-        execute: async (input: unknown) => {
-          check();
-          // Composio slugs start with the toolkit, e.g. GMAIL_SEND_EMAIL.
-          const entry = log?.store.beginAction({
-            dotId: log.dotId,
-            threadId: log.threadId,
-            kind: 'app',
-            target: fn.name.split('_')[0]?.toLowerCase() || 'composio',
-            action: fn.name,
-          });
-          try {
-            const { data, error } = await cancellable.execute(
-              fn.name,
-              input as Record<string, unknown>,
-              undefined,
-              { signal },
-            );
-            if (entry)
-              log!.store.finishAction(entry, error ? 'failed' : 'succeeded');
-            return { data, error };
-          } catch (error) {
-            if (entry) log!.store.finishAction(entry, 'failed');
-            return {
-              data: {},
-              error: `Composio tool failed: ${safeFailure(error)}.`,
-            };
-          }
-        },
-      }),
-    );
+    .map(({ function: fn }): Tool => ({
+      name: fn.name,
+      description: fn.description ?? `Use the Composio ${fn.name} tool.`,
+      parameters: (fn.parameters ?? { type: 'object' }) as JSONSchema,
+      execute: async (input: unknown) => {
+        check();
+        // Composio slugs start with the toolkit, e.g. GMAIL_SEND_EMAIL.
+        const entry = log?.store.beginAction({
+          dotId: log.dotId,
+          threadId: log.threadId,
+          kind: 'app',
+          target: fn.name.split('_')[0]?.toLowerCase() || 'composio',
+          action: fn.name,
+        });
+        try {
+          const { data, error } = await cancellable.execute(
+            fn.name,
+            input as Record<string, unknown>,
+            undefined,
+            { signal },
+          );
+          if (entry)
+            log!.store.finishAction(entry, error ? 'failed' : 'succeeded');
+          return { data, error };
+        } catch (error) {
+          if (entry) log!.store.finishAction(entry, 'failed');
+          return {
+            data: {},
+            error: `Composio tool failed: ${safeFailure(error)}.`,
+          };
+        }
+      },
+    }));
 }

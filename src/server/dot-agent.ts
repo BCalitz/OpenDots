@@ -10,15 +10,11 @@ import { composioTools } from './composio-tools.js';
 import { pageAccess, pageTools } from './page-tools.js';
 import { AbstractAgent } from '@ag-ui/client';
 import { type BaseEvent, type RunAgentInput, EventType } from '@ag-ui/core';
-import {
-  BuiltInAgent,
-  type ToolDefinition,
-  defineTool,
-  convertInputToTanStackAI,
-} from '@copilotkit/runtime/v2';
+import { BuiltInAgent, convertInputToTanStackAI } from '@copilotkit/runtime/v2';
+import { defineTool, toTanStackTools, type Tool } from './engine/tools.js';
 import { chat, maxIterations } from '@tanstack/ai';
 import { openaiCompatibleText } from '@tanstack/ai-openai/compatible';
-import { learnedSkillTools, tanstackTools } from './tanstack-tools.js';
+import { learnedSkillTools } from './tanstack-tools.js';
 import { Observable } from 'rxjs';
 import { z } from 'zod';
 import { Store } from './store.js';
@@ -220,7 +216,7 @@ export class DotAgent extends AbstractAgent {
           this.config,
           () => this.store.settings().paused,
         );
-        const tools: ToolDefinition[] =
+        const tools: Tool[] =
           dot.researchAllowed &&
           initialSettings.researchAllowed &&
           this.config.webSearchProvider === 'browser' &&
@@ -532,8 +528,10 @@ export class DotAgent extends AbstractAgent {
                     : 5,
                 ),
                 tools: [
-                  ...tanstackTools(serverTools),
-                  ...connected,
+                  ...toTanStackTools([...serverTools, ...connected], {
+                    signal: controller.signal,
+                    emit: (event) => subscriber.next(event),
+                  }),
                   ...converted.tools,
                   ...learnedSkillTools(ctx, check),
                 ],

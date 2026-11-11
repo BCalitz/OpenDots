@@ -7,6 +7,7 @@ import { WorkspaceStore } from '../src/server/workspace.js';
 import { ComputerService } from '../src/server/computer-service.js';
 import { computerInputs } from '../src/shared/computer-types.js';
 import { computerTools } from '../src/server/computer-tools.js';
+import { detachedContext } from '../src/server/engine/tools.js';
 const stores: WorkspaceStore[] = [];
 afterEach(() => {
   for (const store of stores.splice(0)) store.close();
@@ -247,7 +248,7 @@ it('binds tools to the current Dot without exposing human or policy controls', a
     ),
   ).toBe(false);
   const read = tools.find((t) => t.name === 'computer_files_read')!;
-  await read.execute?.({ path: 'notes.txt' });
+  await read.execute({ path: 'notes.txt' }, detachedContext());
   expect(check).toHaveBeenCalled();
   expect(f.calls.at(-1)?.url).toContain(f.id);
 });

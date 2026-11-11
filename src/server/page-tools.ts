@@ -1,4 +1,4 @@
-import { defineTool } from '@copilotkit/runtime/v2';
+import { defineTool } from './engine/tools.js';
 import { z } from 'zod';
 import type { WorkspaceStore } from './workspace.js';
 import { pageInput, pagePatch } from './pages.js';

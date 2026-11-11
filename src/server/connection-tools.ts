@@ -1,4 +1,5 @@
-import { toolDefinition } from '@tanstack/ai';
+import type { JSONSchema } from '@tanstack/ai';
+import type { Tool } from './engine/tools.js';
 import { connectionActionTool } from '../shared/connection-types.js';
 import type { ConnectionService } from './connections.js';
 import type { UsageStore } from './usage-store.js';
@@ -14,16 +15,15 @@ export function connectionTools(
   approvals: boolean,
   log?: UsageStore,
 ) {
-  return connections.tools(dotId).map((exposed) =>
-    toolDefinition({
-      name: exposed.name,
-      description:
-        `[${exposed.connection.name}${exposed.tool.requiresApproval ? ', needs owner approval' : ''}] ${exposed.tool.title}: ${exposed.tool.description}`.slice(
-          0,
-          1024,
-        ),
-      inputSchema: exposed.tool.inputSchema,
-    }).server(async (args) => {
+  return connections.tools(dotId).map((exposed): Tool => ({
+    name: exposed.name,
+    description:
+      `[${exposed.connection.name}${exposed.tool.requiresApproval ? ', needs owner approval' : ''}] ${exposed.tool.title}: ${exposed.tool.description}`.slice(
+        0,
+        1024,
+      ),
+    parameters: exposed.tool.inputSchema as JSONSchema,
+    execute: async (args: unknown) => {
       check();
       // Re-resolve so a tool the owner just disabled or gated is honored.
       const current = connections.resolve(dotId, exposed.name);
@@ -60,6 +60,6 @@ export function connectionTools(
         log!.finishAction(entry, result.isError ? 'failed' : 'succeeded');
       check();
       return result;
-    }),
-  );
+    },
+  }));
 }

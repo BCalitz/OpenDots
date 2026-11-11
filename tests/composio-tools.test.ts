@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { composioTools } from '../src/server/composio-tools.js';
+import { detachedContext } from '../src/server/engine/tools.js';
 import type { composioSession } from '../src/server/composio.js';
 
 type Session = Awaited<ReturnType<typeof composioSession>>;
@@ -31,11 +32,15 @@ it('passes Composio JSON Schema through and returns only safe execution failures
   expect(tools).toHaveBeenCalledWith(undefined, { signal });
 
   expect(tool.parameters).toBe(parameters);
-  await expect(tool.execute?.({ query: 'one' })).resolves.toEqual({
+  await expect(
+    tool.execute({ query: 'one' }, detachedContext()),
+  ).resolves.toEqual({
     data: { ok: true },
     error: null,
   });
-  await expect(tool.execute?.({ query: 'two' })).resolves.toEqual({
+  await expect(
+    tool.execute({ query: 'two' }, detachedContext()),
+  ).resolves.toEqual({
     data: {},
     error: 'Composio tool failed: Error.',
   });
