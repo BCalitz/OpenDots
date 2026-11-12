@@ -417,6 +417,47 @@ export class InboxStore {
       ),
     );
   }
+  /**
+   * Items matching every word of `query` in their title, text or sender,
+   * newest first; for a Dot looking up something the owner mentions.
+   */
+  async search(
+    filter: {
+      query?: string;
+      since?: number;
+      flaggedOnly?: boolean;
+      /**
+       * Only items still waiting on the owner: flagged, not resolved or
+       * dismissed, and with no choice made that settled them.
+       */
+      waitingOnly?: boolean;
+      limit?: number;
+    } = {},
+  ): Promise<InboxEventView[]> {
+    const where = [];
+    for (const word of (filter.query ?? '')
+      .split(/\s+/)
+      .map((part) => part.replace(/[%_\\]/g, '').trim())
+      .filter((part) => part.length > 1)
+      .slice(0, 8)) {
+      const like = `%${word}%`;
+      where.push(
+        sql`(e.title ILIKE ${like} OR e.summary ILIKE ${like} OR e.sender ILIKE ${like})`,
+      );
+    }
+    if (filter.since) where.push(sql`e.occurred_at>=${filter.since}`);
+    if (filter.flaggedOnly || filter.waitingOnly) where.push(sql`f.attention`);
+    if (filter.waitingOnly)
+      where.push(
+        sql`f.state<>'resolved' AND e.state<>'dismissed' AND NOT EXISTS (SELECT 1 FROM proposals p WHERE p.finding_id=f.id AND p.state IN ('handled', 'dismissed', 'closed', 'preparing', 'handling'))`,
+      );
+    const limit = Math.min(Math.max(filter.limit ?? 20, 1), 50);
+    return this.toEvents(
+      await this.db.rows<EventRow>(
+        sql`${EVENT_QUERY} ${where.length ? sql`WHERE ${sql.join(where, ' AND ')}` : sql``} ORDER BY e.occurred_at DESC LIMIT ${limit}`,
+      ),
+    );
+  }
   async setState(id: string, state: InboxEventState) {
     const changed = await this.db.run(
       sql`UPDATE inbox_events SET state=${state} WHERE id=${id}`,

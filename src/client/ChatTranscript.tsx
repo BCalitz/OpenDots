@@ -38,10 +38,19 @@ export function ChatTranscript({
   messages,
   calls,
   renderTools,
+  renderActions,
+  renderAfter,
+  renderMessage,
 }: {
   messages: Message[];
   calls: CallReceipt[];
   renderTools?: (message: AssistantMessage) => ReactNode;
+  /** Per-message actions, shown on hover (for example splitting). */
+  renderActions?: (message: Message) => ReactNode;
+  /** Shown after a message, such as the topic threads that grew from it. */
+  renderAfter?: (message: Message) => ReactNode;
+  /** Replaces a message's bubble when it returns something other than undefined. */
+  renderMessage?: (message: Message) => ReactNode | undefined;
 }) {
   const ids = new Set(messages.map((message) => message.id));
   return (
@@ -55,48 +64,57 @@ export function ChatTranscript({
         ))}
       {messages.map((message) => (
         <Fragment key={message.id}>
-          {typeof message.content === 'string' && message.content.trim() && (
-            <div
-              className={`chat-bubble ${message.role}${isScheduledTaskMessage(message) || isDiscoveryMessage(message) ? ' scheduled' : ''}`}
-            >
-              {isScheduledTaskMessage(message) && (
-                <span className="scheduled-message-label">Scheduled</span>
-              )}
-              {isDiscoveryMessage(message) && (
-                <span className="scheduled-message-label">Discovery</span>
-              )}
-              <ReactMarkdown
-                components={{
-                  img: ({ alt }) => <span>{alt}</span>,
-                  a: ({ href, children }) => (
-                    <a
-                      onClick={(event) => {
-                        if (href?.startsWith('/#/spaces/')) {
-                          event.preventDefault();
-                          openPageLink(href);
-                        }
+          {renderMessage?.(message) !== undefined
+            ? renderMessage(message)
+            : typeof message.content === 'string' &&
+              message.content.trim() && (
+                <div className={`chat-message ${message.role}`}>
+                  <div
+                    className={`chat-bubble ${message.role}${isScheduledTaskMessage(message) || isDiscoveryMessage(message) ? ' scheduled' : ''}`}
+                  >
+                    {isScheduledTaskMessage(message) && (
+                      <span className="scheduled-message-label">Scheduled</span>
+                    )}
+                    {isDiscoveryMessage(message) && (
+                      <span className="scheduled-message-label">Discovery</span>
+                    )}
+                    <ReactMarkdown
+                      components={{
+                        img: ({ alt }) => <span>{alt}</span>,
+                        a: ({ href, children }) => (
+                          <a
+                            onClick={(event) => {
+                              if (href?.startsWith('/#/spaces/')) {
+                                event.preventDefault();
+                                openPageLink(href);
+                              }
+                            }}
+                            href={href}
+                            target={
+                              href?.startsWith('/#/spaces/')
+                                ? undefined
+                                : '_blank'
+                            }
+                            rel="noreferrer"
+                          >
+                            {children}
+                          </a>
+                        ),
                       }}
-                      href={href}
-                      target={
-                        href?.startsWith('/#/spaces/') ? undefined : '_blank'
-                      }
-                      rel="noreferrer"
                     >
-                      {children}
-                    </a>
-                  ),
-                }}
-              >
-                {String(message.content)}
-              </ReactMarkdown>
-            </div>
-          )}
+                      {String(message.content)}
+                    </ReactMarkdown>
+                  </div>
+                  {renderActions?.(message)}
+                </div>
+              )}
           {message.role === 'assistant' && renderTools?.(message)}
           {calls
             .filter((call) => call.anchorMessageId === message.id)
             .map((call) => (
               <Receipt key={call.id} call={call} />
             ))}
+          {renderAfter?.(message)}
         </Fragment>
       ))}
     </>

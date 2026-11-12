@@ -103,6 +103,10 @@ export interface Conversation {
   createdAt: number;
   /** Set for background threads, such as one mirroring a Slack thread. */
   source?: string;
+  /** Set for a topic thread: the Dot's main chat it belongs to. */
+  parentId?: string;
+  /** The main-chat message the thread grew from, when there is one. */
+  anchorMessageId?: string;
 }
 export interface CallReceipt {
   anchorMessageId?: string | null;

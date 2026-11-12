@@ -368,6 +368,7 @@ async function seedFindings(added: InboxEventView[]) {
   ] as const) {
     await links.queuePush({
       findingId: entry.finding.id,
+      proposalId: null,
       kind: 'finding',
       title: `Dot: ${title}`,
       body: entry.event.title,

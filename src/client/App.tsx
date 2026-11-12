@@ -66,6 +66,17 @@ export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>();
   const [selectedDot, setSelectedDot] = useState('');
   const [selectedThread, setSelectedThread] = useState<string>();
+  // Bumped after a split so open chats reload without the moved messages.
+  const [splits, setSplits] = useState(0);
+  // The last message OpenDots sorted into a thread, so the owner can undo it.
+  const [moved, setMoved] = useState<{
+    threadId: string;
+    messageId: string;
+    title: string;
+    to: 'thread' | 'new';
+    parentId: string;
+  }>();
+  const [undoError, setUndoError] = useState('');
   const [view, rawSetView] = useState<
     'chat' | 'tasks' | 'memories' | 'space' | 'insights' | 'inbox' | 'accounts'
   >('chat');
@@ -185,13 +196,57 @@ export function App() {
   const dot =
     workspace?.dots.find((item) => item.id === selectedDot) ??
     workspace?.dots[0];
-  // Each Dot is one continuing chat. A specific thread (for example a Dot
-  // answering another Dot, opened from Insights) can still be shown directly.
-  const threadId =
-    selectedThread ?? (dot ? workspace?.mainConversations[dot.id] : undefined);
-  const thread = workspace?.conversations.find(
-    (item) => item.id === threadId && item.dotId === dot?.id,
+  // Each Dot is one continuing chat, and each topic in it is a thread shown
+  // beside the chat. Other threads (for example Slack mirrors) can still be
+  // shown directly.
+  const mainId = dot ? workspace?.mainConversations[dot.id] : undefined;
+  const selected = workspace?.conversations.find(
+    (item) => item.id === selectedThread && item.dotId === dot?.id,
   );
+  const topic = selected?.parentId ? selected : undefined;
+  const thread = workspace?.conversations.find(
+    (item) =>
+      item.id === (topic ? topic.parentId : (selected?.id ?? mainId)) &&
+      item.dotId === dot?.id,
+  );
+  const topics =
+    workspace?.conversations.filter(
+      (item) => !!thread && item.parentId === thread.id,
+    ) ?? [];
+  const threadId = topic?.id ?? thread?.id;
+  const closeTopic = () =>
+    setSelectedThread(thread && thread.id !== mainId ? thread.id : undefined);
+  const splitThread = async (
+    fromId: string,
+    messageId: string,
+    mode: 'move' | 'copy',
+  ) => {
+    const next = await api<Conversation>(
+      `/conversations/${fromId}/split`,
+      'POST',
+      { messageId, mode },
+    );
+    await refresh();
+    if (mode === 'move') setSplits((value) => value + 1);
+    setSelectedThread(next.id);
+  };
+  const undoMove = async () => {
+    if (!moved) return;
+    setUndoError('');
+    try {
+      await api(
+        `/chat/${encodeURIComponent(moved.threadId)}/unthread`,
+        'POST',
+        { messageId: moved.messageId },
+      );
+      setMoved(undefined);
+      setSplits((value) => value + 1);
+      setSelectedThread(moved.parentId === mainId ? undefined : moved.parentId);
+      await refresh();
+    } catch (e) {
+      setUndoError(e instanceof Error ? e.message : 'Could not undo.');
+    }
+  };
   useEffect(() => {
     setCapture(undefined);
     if (!threadId) return;
@@ -688,11 +743,40 @@ export function App() {
             }}
           />
         ) : view === 'chat' ? (
-          <div className={`chat-workspace ${pane ? 'split' : ''}`}>
+          <div
+            className={`chat-workspace ${pane ? 'split' : ''} ${topic ? 'threaded' : ''}`}
+          >
             <div className="chat-column">
+              {moved && moved.parentId === thread?.id && (
+                <div className="moved-notice" role="status">
+                  <span>
+                    {moved.to === 'new' ? 'Started a thread' : 'Continued in'}{' '}
+                    <button
+                      className="text-button"
+                      onClick={() => setSelectedThread(moved.threadId)}
+                    >
+                      {moved.title}
+                    </button>
+                  </span>
+                  {undoError && <small>{undoError}</small>}
+                  <button
+                    className="text-button"
+                    onClick={() => void undoMove()}
+                  >
+                    Undo
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label="Dismiss"
+                    onClick={() => setMoved(undefined)}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
               {thread && configured ? (
                 <Chat
-                  key={thread.id}
+                  key={`${thread.id}:${splits}`}
                   thread={thread}
                   dot={dot}
                   initialPrompt={pendingPrompt}
@@ -706,6 +790,29 @@ export function App() {
                   onComputer={() => setPane(true)}
                   onSchedule={() =>
                     setDialog({ type: 'schedule', threadId: thread.id })
+                  }
+                  topics={topics}
+                  activeTopicId={topic?.id}
+                  onOpenThread={setSelectedThread}
+                  onSplit={(messageId, mode) =>
+                    splitThread(thread.id, messageId, mode)
+                  }
+                  onMoved={
+                    thread.id === mainId
+                      ? (sent) => {
+                          setUndoError('');
+                          setMoved({
+                            threadId: sent.threadId!,
+                            messageId: sent.messageId,
+                            title: sent.moved!.title,
+                            to: sent.moved!.to,
+                            parentId: thread.id,
+                          });
+                          // The answer streams into this chat; the thread
+                          // opens only when the owner asks for it.
+                          void refresh();
+                        }
+                      : undefined
                   }
                 />
               ) : (
@@ -829,6 +936,30 @@ export function App() {
                 </div>
               )}
             </div>
+            {topic && configured && (
+              <div className="thread-panel">
+                <Chat
+                  key={`${topic.id}:${splits}`}
+                  thread={topic}
+                  dot={dot}
+                  onConsumed={() => undefined}
+                  voiceReady={workspace.setup.voice}
+                  calls={workspace.calls.filter(
+                    (call) => call.threadId === topic.id,
+                  )}
+                  paused={state.settings.paused}
+                  onSaved={refresh}
+                  onComputer={() => setPane(true)}
+                  onSchedule={() =>
+                    setDialog({ type: 'schedule', threadId: topic.id })
+                  }
+                  onSplit={(messageId, mode) =>
+                    splitThread(topic.id, messageId, mode)
+                  }
+                  onClose={closeTopic}
+                />
+              </div>
+            )}
             {pane && (
               <ResultPane
                 key={dot.id}

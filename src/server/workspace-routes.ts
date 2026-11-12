@@ -189,6 +189,38 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     );
     return c.json(conversation, created ? 201 : 200);
   });
+  // Splits a conversation into a topic thread in the same Dot's chat.
+  app.post('/conversations/:id/split', async (c) => {
+    const data = z
+      .object({
+        messageId: z.string().min(1).max(200),
+        mode: z.enum(['move', 'copy']),
+        title: z.string().trim().max(120).optional(),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!data.success)
+      return c.json({ error: 'Choose a message to split from.' }, 400);
+    try {
+      const thread = await platform.splitConversation(
+        c.req.param('id'),
+        data.data.messageId,
+        data.data.mode,
+        data.data.title,
+      );
+      return c.json(thread, 201);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Could not split.';
+      if (/^(Wait for|Choose a message|This part)/.test(message))
+        return c.json({ error: message }, 409);
+      if (
+        /^(Conversation does not belong|Conversation not found)/.test(message)
+      )
+        return c.json({ error: message }, 404);
+      throw error;
+    }
+  });
   app.get('/conversations/:id/capture', async (c) =>
     c.json(await platform.workspace.capture(c.req.param('id'))),
   );

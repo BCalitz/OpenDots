@@ -4,16 +4,21 @@ import type { Page } from '../server/pages';
 import { useEffect, useRef, useState } from 'react';
 import {
   FilePlus,
+  Inbox,
   ArrowUp,
   Clock3,
+  CornerDownRight,
   Link2,
+  MessageSquareReply,
+  MessagesSquare,
+  Scissors,
   Phone,
   PhoneOff,
   Square,
   X,
 } from 'lucide-react';
 import { ToolCalls, toolResults } from './ToolCalls';
-import { useThread } from './useThread';
+import { useThread, type SendResult } from './useThread';
 import { ChatTranscript, isInternalVoiceReceipt } from './ChatTranscript';
 import type { CallReceipt, Conversation, Dot } from '../shared/types';
 import { Mascot } from './Mascot';
@@ -32,6 +37,12 @@ export function Chat({
   onSaved,
   onSchedule,
   onComputer,
+  topics = [],
+  activeTopicId,
+  onOpenThread,
+  onSplit,
+  onClose,
+  onMoved,
 }: {
   thread: Conversation;
   dot: Dot;
@@ -43,6 +54,20 @@ export function Chat({
   onSaved: () => void;
   onSchedule: () => void;
   onComputer?: () => void;
+  /** Topic threads in this chat. */
+  topics?: Conversation[];
+  /** The topic thread open beside this chat, if any. */
+  activeTopicId?: string;
+  onOpenThread?: (threadId: string) => void;
+  /** Splits this conversation at a message into a new topic thread. */
+  onSplit?: (messageId: string, mode: 'move' | 'copy') => Promise<void>;
+  /** Set when this chat is a topic thread shown beside the main chat. */
+  onClose?: () => void;
+  /**
+   * Set on a Dot's main chat: messages may be sorted into topic threads,
+   * and this hears where one went.
+   */
+  onMoved?: (sent: SendResult) => void;
 }) {
   const chat = useThread(thread.id, {
     // A finished turn may have saved pages or changed the workspace.
@@ -83,6 +108,81 @@ export function Chat({
   const [sourceOpen, setSourceOpen] = useState(false);
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
+  const [threadsOpen, setThreadsOpen] = useState(false);
+  const [splitting, setSplitting] = useState(false);
+  const split = async (messageId: string, mode: 'move' | 'copy') => {
+    if (!onSplit || splitting) return;
+    if (
+      mode === 'move' &&
+      !window.confirm(
+        'Move this message and everything after it into a new thread?',
+      )
+    )
+      return;
+    setSplitting(true);
+    setError('');
+    try {
+      await onSplit(messageId, mode);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not split.');
+    } finally {
+      setSplitting(false);
+    }
+  };
+  /** The topic thread a shown exchange belongs to, if any. */
+  const topicOf = (message: object) => {
+    const id = (message as { topicThreadId?: unknown }).topicThreadId;
+    return typeof id === 'string' ? id : undefined;
+  };
+  /** Turns the Dot starts itself, shown in the main chat. */
+  const internalSource = (message: { role: string; metadata?: unknown }) => {
+    const source =
+      message.role === 'user' &&
+      (message.metadata as { opendotsSource?: unknown } | undefined)
+        ?.opendotsSource;
+    return source === 'discovery' ||
+      source === 'reply' ||
+      source === 'prepare' ||
+      source === 'handle'
+      ? source
+      : undefined;
+  };
+  const threadLabel = (threadId: string) => {
+    const topic = topics.find((item) => item.id === threadId);
+    return (
+      <button
+        className={`thread-link ${threadId === activeTopicId ? 'active' : ''}`}
+        onClick={() => onOpenThread?.(threadId)}
+      >
+        <CornerDownRight size={12} />
+        In thread{topic ? <strong>{topic.title}</strong> : null}
+      </button>
+    );
+  };
+  const threadCard = (topic: Conversation) => (
+    <button
+      key={topic.id}
+      className={`thread-card ${topic.id === activeTopicId ? 'active' : ''}`}
+      onClick={() => onOpenThread?.(topic.id)}
+    >
+      <CornerDownRight size={14} />
+      <span>
+        <strong>{topic.title}</strong>
+        <small>
+          {topic.source === 'discovery'
+            ? 'From your inbox'
+            : topic.title.startsWith('From ')
+              ? 'Asked by another Dot'
+              : 'Thread'}
+          {' · '}
+          {new Date(topic.createdAt).toLocaleDateString(undefined, {
+            month: 'short',
+            day: 'numeric',
+          })}
+        </small>
+      </span>
+    </button>
+  );
   const chatError = error || chat.runError || chat.connectionError;
   const loaded = chat.ready;
   const running = chat.running || sending;
@@ -98,7 +198,10 @@ export function Chat({
     setSource('');
     setSourceOpen(false);
     try {
-      await chat.send(contextualMessage(text, pageContext));
+      const sent = await chat.send(contextualMessage(text, pageContext), {
+        autoThread: !!onMoved,
+      });
+      if (sent.moved && sent.threadId) onMoved?.(sent);
     } catch (e) {
       // Keep what the owner wrote so nothing is lost.
       setDraft(previous.draft);
@@ -142,8 +245,43 @@ export function Chat({
     ].some((action) => call.function.name === `computer_${action}`),
   );
   const results = toolResults(messages);
+  // In the main chat, an exchange from a topic thread shows only what
+  // happened: the Dot's final answer and anything waiting on the owner. The
+  // thread keeps the tool calls and the working in between.
+  const fromThread = new Set<string>();
+  const outcomes = new Set<string>();
+  if (!onClose) {
+    let from: string | undefined;
+    let lastText: string | undefined;
+    const close = () => {
+      if (from && lastText) outcomes.add(lastText);
+      lastText = undefined;
+    };
+    for (const message of messages) {
+      if (message.role === 'user') {
+        close();
+        from = topicOf(message);
+        continue;
+      }
+      if (!from) continue;
+      fromThread.add(message.id);
+      if (
+        message.role === 'assistant' &&
+        typeof message.content === 'string' &&
+        message.content.trim()
+      )
+        lastText = message.id;
+    }
+    close();
+  }
+  const asksOwner = (message: (typeof messages)[number]) =>
+    message.role === 'assistant' &&
+    !!message.toolCalls?.some((call) => chat.approvals[call.id]);
   const visible = messages.filter(
     (message) =>
+      (!fromThread.has(message.id) ||
+        outcomes.has(message.id) ||
+        asksOwner(message)) &&
       !isInternalVoiceReceipt(message) &&
       ['user', 'assistant'].includes(message.role) &&
       ((typeof message.content === 'string' && message.content.trim()) ||
@@ -159,8 +297,14 @@ export function Chat({
           state={running ? 'working' : paused ? 'paused' : 'idle'}
         />
         <div>
-          <strong>{dot.name}</strong>
+          <strong>{onClose ? thread.title : dot.name}</strong>
           <span>
+            {onClose && (
+              <>
+                Thread with {dot.name}
+                {' · '}
+              </>
+            )}
             {paused
               ? 'Paused'
               : running
@@ -171,6 +315,30 @@ export function Chat({
           </span>
         </div>
         <div className="chat-persona-actions">
+          {!onClose && topics.length > 0 && (
+            <div className="threads-menu">
+              <button
+                className={`icon-button ${threadsOpen ? 'on' : ''}`}
+                aria-label="Threads in this chat"
+                aria-expanded={threadsOpen}
+                title="Threads"
+                onClick={() => setThreadsOpen(!threadsOpen)}
+              >
+                <MessagesSquare size={18} />
+                <span className="threads-count">{topics.length}</span>
+              </button>
+              {threadsOpen && (
+                <div className="threads-popover" role="menu">
+                  <strong>Threads</strong>
+                  {topics.map((topic) => (
+                    <div key={topic.id} onClick={() => setThreadsOpen(false)}>
+                      {threadCard(topic)}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <button
             className="icon-button"
             aria-label="Save conversation as page"
@@ -224,6 +392,15 @@ export function Chat({
               <PhoneOff size={18} />
             )}
           </button>
+          {onClose && (
+            <button
+              className="icon-button"
+              aria-label="Close thread"
+              onClick={onClose}
+            >
+              <X size={18} />
+            </button>
+          )}
         </div>
       </header>
       {pageContext && (
@@ -238,7 +415,7 @@ export function Chat({
         {!visible.length && (
           <div className="chat-welcome">
             <span className="eyebrow">A LITTLE SPACE TO THINK</span>
-            <h1>What’s on your mind?</h1>
+            <h1>{onClose ? thread.title : 'What’s on your mind?'}</h1>
             <p>{dot.instructions}</p>
             <p className="muted">
               Your conversation stays with this Dot, across text and calls.
@@ -248,9 +425,95 @@ export function Chat({
         <ChatTranscript
           messages={visible}
           calls={calls}
+          renderActions={
+            onSplit && !running
+              ? (message) =>
+                  // An exchange shown from a thread is split from there.
+                  topicOf(message) ? null : (
+                    <div className="message-actions">
+                      {!onClose && (
+                        <button
+                          disabled={splitting}
+                          title="Start a thread with this exchange; the chat stays as it is"
+                          onClick={() => void split(message.id, 'copy')}
+                        >
+                          <MessageSquareReply size={13} /> Reply in thread
+                        </button>
+                      )}
+                      <button
+                        disabled={splitting}
+                        title="Move this exchange and everything after it into a new thread"
+                        onClick={() => void split(message.id, 'move')}
+                      >
+                        <Scissors size={13} /> Split from here
+                      </button>
+                    </div>
+                  )
+              : undefined
+          }
+          renderAfter={(message) => {
+            const here = topics.filter(
+              (topic) => topic.anchorMessageId === message.id,
+            );
+            const shown = topicOf(message);
+            return (
+              <>
+                {shown &&
+                  message.role === 'user' &&
+                  !internalSource(message) &&
+                  threadLabel(shown)}
+                {here.length > 0 && (
+                  <div className="thread-cards">{here.map(threadCard)}</div>
+                )}
+              </>
+            );
+          }}
+          renderMessage={(message) => {
+            const shown = topicOf(message);
+            const source = internalSource(message);
+            if (!shown || !source || onClose) return undefined;
+            // The Dot's own prompt to itself is not the owner's words.
+            if (source === 'reply') return null;
+            if (source === 'discovery') {
+              const topic = topics.find((item) => item.id === shown);
+              return (
+                <button
+                  className="dot-notice"
+                  onClick={() => onOpenThread?.(shown)}
+                >
+                  <Inbox size={14} />
+                  <span>
+                    {dot.name} noticed something
+                    {topic ? (
+                      <>
+                        : <strong>{topic.title}</strong>
+                      </>
+                    ) : null}
+                  </span>
+                </button>
+              );
+            }
+            return (
+              <div className="chat-message user">
+                <div className="chat-bubble user">
+                  {String(message.content).split(/\r?\n/)[0]}
+                </div>
+                {threadLabel(shown)}
+              </div>
+            );
+          }}
           renderTools={(message) => (
             <ToolCalls
-              message={message}
+              message={
+                fromThread.has(message.id)
+                  ? {
+                      ...message,
+                      toolCalls: message.toolCalls?.filter(
+                        (call) => chat.approvals[call.id],
+                      ),
+                    }
+                  : message
+              }
               results={results}
               approvals={chat.approvals}
               running={chat.running}
@@ -339,8 +602,8 @@ export function Chat({
             <Link2 size={19} />
           </button>
           <textarea
-            aria-label="Message your Dot"
-            placeholder={`Message ${dot.name}…`}
+            aria-label={onClose ? 'Reply in thread' : 'Message your Dot'}
+            placeholder={onClose ? 'Reply in thread…' : `Message ${dot.name}…`}
             rows={1}
             value={draft}
             maxLength={4000}

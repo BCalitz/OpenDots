@@ -12,6 +12,13 @@ const initial: ThreadState = {
   runError: '',
   connectionError: '',
 };
+/** Where a sent message went: this thread, or a topic thread. */
+export interface SendResult {
+  runId: string;
+  threadId?: string;
+  moved?: { to: 'thread' | 'new'; title: string };
+  messageId: string;
+}
 const chatPath = (threadId: string) => `/chat/${encodeURIComponent(threadId)}`;
 
 const newId = () =>
@@ -49,11 +56,18 @@ export function useThread(
 
   /** Sends a message; resolves once the server has started the turn. */
   const send = useCallback(
-    async (content: string) => {
+    async (content: string, options: { autoThread?: boolean } = {}) => {
       const id = newId();
       connection.current?.addOptimistic({ id, role: 'user', content });
       try {
-        await api(`${chatPath(threadId)}/messages`, 'POST', { id, content });
+        const sent = await api<SendResult>(
+          `${chatPath(threadId)}/messages`,
+          'POST',
+          { id, content, ...(options.autoThread ? { autoThread: true } : {}) },
+        );
+        // A message sorted into a topic thread still shows here: the main
+        // chat streams that thread's answer too.
+        return { ...sent, messageId: id };
       } catch (error) {
         connection.current?.removeOptimistic(id);
         throw error;

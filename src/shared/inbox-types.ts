@@ -237,6 +237,63 @@ export interface DiscoverySettings {
   /** Apps (Composio toolkits) where a Dot may propose actions for approval. */
   allowedApps: string[];
 }
+/**
+ * A flagged item a Dot has looked into, waiting for the owner's choice:
+ * - open: waiting for the owner.
+ * - preparing / prepared: "Prepare it for me" is running / done.
+ * - handling / handled: "Handle it" is running / done.
+ * - snoozed: "Not now" until `snoozeUntil`, then open again.
+ * - dismissed: "Not now" for good; counts toward the sender's triage rule.
+ * - failed: preparing or handling did not finish; see `error`.
+ * - closed: a later item said it no longer needs the owner.
+ */
+export type ProposalState =
+  | 'open'
+  | 'preparing'
+  | 'prepared'
+  | 'handling'
+  | 'handled'
+  | 'snoozed'
+  | 'dismissed'
+  | 'failed'
+  | 'closed';
+/** The three standard choices. "Not now" is snooze or dismiss. */
+export type ProposalChoice = 'prepare' | 'handle' | 'not_now';
+export type ProposalDecision = 'prepare' | 'handle' | 'snooze' | 'dismiss';
+export interface ProposalView {
+  id: string;
+  findingId: string;
+  eventId: string;
+  dotId: string;
+  /** The proposal's own conversation, for follow-up questions. */
+  threadId: string;
+  title: string;
+  /** The Dot's findings, shortened. */
+  summary: string;
+  /** Which of the three choices fit this item. */
+  options: ProposalChoice[];
+  state: ProposalState;
+  decision: ProposalDecision | null;
+  decidedAt: number | null;
+  snoozeUntil: number | null;
+  /** Higher first: urgency, then how sure Jev was. */
+  importance: number;
+  urgency: Urgency | null;
+  route: Route | null;
+  /** The sender's address, for the triage rule. */
+  sender: string | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+/** A sender whose items are no longer flagged, because the owner kept
+ * dismissing them. */
+export interface TriageRuleView {
+  sender: string;
+  dismissed: number;
+  lastDismissedAt: number;
+}
+
 /** One item waiting for the morning brief. */
 export interface BriefEntry {
   findingId: string | null;
@@ -244,6 +301,8 @@ export interface BriefEntry {
   title: string;
   body: string;
   threadId: string | null;
+  /** Set when the item has the three choices. */
+  proposalId: string | null;
   section: 'decisions' | 'drafts' | 'updates';
   createdAt: number;
 }

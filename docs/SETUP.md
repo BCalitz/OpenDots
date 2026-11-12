@@ -104,7 +104,12 @@ Discovery watches chosen accounts and tells you when something needs you, withou
 5. **Route (code).** What is asked decides what the Dot does: nothing asked, it only tells you; information or a reply, it drafts the reply in the conversation; an action, it proposes it for your approval in apps you allow (Accounts, **Apps where a Dot may propose actions**) and otherwise tells you what is needed, where and who asked; a decision, it gathers the facts and options and proposes nothing. Items that try to instruct an AI are shown to you and never handed to a Dot.
 6. **Investigate, read-only.** Each flagged item that needs more than a mention gets its own conversation with the chosen Dot (up to five per check, highest confidence first). A follow-up to an item already being discussed continues that conversation, and earlier items Jev found useful or contradicting are quoted for the Dot. The Dot can only read: Composio is limited to tools tagged `readOnlyHint`, every app tool is checked again before it runs, the remote workbench and new sign-ins are off, and only connection tools marked read-only that run without asking are offered. It cannot write pages, use the computer or ask other Dots. It replies with what came in, what it found and what it suggests.
 7. **Deliver.** Within hours: a push now, even in quiet hours. Today: a push after a short hold (5 minutes by default), so a quick follow-up can cancel it; in quiet hours it waits for the brief. By tomorrow or later: the morning brief, one push a day at the time you choose, filed under decisions, drafts to approve and updates. The **Brief** tab shows what the next brief holds and what the last one held. Set the brief time, quiet hours (22:00 to 07:00 by default), the hold, your time zone, your own addresses and domains, and the apps where Dots may propose actions under **When discovery tells you** on the **Accounts** page.
-8. **You decide.** Nothing changes until you reply in that conversation. From then on it is an ordinary chat with the Dot's normal tools and approvals. Drafts stay in the conversation; nothing is sent from your mailbox.
+8. **You decide.** When the Dot has looked into an item, it waits on the Inbox **For you** tab (and the mobile app's **Inbox** screen), most important first, with three choices. Each runs in the item's own conversation, so you can ask the Dot questions there first.
+   - **Prepare it for me:** the Dot researches with read-only app tools, saves a page with the plan, the context and links, and writes any replies as drafts in the conversation. Nothing leaves OpenDots.
+   - **Handle it:** the Dot carries out the plan with its normal tools. Every change, send or reply asks for your approval in the conversation first, and a push tells you when one is waiting. This choice only appears where the Dot may act: a reply it can draft, or an action in an app you allow.
+   - **Not now:** snooze it for 3 hours or until the next morning brief, or dismiss it. Once you have dismissed a sender's items twice in 90 days, and prepared or handled none of them, their new items stop being flagged, unless they are needed within hours. Quieted senders are listed on the **For you** tab with **Flag again** to undo.
+
+   With the mobile app, the push has these choices as buttons. Drafts stay in the conversation; nothing is sent from your mailbox without your approval.
 
 Set `TYPESAFE_API_KEY` to turn discovery on — get a key from [typesafe.ai](https://typesafe.ai). Without it, discovery stays off and nothing is read or sent.
 
@@ -255,7 +260,7 @@ The site is only up while the PC is on and awake.
 
 ## Automatic Learning
 
-Automatic Learning was a CopilotKit Intelligence feature and is not available now that conversations are stored locally. An OpenDots learning loop that drafts skills for your review is planned (see [ROADMAP.md](ROADMAP.md), phase 8).
+Automatic Learning was a CopilotKit Intelligence feature and is not available now that conversations are stored locally. An OpenDots learning loop that drafts skills for your review is planned (see [ROADMAP.md](ROADMAP.md#learning-later)).
 
 ## Development checks
 

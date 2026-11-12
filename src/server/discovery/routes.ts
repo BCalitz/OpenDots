@@ -7,6 +7,7 @@ import {
 } from '../../shared/inbox-types.js';
 import type { ComposioAccountService } from '../composio-accounts.js';
 import type { Platform } from '../platform.js';
+import { DISMISSALS_TO_QUIET, ProposalClosedError } from './proposals.js';
 
 const time = z
   .string()
@@ -204,6 +205,54 @@ export function discoveryRoutes(
           ? `${dot.name} cannot use connected apps yet, so it can only read the item itself. Turn on Connected apps in Settings and in ${dot.name}’s settings.`
           : undefined,
     });
+  });
+  /** Proposals, most important first; `?all=1` includes decided ones. */
+  app.get('/proposals', async (c) =>
+    c.json(
+      await store.discovery.proposals.list({ all: c.req.query('all') === '1' }),
+    ),
+  );
+  app.get('/proposals/:id', async (c) => {
+    const proposal = await store.discovery.proposals.get(c.req.param('id'));
+    return proposal
+      ? c.json(proposal)
+      : c.json({ error: 'Proposal not found.' }, 404);
+  });
+  /** The owner's choice: prepare, handle, snooze or dismiss. */
+  app.post('/proposals/:id/decide', async (c) => {
+    const body = z
+      .object({
+        choice: z.enum(['prepare', 'handle', 'snooze', 'dismiss']),
+        until: z
+          .union([z.enum(['later', 'tomorrow']), z.number().int().positive()])
+          .optional(),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ error: 'Choose what to do.' }, 400);
+    try {
+      return c.json(
+        await platform.proposals.decide(
+          c.req.param('id'),
+          body.data.choice,
+          body.data.until,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof ProposalClosedError)
+        return c.json({ error: error.message }, 409);
+      throw error;
+    }
+  });
+  /** Senders no longer flagged because the owner kept dismissing them. */
+  app.get('/discovery/rules', async (c) =>
+    c.json(await store.discovery.proposals.rules(DISMISSALS_TO_QUIET)),
+  );
+  app.delete('/discovery/rules/:sender', async (c) => {
+    await store.discovery.proposals.forgetRule(
+      c.req.param('sender').toLowerCase(),
+    );
+    return c.json({ ok: true });
   });
   app.post('/inbox/findings/:id/investigate', async (c) => {
     try {

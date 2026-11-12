@@ -26,6 +26,7 @@ import {
 import { DEFAULT_DISCOVERY_SETTINGS } from '../src/server/discovery/store.js';
 import type { PushMessage } from '../src/server/push.js';
 import { testDb } from './fixtures/db.js';
+import { investigationMessage } from '../src/server/discovery/investigation.js';
 
 describe('routing and delivery tables', () => {
   it('routes by what is asked and what the Dot may do', () => {
@@ -627,5 +628,64 @@ describe('history order', () => {
         )
       ).map((entry) => entry.event.title),
     ).toEqual(['Invoice INV-3001']);
+  });
+});
+
+describe('handing an item to the Dot', () => {
+  it('passes the matches, why they were found and the item tags, even after a restart', async () => {
+    const f = await setup((title, history) =>
+      title.startsWith('Invoice')
+        ? verdict({ attention: false, asked: 'nothing' })
+        : verdict({
+            urgency: 'today',
+            asked: 'reply',
+            related: history.map((h) =>
+              related(h.event.id, { same: 0.1, useful: 0.9 }),
+            ),
+            // What Jev's judge saves: labels for earlier items and answers.
+            answers: {
+              model: 'jev',
+              earlier: Object.fromEntries(
+                history.map((h, index) => [`e${index}`, h.event.id]),
+              ),
+              answers: Object.fromEntries(
+                history.map((_, index) => [`useful__e${index}`, { noul: 0.9 }]),
+              ),
+            },
+          }),
+    );
+    await f.deliver([f.item('Invoice INV-2041 for March')]);
+    // A fresh service, as after a restart: nothing kept in memory.
+    const handed: Parameters<
+      ConstructorParameters<typeof DiscoveryService>[1]['investigate']
+    >[0][] = [];
+    const later = new DiscoveryService(f.store, {
+      judge: () => undefined,
+      investigate: async (input) => {
+        handed.push(input);
+        return { threadId: 'thread' };
+      },
+    });
+    await f.deliver([f.item('Question about INV-2041')]);
+    const question = await f.finding('Question about INV-2041');
+    await later.investigate(question.id);
+    await later.idle();
+    const [input] = handed;
+    expect(input.history).toEqual([
+      expect.objectContaining({
+        note: 'holds facts useful for answering',
+        found: expect.arrayContaining(['both mention invoice INV-2041']),
+        event: expect.objectContaining({ title: 'Invoice INV-2041 for March' }),
+      }),
+    ]);
+    expect(input.tags).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: expect.stringMatching(/2041/) }),
+      ]),
+    );
+    const message = investigationMessage(input);
+    expect(message).toContain('"matched_by"');
+    expect(message).toContain('"mentions"');
+    expect(message).toContain('search_inbox');
   });
 });

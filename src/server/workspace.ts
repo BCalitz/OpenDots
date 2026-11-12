@@ -17,6 +17,30 @@ const DOT = sql.raw(
 const CALL = sql.raw(
   'id, thread_id, started_at, ended_at, status, transcript, error, anchor_message_id',
 );
+const BINDING = sql.raw(
+  'id, dot_id, owner_id, title, created_at, source, parent_id, anchor_message_id',
+);
+type BindingRow = Omit<
+  Conversation,
+  'source' | 'parentId' | 'anchorMessageId'
+> & {
+  source: string | null;
+  parentId: string | null;
+  anchorMessageId: string | null;
+};
+function fromBinding({
+  source,
+  parentId,
+  anchorMessageId,
+  ...row
+}: BindingRow): Conversation {
+  return {
+    ...row,
+    ...(source ? { source } : {}),
+    ...(parentId ? { parentId } : {}),
+    ...(anchorMessageId ? { anchorMessageId } : {}),
+  };
+}
 
 export class WorkspaceStore {
   readonly pages: Pages;
@@ -222,22 +246,24 @@ export class WorkspaceStore {
     );
   }
   async conversations(): Promise<Conversation[]> {
-    const rows = await this.db.rows<Conversation & { source: string | null }>(
-      sql`SELECT id, dot_id, owner_id, title, created_at, source FROM thread_bindings WHERE owner_id=${this.ownerId} ORDER BY created_at DESC`,
+    const rows = await this.db.rows<BindingRow>(
+      sql`SELECT ${BINDING} FROM thread_bindings WHERE owner_id=${this.ownerId} ORDER BY created_at DESC`,
     );
-    return rows.map(({ source, ...row }) => ({
-      ...row,
-      ...(source ? { source } : {}),
-    }));
+    return rows.map(fromBinding);
   }
   /** One of the owner's conversations, if it exists. */
   async conversation(id: string): Promise<Conversation | undefined> {
-    const row = await this.db.row<Conversation & { source: string | null }>(
-      sql`SELECT id, dot_id, owner_id, title, created_at, source FROM thread_bindings WHERE id=${id} AND owner_id=${this.ownerId}`,
+    const row = await this.db.row<BindingRow>(
+      sql`SELECT ${BINDING} FROM thread_bindings WHERE id=${id} AND owner_id=${this.ownerId}`,
     );
-    if (!row) return undefined;
-    const { source, ...rest } = row;
-    return { ...rest, ...(source ? { source } : {}) };
+    return row && fromBinding(row);
+  }
+  /** Topic threads in a Dot's main chat, newest first. */
+  async topicThreads(parentId: string): Promise<Conversation[]> {
+    const rows = await this.db.rows<BindingRow>(
+      sql`SELECT ${BINDING} FROM thread_bindings WHERE parent_id=${parentId} AND owner_id=${this.ownerId} ORDER BY created_at DESC`,
+    );
+    return rows.map(fromBinding);
   }
   /**
    * Each Dot is one continuing chat. Its main conversation is the latest
@@ -269,6 +295,7 @@ export class WorkspaceStore {
       if (
         !main.has(thread.dotId) &&
         !thread.source &&
+        !thread.parentId &&
         // Slack threads from before threads recorded their source.
         thread.title !== 'Slack conversation' &&
         !delegates.has(thread.id)
@@ -276,12 +303,16 @@ export class WorkspaceStore {
         main.set(thread.dotId, thread);
     return main;
   }
-  /** `source` marks a background thread, such as one mirroring Slack. */
+  /**
+   * `source` marks a background thread, such as one mirroring Slack;
+   * `parentId` makes it a topic thread in that main chat.
+   */
   async bindThread(
     id: string,
     dotId: string,
     title: string,
     source?: string,
+    topic?: { parentId: string; anchorMessageId?: string },
   ): Promise<Conversation> {
     if (!(await this.dot(dotId))) throw new Error('Dot not found.');
     const value: Conversation = {
@@ -291,11 +322,21 @@ export class WorkspaceStore {
       title,
       createdAt: Date.now(),
       ...(source ? { source } : {}),
+      ...(topic?.parentId ? { parentId: topic.parentId } : {}),
+      ...(topic?.anchorMessageId
+        ? { anchorMessageId: topic.anchorMessageId }
+        : {}),
     };
     await this.db.run(
-      sql`INSERT INTO thread_bindings (id, dot_id, owner_id, title, created_at, source) VALUES (${id}, ${dotId}, ${this.ownerId}, ${title}, ${value.createdAt}, ${source ?? null})`,
+      sql`INSERT INTO thread_bindings (id, dot_id, owner_id, title, created_at, source, parent_id, anchor_message_id) VALUES (${id}, ${dotId}, ${this.ownerId}, ${title}, ${value.createdAt}, ${source ?? null}, ${topic?.parentId ?? null}, ${topic?.anchorMessageId ?? null})`,
     );
     return value;
+  }
+  /** Removes a topic thread's binding, e.g. after undoing an automatic move. */
+  async unbindTopic(id: string) {
+    await this.db.run(
+      sql`DELETE FROM thread_bindings WHERE id=${id} AND owner_id=${this.ownerId} AND parent_id IS NOT NULL`,
+    );
   }
   async retitleThread(id: string, title: string) {
     await this.db.run(

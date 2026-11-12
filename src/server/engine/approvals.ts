@@ -37,7 +37,11 @@ export class Approvals {
   private closed = false;
   constructor(
     private db: Db,
-    private options: { waitMs?: number } = {},
+    private options: {
+      waitMs?: number;
+      /** Told about each new request, for example to push the owner. */
+      onRequest?: (view: ApprovalView) => unknown;
+    } = {},
   ) {}
   /** Nothing is waiting on requests from before a restart. */
   async expireStale() {
@@ -76,6 +80,11 @@ export class Approvals {
         value: current,
       } as BaseEvent);
     announce(view);
+    try {
+      await this.options.onRequest?.(view);
+    } catch {
+      // A failed notice must not fail the tool that asked.
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const decided = new Promise<ApprovalStatus>((resolve, reject) => {

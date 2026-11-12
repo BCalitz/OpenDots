@@ -34,7 +34,9 @@ export function investigationMessage(input: {
    * conversation; its content is skipped as already-seen context. */
   continuing?: boolean;
   /** Earlier items Jev found useful for answering, or contradicting. */
-  history?: { event: InboxEventView; note: string }[];
+  history?: { event: InboxEventView; note: string; found?: string[] }[];
+  /** Names, projects, places and keys tagged in the item. */
+  tags?: { kind: string; value: string }[];
   raw?: unknown;
 }) {
   const { app, event, finding, referencedEvent, continuing } = input;
@@ -50,7 +52,14 @@ export function investigationMessage(input: {
     JSON.stringify(value, null, 2).replace(/```/g, "'''"),
     '```',
   ];
-  const item = { app, ...toItem(event) };
+  const mentions: Record<string, string[]> = {};
+  for (const tag of input.tags ?? [])
+    (mentions[tag.kind] ??= []).push(tag.value);
+  const item = {
+    app,
+    ...toItem(event),
+    ...(Object.keys(mentions).length ? { mentions } : {}),
+  };
   const history = (input.history ?? []).filter(
     (entry) => entry.event.id !== referencedEvent?.id,
   );
@@ -88,6 +97,7 @@ export function investigationMessage(input: {
           ...quote(
             history.map((entry) => ({
               why: entry.note,
+              ...(entry.found?.length ? { matched_by: entry.found } : {}),
               ...toItem(entry.event, MAX_HISTORY_TEXT),
             })),
           ),
@@ -97,5 +107,7 @@ export function investigationMessage(input: {
     continuing
       ? 'Update me: does this change what you found or suggest? Still read-only — nothing changes until I say so.'
       : ASK[finding.route ?? 'inform'],
+    '',
+    'You can look up other items in my inbox with search_inbox and read_inbox_item.',
   ].join('\n');
 }

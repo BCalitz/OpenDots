@@ -104,9 +104,14 @@ export default function Home() {
       <Stack.Screen
         options={{
           headerRight: () => (
-            <Pressable onPress={menu} hitSlop={12}>
-              <Text style={{ color: theme.accent, fontSize: 16 }}>•••</Text>
-            </Pressable>
+            <View style={{ flexDirection: 'row', gap: 20 }}>
+              <Pressable onPress={() => router.push('/inbox')} hitSlop={12}>
+                <Text style={{ color: theme.accent, fontSize: 16 }}>Inbox</Text>
+              </Pressable>
+              <Pressable onPress={menu} hitSlop={12}>
+                <Text style={{ color: theme.accent, fontSize: 16 }}>•••</Text>
+              </Pressable>
+            </View>
           ),
         }}
       />

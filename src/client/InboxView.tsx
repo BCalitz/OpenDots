@@ -5,6 +5,7 @@ import {
   Calendar,
   Check,
   Copy,
+  Hand,
   Inbox,
   KeyRound,
   Link2,
@@ -31,6 +32,7 @@ import type {
 } from '../shared/inbox-types';
 import { api } from './api';
 import { InboxLinks } from './InboxLinks';
+import { InboxProposals } from './InboxProposals';
 import {
   EventLinks,
   InboxBrief,
@@ -90,7 +92,9 @@ export function InboxView({
     secret: string;
   }>();
   const [showDismissed, setShowDismissed] = useState(false);
-  const [tab, setTab] = useState<'items' | 'brief' | 'links'>('items');
+  const [tab, setTab] = useState<'choices' | 'items' | 'brief' | 'links'>(
+    'choices',
+  );
   const [open, setOpen] = useState<string>();
   const load = useCallback(
     () =>
@@ -141,6 +145,7 @@ export function InboxView({
       <div className="insight-tabs" role="tablist" aria-label="Inbox">
         {(
           [
+            ['choices', 'For you', Hand],
             ['items', 'Items', List],
             ['brief', 'Brief', Newspaper],
             ['links', 'Links', Link2],
@@ -158,6 +163,7 @@ export function InboxView({
           </button>
         ))}
       </div>
+      {tab === 'choices' && <InboxProposals onThread={onThread} />}
       {tab === 'links' && <InboxLinks />}
       {tab === 'brief' && <InboxBrief onThread={onThread} />}
       {tab === 'items' && (

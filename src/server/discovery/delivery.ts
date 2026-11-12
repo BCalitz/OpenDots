@@ -5,10 +5,11 @@ import type {
   DiscoverySettings,
   FindingView,
   InboxEventView,
+  ProposalView,
   Route,
   Urgency,
 } from '../../shared/inbox-types.js';
-import type { PushMessage } from '../push.js';
+import type { PushCategory, PushMessage } from '../push.js';
 import type { DiscoveryStore } from './store.js';
 
 /**
@@ -45,6 +46,23 @@ const ROUTE_TITLE: Record<Route, string> = {
   inform: 'something needs you',
   decide: 'a decision for you',
 };
+
+/** The buttons a proposal's push shows, or none once it is decided. */
+export function proposalCategory(
+  proposal: Pick<ProposalView, 'state' | 'options'>,
+): PushCategory | undefined {
+  const handle = proposal.options.includes('handle');
+  if (proposal.state === 'prepared')
+    return handle ? 'proposal_prepared' : undefined;
+  if (proposal.state === 'open' || proposal.state === 'failed')
+    return handle ? 'proposal' : 'proposal_prepare';
+  return undefined;
+}
+const QUESTION = {
+  proposal: 'Want me to prepare it for you, or handle it?',
+  proposal_prepare: 'Want me to prepare it for you?',
+  proposal_prepared: 'Want me to handle it?',
+} satisfies Record<PushCategory, string>;
 
 /** Local date and minutes past midnight in a time zone. */
 export function localTime(now: number, timeZone: string) {
@@ -114,20 +132,30 @@ export class DeliveryService {
     finding: FindingView,
     event: InboxEventView,
     dotName: string,
+    proposal?: ProposalView,
   ): Promise<Delivery> {
     const { delivery, section } = planDelivery(finding);
     const settings = await this.store.settings();
     const now = this.now();
     const route = finding.route ?? 'tell';
     const title = `${finding.urgency === 'hours' ? 'Urgent: ' : ''}${dotName}: ${ROUTE_TITLE[route]}`;
-    const body = this.options.previews?.()
-      ? `${event.title}: ${finding.reason}`.replace(/\s+/g, ' ').slice(0, 160)
-      : finding.threadId
-        ? 'Open the conversation to see what it found and suggests.'
-        : 'Open the OpenDots inbox to see it.';
+    const category = proposal && proposalCategory(proposal);
+    const preview = this.options.previews?.();
+    const body = category
+      ? preview
+        ? `${event.title}. ${QUESTION[category]}`
+            .replace(/\s+/g, ' ')
+            .slice(0, 160)
+        : QUESTION[category]
+      : preview
+        ? `${event.title}: ${finding.reason}`.replace(/\s+/g, ' ').slice(0, 160)
+        : finding.threadId
+          ? 'Open the conversation to see what it found and suggests.'
+          : 'Open the OpenDots inbox to see it.';
     await this.store.queuePush(
       {
         findingId: finding.id,
+        proposalId: proposal?.id ?? null,
         kind: 'finding',
         title: title.charAt(0).toUpperCase() + title.slice(1),
         body,
@@ -160,6 +188,7 @@ export class DeliveryService {
       await this.store.queuePush(
         {
           findingId,
+          proposalId: null,
           kind: 'correction',
           ...correction,
           threadId: null,
@@ -182,7 +211,47 @@ export class DeliveryService {
     const now = this.now();
     const settings = await this.store.settings();
     const quiet = inQuietHours(now, settings);
+    // Snoozed items whose time has come are asked about again.
+    for (const proposal of await this.store.proposals.wake(now)) {
+      const category = proposalCategory(proposal);
+      await this.store.queuePush(
+        {
+          findingId: proposal.findingId,
+          proposalId: proposal.id,
+          kind: 'proposal',
+          title: 'Back from snooze',
+          body: this.options.previews?.()
+            ? `${proposal.title}. ${category ? QUESTION[category] : ''}`
+                .trim()
+                .slice(0, 160)
+            : category
+              ? QUESTION[category]
+              : 'Open the OpenDots inbox to see it.',
+          threadId: proposal.threadId,
+          section:
+            proposal.route === 'decide'
+              ? 'decisions'
+              : proposal.route === 'draft' || proposal.route === 'propose'
+                ? 'drafts'
+                : 'updates',
+          urgent: proposal.urgency === 'hours',
+          dueAt: now,
+          state: 'queued',
+        },
+        now,
+      );
+    }
     for (const push of await this.store.due(now)) {
+      let categoryId: PushCategory | undefined;
+      if (push.proposalId) {
+        const proposal = await this.store.proposals.get(push.proposalId);
+        categoryId = proposal && proposalCategory(proposal);
+        // The owner already chose in the app; asking again would confuse.
+        if (!categoryId) {
+          await this.store.setPushState(push.id, 'cancelled');
+          continue;
+        }
+      }
       if (quiet && !push.urgent) {
         // Held for the brief; only "within hours" breaks quiet hours.
         await this.store.setPushState(push.id, 'brief');
@@ -191,7 +260,13 @@ export class DeliveryService {
       await this.deliverNow({
         title: push.title,
         body: push.body,
-        data: push.threadId ? { threadId: push.threadId } : { url: '/#/inbox' },
+        data: push.threadId
+          ? {
+              threadId: push.threadId,
+              ...(push.proposalId ? { proposalId: push.proposalId } : {}),
+            }
+          : { url: '/#/inbox' },
+        ...(categoryId ? { categoryId } : {}),
       });
       await this.store.setPushState(push.id, 'sent', now);
     }
@@ -229,6 +304,7 @@ export class DeliveryService {
     const brief = await this.store.queuePush(
       {
         findingId: null,
+        proposalId: null,
         kind: 'brief',
         title: 'Your morning brief',
         body: `${parts.join(', ')}. Open the OpenDots inbox to go through them.`,

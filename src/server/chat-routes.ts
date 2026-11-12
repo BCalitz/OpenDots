@@ -17,6 +17,9 @@ const messageInput = z
       .regex(/^[A-Za-z0-9_.:-]{1,200}$/)
       .optional(),
     content: z.string().min(1).max(MAX_MESSAGE_LENGTH),
+    /** Let OpenDots move a main-chat message into a topic thread. Clients
+     * that cannot show threads leave it off. */
+    autoThread: z.boolean().optional(),
   })
   .strict();
 
@@ -130,13 +133,41 @@ export function chatRoutes(platform: Platform) {
         },
         409,
       );
-    const input = messageInput.parse(await c.req.json());
+    const { autoThread, ...input } = messageInput.parse(await c.req.json());
+    const requested = c.req.param('threadId');
+    await platform.workspace.requireThread(requested);
+    // Each topic in a Dot's chat is its own thread: a message on another
+    // topic goes to that topic's thread, or opens a new one.
+    const route =
+      autoThread !== true
+        ? { threadId: requested }
+        : await platform.routeMessage(requested, input.content);
+    // A message in a topic thread is answered with that thread's history
+    // only, and its main chat shows the exchange too.
     const { runId } = await chat.start({
-      threadId: c.req.param('threadId'),
+      threadId: route.threadId,
       message: input,
       source: 'chat',
     });
-    return c.json({ runId }, 202);
+    return c.json({ runId, ...route }, 202);
+  });
+
+  // Undo an automatic move: the message goes back to the main chat.
+  app.post('/chat/:threadId/unthread', async (c) => {
+    const { messageId } = z
+      .object({ messageId: z.string().min(1).max(200) })
+      .strict()
+      .parse(await c.req.json());
+    try {
+      return c.json(
+        await platform.unthread(c.req.param('threadId'), messageId),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (/^(Wait for|Choose a message|This part|Only a message)/.test(message))
+        return c.json({ error: message }, 409);
+      throw error;
+    }
   });
 
   app.post('/chat/:threadId/stop', async (c) =>

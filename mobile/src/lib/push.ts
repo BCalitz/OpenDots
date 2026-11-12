@@ -3,6 +3,7 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import { api } from './api';
+import { registerProposalCategories } from './proposals';
 import type { Session } from './session';
 
 Notifications.setNotificationHandler({
@@ -33,6 +34,8 @@ export async function registerForPush(session: Session): Promise<PushSetup> {
       name: 'Dot updates',
       importance: Notifications.AndroidImportance.HIGH,
     });
+  // Buttons for proposal notifications; registered before any arrives.
+  await registerProposalCategories().catch(() => undefined);
   let { status } = await Notifications.getPermissionsAsync();
   if (status !== 'granted')
     status = (await Notifications.requestPermissionsAsync()).status;
@@ -76,4 +79,12 @@ export function threadFromNotification(
 ): string | undefined {
   const value = response?.notification.request.content.data?.threadId;
   return typeof value === 'string' ? value : undefined;
+}
+
+/** Whether a notification points at the inbox, such as the morning brief. */
+export function inboxFromNotification(
+  response: Notifications.NotificationResponse | null | undefined,
+) {
+  const value = response?.notification.request.content.data?.url;
+  return typeof value === 'string' && value.includes('inbox');
 }

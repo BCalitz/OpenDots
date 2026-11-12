@@ -145,6 +145,57 @@ CREATE INDEX discovery_pushes_finding ON discovery_pushes(finding_id);
 CREATE TABLE discovery_settings(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
 `,
   },
+  {
+    version: 5,
+    name: 'proposals',
+    sql: `
+-- A flagged item a Dot looked into, with the owner's three choices. One
+-- per conversation: a follow-up in the same thread updates it. options is
+-- a JSON list of choices. counted: whether a dismissal still counts toward
+-- the sender's triage rule (the owner can forget a rule).
+CREATE TABLE proposals(id TEXT PRIMARY KEY, finding_id TEXT NOT NULL, event_id TEXT NOT NULL, dot_id TEXT NOT NULL, thread_id TEXT NOT NULL UNIQUE, title TEXT NOT NULL, summary TEXT NOT NULL, options TEXT NOT NULL, state TEXT NOT NULL, decision TEXT, decided_at BIGINT, snooze_until BIGINT, importance DOUBLE PRECISION NOT NULL, urgency TEXT, route TEXT, sender TEXT, counted BOOLEAN NOT NULL DEFAULT true, error TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, seq BIGINT GENERATED ALWAYS AS IDENTITY);
+CREATE INDEX proposals_state ON proposals(state, importance);
+CREATE INDEX proposals_finding ON proposals(finding_id);
+CREATE INDEX proposals_sender ON proposals(sender, decision);
+
+ALTER TABLE discovery_pushes ADD COLUMN proposal_id TEXT;
+`,
+  },
+  {
+    version: 6,
+    name: 'topic threads',
+    sql: `
+-- Each Dot is one chat; each topic in it is a thread. parent_id is the
+-- Dot's main chat; anchor_message_id is the main-chat message the thread
+-- grew from, so the chat can show it in place.
+ALTER TABLE thread_bindings ADD COLUMN parent_id TEXT;
+ALTER TABLE thread_bindings ADD COLUMN anchor_message_id TEXT;
+CREATE INDEX thread_bindings_parent ON thread_bindings(parent_id);
+`,
+  },
+  {
+    version: 7,
+    name: 'thread links',
+    sql: `
+-- A message the owner wrote in a Dot's main chat that OpenDots sorted into a
+-- topic thread. The chat still shows it, after anchor_message_id (the last
+-- message before it), with a link to the thread where it was answered.
+CREATE TABLE thread_links(id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, thread_id TEXT NOT NULL, message_id TEXT NOT NULL, text TEXT NOT NULL, anchor_message_id TEXT, created_at BIGINT NOT NULL);
+CREATE INDEX thread_links_parent ON thread_links(parent_id, created_at);
+`,
+  },
+  {
+    version: 8,
+    name: 'topic runs shown in the main chat',
+    sql: `
+-- A run in a topic thread that its Dot's main chat also shows. The run's
+-- history stays in the thread (all the model reads); the main chat shows
+-- every exchange, labelled with its thread. Replaces thread_links.
+ALTER TABLE conv_runs ADD COLUMN shown_in TEXT;
+CREATE INDEX conv_runs_shown_in ON conv_runs(shown_in);
+DROP TABLE thread_links;
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

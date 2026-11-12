@@ -11,6 +11,7 @@ import {
   type ThreadState,
 } from '../src/shared/thread-client.js';
 import { completion } from './fixtures/model-stream.js';
+import { reduceEvents } from '../src/shared/thread-events.js';
 import { chatTurn, json } from './fixtures/chat.js';
 
 const cleanup: (() => void | Promise<void>)[] = [];
@@ -264,4 +265,92 @@ it('answers Slack through the engine in a background thread of its own', async (
     await workspace.mainConversation((await workspace.dots())[0].id),
   ).toBeUndefined();
   expect((await platform.runner.listRuns())[0]).toMatchObject({ threadId });
+});
+
+it('sorts a new topic into its own thread, and undoes it', async () => {
+  fakeModel('Noted');
+  const server = await start(await testDb());
+  cleanup.push(server.stop);
+  const dot = (await server.workspace.dots())[0];
+  const created = await server.app.request(
+    '/api/conversations',
+    json({ dotId: dot.id }),
+  );
+  const { id: main } = (await created.json()) as { id: string };
+  await chatTurn(server.app, server.platform, main, 'Plan my trip to Durban');
+  await vi.waitFor(() =>
+    expect(server.platform.runner!.isRunning(main)).toBe(false),
+  );
+  const seen: unknown[] = [];
+  server.platform.routeTopics = async (state) => {
+    seen.push(state);
+    return { continues: 0.05, substantive: 0.95, about: {} };
+  };
+  // Clients that cannot show threads keep every message where it was sent.
+  const plain = await server.app.request(
+    `/api/chat/${main}/messages`,
+    json({ content: 'And hotels?' }),
+  );
+  const plainBody = await plain.json();
+  expect(plainBody, JSON.stringify(plainBody)).toMatchObject({
+    threadId: main,
+  });
+  expect(seen).toHaveLength(0);
+  await vi.waitFor(() =>
+    expect(server.platform.runner!.isRunning(main)).toBe(false),
+  );
+
+  const sent = await server.app.request(
+    `/api/chat/${main}/messages`,
+    json({
+      id: 'payfast',
+      content: 'Was the PayFast invoice paid?',
+      autoThread: true,
+    }),
+  );
+  expect(sent.status).toBe(202);
+  const body = (await sent.json()) as {
+    threadId: string;
+    moved: { to: string; title: string };
+  };
+  expect(body.threadId).not.toBe(main);
+  expect(body.moved).toMatchObject({
+    to: 'new',
+    title: 'Was the PayFast invoice paid?',
+  });
+  expect(seen[0]).toMatchObject({
+    message: 'Was the PayFast invoice paid?',
+    recent: expect.arrayContaining([
+      { role: 'user', text: 'Plan my trip to Durban' },
+    ]),
+  });
+  const topic = await server.workspace.requireThread(body.threadId);
+  expect(topic).toMatchObject({ parentId: main, dotId: dot.id });
+  await vi.waitFor(() =>
+    expect(server.platform.runner!.isRunning(topic.id)).toBe(false),
+  );
+  expect(
+    (await server.platform.runner!.messages(topic.id)).map((m) => m.id),
+  ).toContain('payfast');
+
+  // The thread holds the exchange, and is all the model reads for it...
+  expect(
+    (await server.platform.runner!.messages(main)).map((m) => m.id),
+  ).not.toContain('payfast');
+  // ...while the main chat still shows it, labelled with its thread.
+  const view = await server.platform.runner!.watch(main, () => undefined);
+  view.unsubscribe();
+  const shown = reduceEvents(view.events, []);
+  expect(shown.find((m) => m.id === 'payfast')).toMatchObject({
+    topicThreadId: topic.id,
+  });
+  expect(shown.at(-1)).toMatchObject({ role: 'assistant', content: 'Noted' });
+  const undone = await server.app.request(
+    `/api/chat/${topic.id}/unthread`,
+    json({ messageId: 'payfast' }),
+  );
+  expect(await undone.json()).toEqual({ threadId: main, removed: true });
+  expect(await server.workspace.conversation(topic.id)).toBeUndefined();
+  const back = await server.platform.runner!.messages(main);
+  expect(back.at(-2)?.id).toBe('payfast');
 });

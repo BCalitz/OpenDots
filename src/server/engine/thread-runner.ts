@@ -66,6 +66,8 @@ export class ThreadLockedError extends Error {
 type Listener = (event: BaseEvent) => void;
 interface ActiveRun {
   runId: string;
+  /** A main chat that also shows this run, live. */
+  shownIn?: string;
   controller: AbortController;
   events: BaseEvent[];
   usage: TokenUsage[];
@@ -119,6 +121,25 @@ function promptOf(event: BaseEvent & { input?: { messages?: Message[] } }) {
     .at(-1);
   const value = message ? messageText(message).trim() : '';
   return value ? value.slice(0, 300) : null;
+}
+
+/**
+ * An event from a topic thread as its main chat shows it: the messages the
+ * run started with say which thread they belong to.
+ */
+function shownFrom(event: BaseEvent, threadId: string): BaseEvent {
+  if (event.type !== 'RUN_STARTED') return event;
+  const input = (event as { input?: { messages?: Message[] } }).input;
+  return {
+    ...event,
+    input: {
+      ...input,
+      messages: (input?.messages ?? []).map((message) => ({
+        ...message,
+        topicThreadId: threadId,
+      })),
+    },
+  } as BaseEvent;
 }
 
 const INTERRUPTED_MESSAGE =
@@ -258,6 +279,209 @@ export class ThreadRunner {
       return true;
     });
   }
+  /**
+   * Splits a thread at a message into `targetId`, a new thread for the same
+   * agent. The cut is the user message that started the exchange `messageId`
+   * belongs to.
+   *
+   * - move: that exchange and everything after it leave the source thread
+   *   (runs, events and messages), so each thread keeps only its own topic.
+   * - copy: the source is unchanged; the new thread starts with a copy of
+   *   that one exchange, so the topic carries on with its context.
+   *
+   * Returns the id of the cut message and of the last message the source
+   * keeps before it (where the new thread is shown in the source).
+   */
+  async split(input: {
+    sourceId: string;
+    targetId: string;
+    messageId: string;
+    mode: 'move' | 'copy';
+    name?: string;
+    /** For a move out of a main chat: keep showing the moved part there. */
+    keepShown?: boolean;
+  }): Promise<{ cutMessageId: string; anchorMessageId?: string }> {
+    const { sourceId, targetId, messageId, mode } = input;
+    const source = await this.thread(sourceId);
+    if (!source) throw new Error('Conversation not found.');
+    if (this.active.has(sourceId))
+      throw new Error('Wait for the current answer before splitting.');
+    const messages = await this.messages(sourceId);
+    let cut = messages.findIndex((message) => message.id === messageId);
+    while (cut >= 0 && messages[cut].role !== 'user') cut--;
+    if (cut < 0)
+      throw new Error('Choose a message in this conversation to split from.');
+    const cutMessageId = messages[cut].id;
+    let end = messages.findIndex(
+      (message, index) => index > cut && message.role === 'user',
+    );
+    if (end < 0) end = messages.length;
+    const runs = await this.runStarts(sourceId);
+    const first = runs.findIndex((run) => run.added.includes(cutMessageId));
+    const now = Date.now();
+    await this.db.transaction(async () => {
+      await this.db.run(
+        sql`INSERT INTO conv_threads (id, agent_id, owner_id, name, created_at, updated_at) VALUES (${targetId}, ${source.agentId}, ${this.ownerId}, ${input.name ?? null}, ${now}, ${now})`,
+      );
+      if (mode === 'move') {
+        if (first < 0)
+          throw new Error('This part of the conversation cannot be moved.');
+        await this.moveRuns(
+          sourceId,
+          targetId,
+          runs.slice(first).map((run) => run.id),
+          messages,
+          cut,
+          input.keepShown ? sourceId : null,
+        );
+      } else {
+        // One finished run that introduces the copied exchange, so replay
+        // shows it and the model reads it as earlier context.
+        const copied = messages.slice(cut, end);
+        const runId = randomUUID();
+        await this.db.run(
+          sql`INSERT INTO conv_runs (id, thread_id, parent_run_id, agent_id, status, started_at, finished_at) VALUES (${runId}, ${targetId}, NULL, ${source.agentId}, 'finished', ${now}, ${now})`,
+        );
+        const events: BaseEvent[] = [
+          {
+            type: 'RUN_STARTED',
+            threadId: targetId,
+            runId,
+            input: { threadId: targetId, runId, messages: copied },
+            splitFrom: sourceId,
+            timestamp: now,
+          } as BaseEvent,
+          {
+            type: 'RUN_FINISHED',
+            threadId: targetId,
+            runId,
+            timestamp: now,
+          } as BaseEvent,
+        ];
+        for (const event of events)
+          await this.appendEvent(targetId, runId, event);
+        await this.db.run(
+          sql`UPDATE conv_threads SET messages=${JSON.stringify(copied)} WHERE id=${targetId}`,
+        );
+      }
+    });
+    // A copied thread hangs off the message it grew from; a moved one sits
+    // after the last visible message the source keeps.
+    const anchor =
+      mode === 'copy'
+        ? cutMessageId
+        : messages
+            .slice(0, cut)
+            .findLast(
+              (message) =>
+                (message.role === 'user' || message.role === 'assistant') &&
+                !!messageText(message).trim(),
+            )?.id;
+    return { cutMessageId, ...(anchor ? { anchorMessageId: anchor } : {}) };
+  }
+  /**
+   * Moves the exchange `messageId` belongs to, and everything after it, to
+   * the end of `targetId`, an existing thread for the same agent. Undoes a
+   * split or an automatic move into a thread. Returns how many messages the
+   * source keeps.
+   */
+  async moveTail(input: {
+    sourceId: string;
+    targetId: string;
+    messageId: string;
+  }): Promise<number> {
+    const { sourceId, targetId, messageId } = input;
+    const [source, target] = await Promise.all([
+      this.thread(sourceId),
+      this.thread(targetId),
+    ]);
+    if (!source || !target) throw new Error('Conversation not found.');
+    if (source.agentId !== target.agentId)
+      throw new Error('Conversation belongs to a different Dot.');
+    if (this.active.has(sourceId) || this.active.has(targetId))
+      throw new Error('Wait for the current answer before moving messages.');
+    const messages = await this.messages(sourceId);
+    let cut = messages.findIndex((message) => message.id === messageId);
+    while (cut >= 0 && messages[cut].role !== 'user') cut--;
+    if (cut < 0)
+      throw new Error('Choose a message in this conversation to move.');
+    const cutMessageId = messages[cut].id;
+    const runs = await this.runStarts(sourceId);
+    const first = runs.findIndex((run) => run.added.includes(cutMessageId));
+    if (first < 0)
+      throw new Error('This part of the conversation cannot be moved.');
+    await this.db.transaction(() =>
+      this.moveRuns(
+        sourceId,
+        targetId,
+        runs.slice(first).map((run) => run.id),
+        messages,
+        cut,
+      ),
+    );
+    return cut;
+  }
+  /** Each run of a thread, in order, with the message ids it introduced. */
+  private async runStarts(threadId: string) {
+    const rows = await this.db.rows<{ id: string; payload: string }>(
+      sql`SELECT r.id, e.payload FROM conv_runs r JOIN conv_events e ON e.run_id=r.id AND e.type='RUN_STARTED' WHERE r.thread_id=${threadId} ORDER BY r.started_at, r.seq`,
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      added: (
+        (JSON.parse(row.payload) as { input?: { messages?: Message[] } }).input
+          ?.messages ?? []
+      ).map((message) => message.id),
+    }));
+  }
+  /**
+   * Moves runs, their events and messages from `cut` on to the end of the
+   * target. Call inside a transaction.
+   */
+  private async moveRuns(
+    sourceId: string,
+    targetId: string,
+    runIds: string[],
+    messages: Message[],
+    cut: number,
+    shownIn: string | null = null,
+  ) {
+    const ids = sql.join(
+      runIds.map((id) => sql`${id}`),
+      ', ',
+    );
+    const now = Date.now();
+    // Event numbers are per thread: continue after the target's last one.
+    const offset =
+      (
+        await this.db.row<{ max: number | null }>(
+          sql`SELECT MAX(seq) AS max FROM conv_events WHERE thread_id=${targetId}`,
+        )
+      )?.max ?? 0;
+    const last = await this.db.row<{ id: string }>(
+      sql`SELECT id FROM conv_runs WHERE thread_id=${targetId} ORDER BY started_at DESC, seq DESC LIMIT 1`,
+    );
+    await this.db.run(
+      sql`UPDATE conv_runs SET thread_id=${targetId}, shown_in=${shownIn} WHERE id IN (${ids})`,
+    );
+    await this.db.run(
+      sql`UPDATE conv_runs SET parent_run_id=${last?.id ?? null} WHERE id=${runIds[0]}`,
+    );
+    // Two steps, so no moved event collides with one already there.
+    await this.db.run(
+      sql`UPDATE conv_events SET seq=-seq WHERE run_id IN (${ids})`,
+    );
+    await this.db.run(
+      sql`UPDATE conv_events SET thread_id=${targetId}, seq=${offset}-seq WHERE run_id IN (${ids})`,
+    );
+    const kept = await this.messages(targetId);
+    await this.db.run(
+      sql`UPDATE conv_threads SET messages=${JSON.stringify([...kept, ...messages.slice(cut)])}, updated_at=${now} WHERE id=${targetId}`,
+    );
+    await this.db.run(
+      sql`UPDATE conv_threads SET messages=${JSON.stringify(messages.slice(0, cut))}, updated_at=${now} WHERE id=${sourceId}`,
+    );
+  }
   /** The thread's messages as of its last finished run. */
   async messages(threadId: string): Promise<Message[]> {
     const row = await this.db.row<{ messages: string }>(
@@ -344,6 +568,11 @@ export class ThreadRunner {
     messages: Message[];
     /** Extra fields stored on RUN_STARTED, such as the turn's source. */
     meta?: Record<string, unknown>;
+    /**
+     * A main chat that also shows this run. The run's history stays in its
+     * own thread, which is all the model reads; the main chat only displays it.
+     */
+    shownIn?: string;
     work: (run: RunContext) => Promise<void>;
   }): Promise<{ runId: string; done: Promise<FinishedRun> }> {
     const { threadId, agentId } = input;
@@ -352,6 +581,7 @@ export class ThreadRunner {
     let resolveDone!: (run: FinishedRun) => void;
     const active: ActiveRun = {
       runId,
+      ...(input.shownIn ? { shownIn: input.shownIn } : {}),
       controller: new AbortController(),
       events: [],
       usage: [],
@@ -369,7 +599,7 @@ export class ThreadRunner {
       const known = new Set(stored.map((message) => message.id));
       added = input.messages.filter((message) => !known.has(message.id));
       await this.db.run(
-        sql`INSERT INTO conv_runs (id, thread_id, parent_run_id, agent_id, status, started_at) VALUES (${runId}, ${threadId}, (SELECT id FROM conv_runs WHERE thread_id=${threadId} ORDER BY started_at DESC, seq DESC LIMIT 1), ${agentId}, 'running', ${Date.now()})`,
+        sql`INSERT INTO conv_runs (id, thread_id, parent_run_id, agent_id, status, started_at, shown_in) VALUES (${runId}, ${threadId}, (SELECT id FROM conv_runs WHERE thread_id=${threadId} ORDER BY started_at DESC, seq DESC LIMIT 1), ${agentId}, 'running', ${Date.now()}, ${input.shownIn ?? null})`,
       );
     } catch (error) {
       if (this.active.get(threadId) === active) this.active.delete(threadId);
@@ -388,6 +618,8 @@ export class ThreadRunner {
         .then(() => this.appendEvent(threadId, runId, event))
         .catch(() => undefined);
       this.publish(threadId, event);
+      if (active.shownIn)
+        this.publish(active.shownIn, shownFrom(event, threadId));
     };
     // Replay rebuilds the transcript from RUN_STARTED inputs, so each run
     // records only the messages it introduced.
@@ -454,27 +686,45 @@ export class ThreadRunner {
    * event is missed or repeated.
    */
   async watch(threadId: string, listener: Listener) {
+    // The thread's own runs, and runs in its topic threads that it shows,
+    // in the order they started.
     const rows = (await this.thread(threadId))
-      ? await this.db.rows<{ runId: string; payload: string }>(
-          sql`SELECT run_id, payload FROM conv_events WHERE thread_id=${threadId} ORDER BY seq`,
+      ? await this.db.rows<{
+          runId: string;
+          payload: string;
+          sourceThread: string;
+        }>(
+          sql`SELECT e.run_id, e.payload, r.thread_id AS source_thread FROM conv_events e JOIN conv_runs r ON r.id=e.run_id WHERE e.thread_id=${threadId} OR r.shown_in=${threadId} ORDER BY r.started_at, r.seq, e.seq`,
         )
       : [];
-    // Read the live run after the query: its events come from memory.
-    const active = this.active.get(threadId);
+    // Read live runs after the query: their events come from memory.
+    const live = [...this.active.entries()].filter(
+      ([id, run]) => id === threadId || run.shownIn === threadId,
+    );
+    const liveIds = new Set(live.map(([, run]) => run.runId));
     const events = [
       ...compactEvents(
         rows
-          .filter((row) => row.runId !== active?.runId)
-          .map((row) => JSON.parse(row.payload) as BaseEvent),
+          .filter((row) => !liveIds.has(row.runId))
+          .map((row) => {
+            const event = JSON.parse(row.payload) as BaseEvent;
+            return row.sourceThread === threadId
+              ? event
+              : shownFrom(event, row.sourceThread);
+          }),
       ),
-      ...(active?.events ?? []),
+      ...live.flatMap(([id, run]) =>
+        id === threadId
+          ? run.events
+          : run.events.map((event) => shownFrom(event, id)),
+      ),
     ];
     let set = this.listeners.get(threadId);
     if (!set) this.listeners.set(threadId, (set = new Set()));
     set.add(listener);
     return {
       events,
-      running: !!active,
+      running: live.length > 0,
       unsubscribe: () => {
         set.delete(listener);
         if (!set.size && this.listeners.get(threadId) === set)
@@ -485,7 +735,10 @@ export class ThreadRunner {
 
   /** Stops the thread's run (or only `runId`, when given). */
   stop(threadId: string, runId?: string) {
-    const active = this.active.get(threadId);
+    // A main chat can stop a run it shows from one of its threads.
+    const active =
+      this.active.get(threadId) ??
+      [...this.active.values()].find((run) => run.shownIn === threadId);
     if (!active || active.stopRequested) return false;
     if (runId !== undefined && runId !== active.runId) return false;
     active.stopRequested = true;

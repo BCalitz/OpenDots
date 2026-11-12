@@ -15,11 +15,21 @@ export const pushDeviceSchema = z
 export type PushDevice = z.infer<typeof pushDeviceSchema> & {
   createdAt: number;
 };
+/**
+ * Notification categories the mobile app registers, each with its own
+ * buttons: proposal (Prepare / Handle / Not now), proposal_prepare
+ * (Prepare / Not now) and proposal_prepared (Handle / Not now).
+ */
+export type PushCategory =
+  'proposal' | 'proposal_prepare' | 'proposal_prepared';
 export interface PushMessage {
   title: string;
   body: string;
-  // Opened by the mobile app when the notification is tapped.
-  data: { threadId?: string; url?: string };
+  // Opened by the mobile app when the notification is tapped. proposalId
+  // lets the app send the owner's choice from a button.
+  data: { threadId?: string; url?: string; proposalId?: string };
+  /** Shows the category's buttons on the notification. */
+  categoryId?: PushCategory;
 }
 type ExpoTicket = {
   status: 'ok' | 'error';
@@ -82,6 +92,7 @@ export class PushService {
             title: message.title,
             body: message.body,
             data: message.data,
+            ...(message.categoryId ? { categoryId: message.categoryId } : {}),
             sound: 'default',
             priority: 'high',
             channelId: 'default',

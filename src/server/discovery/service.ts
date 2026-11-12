@@ -6,6 +6,7 @@ import {
   type DiscoverySettings,
   type FindingView,
   type InboxEventView,
+  type ProposalView,
   type Route,
   type Urgency,
 } from '../../shared/inbox-types.js';
@@ -22,6 +23,11 @@ import {
 } from './classifier.js';
 import type { DeliveryService } from './delivery.js';
 import { embeddingText, type Embedder } from './embeddings.js';
+import {
+  importanceOf,
+  quietedBySender,
+  type ProposalService,
+} from './proposals.js';
 
 /** Starts a read-only investigation of one flagged item; returns its thread. */
 export type Investigate = (
@@ -36,10 +42,20 @@ export type Investigate = (
      * there instead of opening a second, disconnected conversation. */
     existingThreadId?: string;
     /** Earlier items Jev found useful for answering, or contradicting. */
-    history?: { event: InboxEventView; note: string }[];
+    history?: HistoryNote[];
+    /** Names, projects, places and keys tagged in the item. */
+    tags?: { kind: string; value: string }[];
   },
   signal: AbortSignal,
-) => Promise<{ threadId: string }>;
+) => Promise<{ threadId: string; reply?: string }>;
+/** An earlier item for the investigating Dot, and why it matters. */
+export interface HistoryNote {
+  event: InboxEventView;
+  /** What Jev said about it: useful for answering, or contradicting. */
+  note: string;
+  /** Why it was gathered: same sender, both mention X, similar wording. */
+  found?: string[];
+}
 type ReadyListener = (finding: FindingView, event: InboxEventView) => unknown;
 
 // A "same thing" score of 0.8 or more links two items; 0.5 to 0.8 goes to
@@ -52,6 +68,7 @@ const safeError = (error: unknown) =>
     ? error.message
     : 'The investigation did not finish.'
   ).slice(0, 300);
+/** A sender's bare address, lower case. */
 const address = (from: string | null | undefined) =>
   (/<([^>]+)>/.exec(from ?? '')?.[1] ?? from ?? '').trim().toLowerCase();
 
@@ -143,7 +160,7 @@ export class DiscoveryService {
   private ready: ReadyListener[] = [];
   private controller = new AbortController();
   /** Notes for the investigation, kept between judging and running it. */
-  private notes = new Map<string, { event: InboxEventView; note: string }[]>();
+  private notes = new Map<string, HistoryNote[]>();
   constructor(
     private store: InboxStore,
     private options: {
@@ -153,6 +170,8 @@ export class DiscoveryService {
       embedder?: () => Embedder | undefined;
       /** Sends the push for a finding; tests may leave it out. */
       delivery?: DeliveryService;
+      /** Offers the owner's three choices on what a Dot looked into. */
+      proposals?: ProposalService;
       /** A Dot's name, for pushes. */
       dotName?: (dotId: string) => Promise<string | undefined>;
       /** Whether pushes may quote item text (PUSH_PREVIEWS). */
@@ -398,6 +417,18 @@ export class DiscoveryService {
           const history = await this.gather(event, item, model, settings);
           verdict = await model.judge(item, history, this.controller.signal);
           judgedBy = model.name;
+          // Why each earlier item was gathered, kept with Jev's answers so
+          // the investigating Dot is told even after a restart.
+          if (verdict.answers && typeof verdict.answers === 'object')
+            verdict = {
+              ...verdict,
+              answers: {
+                ...(verdict.answers as Record<string, unknown>),
+                found_by: Object.fromEntries(
+                  history.map((entry) => [entry.event.id, entry.why]),
+                ),
+              },
+            };
         } catch (error) {
           // Left unjudged; the item stays in the Inbox as an ordinary event.
           console.error(`Discovery model failed: ${safeError(error)}`);
@@ -458,12 +489,22 @@ export class DiscoveryService {
       referenced ??= { entry, finding };
     }
     const asksSomething = !!verdict.asked && verdict.asked !== 'nothing';
+    // The triage rule the owner's dismissals feed: a sender they keep
+    // dismissing is no longer flagged.
+    const sender = address(event.from);
+    const quieted =
+      !!sender &&
+      quietedBySender(
+        await this.store.discovery.proposals.senderHistory(sender),
+        verdict,
+      );
     const attention =
-      (verdict.attention && verdict.confidence >= this.threshold) ||
-      verdict.injection ||
-      (!!referenced?.finding?.attention &&
-        asksSomething &&
-        referenced.entry.resolves < YES);
+      !quieted &&
+      ((verdict.attention && verdict.confidence >= this.threshold) ||
+        verdict.injection ||
+        (!!referenced?.finding?.attention &&
+          asksSomething &&
+          referenced.entry.resolves < YES));
     const canAct =
       (await (this.options.appsAllowed?.() ?? Promise.resolve(false))) &&
       context.settings.allowedApps.includes(context.config.toolkit);
@@ -474,7 +515,9 @@ export class DiscoveryService {
       confidence: verdict.confidence,
       reason: verdict.injection
         ? `Contains instructions aimed at an AI assistant; shown to you only. ${verdict.reason}`
-        : verdict.reason,
+        : quieted
+          ? `Not flagged: you dismissed recent items from ${sender}. ${verdict.reason}`
+          : verdict.reason,
       judgedBy,
       dotId: context.config.dotId,
       referencedEventId: referenced?.entry.eventId ?? null,
@@ -486,7 +529,9 @@ export class DiscoveryService {
         : null,
       answers: verdict.answers,
     });
-    const notes: { event: InboxEventView; note: string }[] = [];
+    const notes: HistoryNote[] = [];
+    const foundBy = (verdict.answers as { found_by?: Record<string, string[]> })
+      ?.found_by;
     for (const entry of related) {
       const earlier = await this.store.event(entry.eventId);
       if (!earlier) continue;
@@ -494,9 +539,14 @@ export class DiscoveryService {
         notes.push({
           event: earlier,
           note: 'holds facts useful for answering',
+          found: foundBy?.[earlier.id] ?? [],
         });
       if (entry.contradicts >= YES)
-        notes.push({ event: earlier, note: 'contradicts the new item' });
+        notes.push({
+          event: earlier,
+          note: 'contradicts the new item',
+          found: foundBy?.[earlier.id] ?? [],
+        });
       if (entry.same >= LINK)
         await this.updateEarlier(
           event,
@@ -508,6 +558,34 @@ export class DiscoveryService {
     }
     if (notes.length) this.notes.set(finding.id, notes);
     return finding;
+  }
+
+  /**
+   * The earlier items Jev rated useful or contradicting, rebuilt from the
+   * answers saved with the finding: for an investigation started after a
+   * restart, or by hand later.
+   */
+  private async storedNotes(findingId: string): Promise<HistoryNote[]> {
+    const saved = (await this.store.findingAnswers(findingId)) as {
+      earlier?: Record<string, string>;
+      answers?: Record<string, { noul?: number }>;
+      found_by?: Record<string, string[]>;
+    } | null;
+    const notes: HistoryNote[] = [];
+    for (const [label, eventId] of Object.entries(saved?.earlier ?? {})) {
+      const earlier = await this.store.event(eventId);
+      if (!earlier) continue;
+      const found = saved?.found_by?.[eventId] ?? [];
+      if ((saved?.answers?.[`useful__${label}`]?.noul ?? 0) >= YES)
+        notes.push({
+          event: earlier,
+          note: 'holds facts useful for answering',
+          found,
+        });
+      if ((saved?.answers?.[`contradicts__${label}`]?.noul ?? 0) >= YES)
+        notes.push({ event: earlier, note: 'contradicts the new item', found });
+    }
+    return notes;
   }
 
   /** What the new item changes about an earlier one it is about. */
@@ -529,6 +607,7 @@ export class DiscoveryService {
           state: 'resolved',
           note: `A later item says this no longer needs you: ${event.title}`,
         });
+        await this.store.discovery.proposals.close(finding.id);
         await this.options.delivery?.cancel(finding.id, {
           title: 'No longer needed',
           body: this.previews()
@@ -567,13 +646,22 @@ export class DiscoveryService {
           : {}),
       });
       if (!updated) return;
+      await this.store.discovery.proposals.escalate(
+        updated.id,
+        urgency,
+        importanceOf(urgency, updated.confidence),
+      );
       if (updated.state === 'flagged' && updated.route !== 'tell') {
         if (this.options.autoInvestigate !== false)
           await this.investigate(updated.id);
       } else if (updated.state === 'ready' || updated.route === 'tell') {
         // Already delivered or waiting: deliver again at the new urgency.
         await this.options.delivery?.cancel(updated.id);
-        await this.deliver(updated, earlier);
+        await this.deliver(
+          updated,
+          earlier,
+          await this.store.discovery.proposals.forFinding(updated.id),
+        );
       }
     }
   }
@@ -581,13 +669,17 @@ export class DiscoveryService {
   private previews() {
     return this.options.previews?.() ?? false;
   }
-  private async deliver(finding: FindingView, event: InboxEventView) {
+  private async deliver(
+    finding: FindingView,
+    event: InboxEventView,
+    proposal?: ProposalView,
+  ) {
     const delivery = this.options.delivery;
     if (!delivery) return;
     const name =
       (finding.dotId && (await this.options.dotName?.(finding.dotId))) ||
       'Your Dot';
-    const how = await delivery.deliver(finding, event, name);
+    const how = await delivery.deliver(finding, event, name, proposal);
     await this.store.updateFinding(finding.id, { delivery: how });
   }
 
@@ -615,16 +707,19 @@ export class DiscoveryService {
       : undefined;
     await this.store.updateFinding(finding.id, { state: 'investigating' });
     try {
-      const { threadId } = await this.options.investigate(
+      const app =
+        (toolkit && DISCOVERY_TOOLKITS[toolkit]?.name) || event.sourceName;
+      const { threadId, reply } = await this.options.investigate(
         {
           dotId: finding.dotId,
-          app:
-            (toolkit && DISCOVERY_TOOLKITS[toolkit]?.name) || event.sourceName,
+          app,
           event,
           finding,
           referencedEvent,
           existingThreadId,
-          history: this.notes.get(finding.id),
+          history:
+            this.notes.get(finding.id) ?? (await this.storedNotes(finding.id)),
+          tags: await this.store.discovery.tags(event.id),
         },
         AbortSignal.any([
           this.controller.signal,
@@ -652,7 +747,15 @@ export class DiscoveryService {
           threadId,
         });
       if (done?.state !== 'ready') return;
-      await this.deliver(done, event);
+      // The owner's three choices, in this same conversation. A follow-up
+      // that continued an earlier item's thread brings its proposal back.
+      const proposal = await this.options.proposals?.offer(done, event, {
+        threadId,
+        reply,
+        app,
+        sender: address(event.from),
+      });
+      await this.deliver(done, event, proposal);
       for (const listener of this.ready) {
         try {
           await listener(done, event);

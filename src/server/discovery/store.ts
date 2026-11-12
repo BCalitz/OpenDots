@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { sql, type Db } from '../db/index.js';
+import { ProposalStore } from './proposal-store.js';
 import type {
   BriefEntry,
   DiscoverySettings,
@@ -33,7 +34,9 @@ export interface UnsettledEntity {
 export interface QueuedPush {
   id: string;
   findingId: string | null;
-  kind: 'finding' | 'correction' | 'brief';
+  /** Set when the push carries the three choices. */
+  proposalId: string | null;
+  kind: 'finding' | 'correction' | 'brief' | 'proposal';
   title: string;
   body: string;
   threadId: string | null;
@@ -56,7 +59,7 @@ const WEIGHT = sql.raw(
   "CASE m.family WHEN 'invoice' THEN 3 WHEN 'order' THEN 3 WHEN 'ticket' THEN 3 WHEN 'name' THEN 1.5 WHEN 'person' THEN 1 WHEN 'email' THEN 1 ELSE 0.5 END",
 );
 const PUSH = sql.raw(
-  'id, finding_id, kind, title, body, thread_id, section, urgent, due_at, state, created_at, sent_at',
+  'id, finding_id, proposal_id, kind, title, body, thread_id, section, urgent, due_at, state, created_at, sent_at',
 );
 const vector = (values: number[]) =>
   `[${values.map((value) => (Number.isFinite(value) ? value : 0)).join(',')}]`;
@@ -67,7 +70,11 @@ const vector = (values: number[]) =>
  * settings.
  */
 export class DiscoveryStore {
-  constructor(private db: Db) {}
+  /** Proposals: flagged items with the owner's three choices. */
+  readonly proposals: ProposalStore;
+  constructor(private db: Db) {
+    this.proposals = new ProposalStore(db);
+  }
 
   async settings(): Promise<DiscoverySettings> {
     const row = await this.db.row<{ value: string }>(
@@ -99,6 +106,13 @@ export class DiscoveryStore {
     );
     await this.db.run(
       sql`DELETE FROM discovery_pushes WHERE finding_id IN (SELECT f.id FROM discovery_findings f WHERE f.event_id IN (${events}))`,
+    );
+  }
+
+  /** The names, projects, places and other keys tagged in one item. */
+  tags(eventId: string) {
+    return this.db.rows<{ kind: string; value: string }>(
+      sql`SELECT kind, value FROM event_tags WHERE event_id=${eventId} ORDER BY kind, value`,
     );
   }
 
@@ -321,8 +335,8 @@ export class DiscoveryStore {
   ): Promise<QueuedPush> {
     const id = randomUUID();
     await this.db.run(
-      sql`INSERT INTO discovery_pushes (id, finding_id, kind, title, body, thread_id, section, urgent, due_at, state, created_at)
-        VALUES (${id}, ${push.findingId}, ${push.kind}, ${push.title.slice(0, 200)}, ${push.body.slice(0, 500)}, ${push.threadId}, ${push.section}, ${push.urgent}, ${push.dueAt}, ${push.state}, ${at})`,
+      sql`INSERT INTO discovery_pushes (id, finding_id, proposal_id, kind, title, body, thread_id, section, urgent, due_at, state, created_at)
+        VALUES (${id}, ${push.findingId}, ${push.proposalId}, ${push.kind}, ${push.title.slice(0, 200)}, ${push.body.slice(0, 500)}, ${push.threadId}, ${push.section}, ${push.urgent}, ${push.dueAt}, ${push.state}, ${at})`,
     );
     return (await this.push(id))!;
   }
@@ -380,13 +394,14 @@ export class DiscoveryStore {
         ? sql`p.state='brief'`
         : sql`p.state='briefed' AND p.sent_at=${sentAt}`;
     const rows = await this.db.rows<QueuedPush & { eventId: string | null }>(
-      sql`SELECT p.finding_id, p.title, p.body, p.thread_id, p.section, p.created_at, f.event_id
+      sql`SELECT p.finding_id, p.proposal_id, p.title, p.body, p.thread_id, p.section, p.created_at, f.event_id
         FROM discovery_pushes p LEFT JOIN discovery_findings f ON f.id=p.finding_id
         WHERE ${which} AND (f.state IS NULL OR f.state<>'resolved')
         ORDER BY p.created_at, p.seq`,
     );
     return rows.map((row) => ({
       findingId: row.findingId,
+      proposalId: row.proposalId,
       eventId: row.eventId,
       title: row.title,
       body: row.body,
