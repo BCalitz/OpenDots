@@ -27,7 +27,10 @@ import { DEFAULT_DISCOVERY_SETTINGS } from '../src/server/discovery/store.js';
 import type { PushMessage } from '../src/server/push.js';
 import { testDb } from './fixtures/db.js';
 import { investigationMessage } from '../src/server/discovery/investigation.js';
-import { parseDiscoveryMessage } from '../src/shared/discovery-message.js';
+import {
+  discoveryCardModel,
+  parseDiscoveryMessage,
+} from '../src/shared/discovery-message.js';
 
 describe('routing and delivery tables', () => {
   it('routes by what is asked and what the Dot may do', () => {
@@ -704,6 +707,31 @@ describe('handing an item to the Dot', () => {
     expect(card!.headline).toMatch(/^Discovery flagged this/);
     expect(card!.ask).toMatch(/read-only/);
     expect(card!.ask).not.toMatch(/search_inbox/);
+    // Both apps show the same card: plain reasons, and links not already
+    // quoted are added once.
+    const model = discoveryCardModel(card!, [
+      {
+        otherEventId: input.history![0].event.id,
+        score: 0.9,
+        status: 'linked',
+        other: { title: 'duplicate', from: null, occurredAt: 0 },
+      },
+      {
+        otherEventId: 'other',
+        score: 0.62,
+        status: 'review',
+        other: { title: 'Another item', from: 'A <a@b.co>', occurredAt: 0 },
+      },
+    ]);
+    expect(model.related.map((item) => item.title)).toEqual([
+      'Invoice INV-2041 for March',
+      'Another item',
+    ]);
+    expect(model.related[0].why).toMatch(
+      /^Holds facts useful for answering · shares .*2041/,
+    );
+    expect(model.related[1].why).toMatch(/waiting for your review/);
+    expect(model.facts).toContain('today');
     expect(parseDiscoveryMessage('Just text, no quoted item.')).toBeNull();
   });
 });

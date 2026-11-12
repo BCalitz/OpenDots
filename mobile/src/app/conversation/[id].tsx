@@ -14,9 +14,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ApprovalCard } from '../../components/ApprovalCard';
 import { ApprovalRequestCard } from '../../components/ApprovalRequestCard';
+import { DiscoveryCard } from '../../components/DiscoveryCard';
 import { PageReviewCard } from '../../components/PageReviewCard';
 import { api, type Conversation, type Workspace } from '../../lib/api';
 import { isScheduledMessage, useConversation } from '../../lib/chat';
+import {
+  isDiscoveryMessage,
+  parseDiscoveryMessage,
+} from '../../lib/discovery-message';
 import type { Message } from '../../lib/thread-events';
 import { useSession, type Session } from '../../lib/session';
 import { useTheme } from '../../lib/theme';
@@ -210,8 +215,13 @@ function Chat({
               )}
             </>
           }
-          renderItem={({ item }) =>
-            item.role === 'user' ? (
+          renderItem={({ item }) => {
+            const discovery = isDiscoveryMessage(item)
+              ? parseDiscoveryMessage(textOf(item))
+              : null;
+            return discovery ? (
+              <DiscoveryCard parsed={discovery} session={session} />
+            ) : item.role === 'user' ? (
               <View style={styles.userRow}>
                 {isScheduledMessage(item) && (
                   <Text style={[styles.label, { color: theme.muted }]}>
@@ -235,8 +245,8 @@ function Chat({
                 )}
                 {item.role === 'assistant' && item.toolCalls?.map(renderTool)}
               </View>
-            )
-          }
+            );
+          }}
         />
       )}
       <View

@@ -235,6 +235,7 @@ it('keeps the mobile copies of the shared chat modules identical', () => {
     'approvals',
     'chat-stream',
     'thread-client',
+    'discovery-message',
   ]) {
     const shared = readFileSync(`src/shared/${name}.ts`, 'utf8');
     const mobile = readFileSync(`mobile/src/lib/${name}.ts`, 'utf8');
