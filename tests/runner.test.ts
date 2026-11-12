@@ -124,7 +124,10 @@ it('holds active work for review on graceful shutdown', async () => {
   vi.stubGlobal('fetch', fetch);
   await store.createTask('Read https://example.com');
   const pending = runner.tick();
-  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  // The default one second is tight when the suite runs in parallel.
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce(), {
+    timeout: 5000,
+  });
   await runner.stop();
   await pending;
   expect((await store.tasks())[0].status).toBe('interrupted');

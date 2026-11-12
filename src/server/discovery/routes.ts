@@ -8,6 +8,39 @@ import {
 import type { ComposioAccountService } from '../composio-accounts.js';
 import type { Platform } from '../platform.js';
 
+const time = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time such as 07:30.');
+const settingsSchema = z
+  .object({
+    briefTime: time,
+    quietHours: z.object({ start: time, end: time }).strict().nullable(),
+    holdMinutes: z.number().int().min(0).max(120),
+    timeZone: z.string().refine((zone) => {
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: zone });
+        return true;
+      } catch {
+        return false;
+      }
+    }, 'Unknown time zone.'),
+    trusted: z
+      .array(
+        z
+          .string()
+          .trim()
+          .toLowerCase()
+          .regex(
+            /^(@?[a-z0-9.-]+\.[a-z]{2,}|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})$/,
+            'Trusted entries are addresses or domains, such as brightlane.co.za.',
+          ),
+      )
+      .max(50),
+    allowedApps: z.array(z.string().regex(/^[a-z0-9_]{1,60}$/)).max(50),
+  })
+  .partial()
+  .strict();
+
 /** Discovery settings per connected account, and starting investigations. */
 export function discoveryRoutes(
   platform: Platform,
@@ -32,9 +65,62 @@ export function discoveryRoutes(
         };
       }),
       model: { configured: !!config.typesafeApiKey },
+      embeddings: {
+        configured: !!platform.embedder,
+        model: platform.embedder?.model ?? null,
+      },
+      settings: await store.discovery.settings(),
     };
     return c.json(state);
   });
+  app.put('/discovery/settings', async (c) => {
+    const body = settingsSchema.safeParse(await c.req.json().catch(() => null));
+    if (!body.success)
+      return c.json(
+        { error: body.error.issues[0]?.message ?? 'Check the settings.' },
+        400,
+      );
+    return c.json(await store.discovery.updateSettings(body.data));
+  });
+  /** What the next morning brief holds, and what the last one held. */
+  app.get('/discovery/brief', async (c) => {
+    const lastAt = await store.discovery.lastBriefAt();
+    return c.json({
+      next: await store.discovery.brief(),
+      last: lastAt
+        ? { sentAt: lastAt, entries: await store.discovery.brief(lastAt) }
+        : null,
+    });
+  });
+  app.get('/inbox/events/:id/links', async (c) =>
+    c.json(await store.discovery.links(c.req.param('id'))),
+  );
+  app.get('/discovery/links/review', async (c) =>
+    c.json(await store.discovery.reviewQueue()),
+  );
+  app.post('/discovery/links', async (c) => {
+    const body = z
+      .object({
+        eventId: z.string().min(1).max(200),
+        otherEventId: z.string().min(1).max(200),
+        status: z.enum(['confirmed', 'rejected']),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ error: 'Choose a link.' }, 400);
+    const found = await store.discovery.decideLink(
+      body.data.eventId,
+      body.data.otherEventId,
+      body.data.status,
+    );
+    return found
+      ? c.json({ ok: true })
+      : c.json({ error: 'Link not found.' }, 404);
+  });
+  /** Jev's raw answers for a finding, as stored. */
+  app.get('/inbox/findings/:id/answers', async (c) =>
+    c.json({ answers: await store.findingAnswers(c.req.param('id')) }),
+  );
   app.put('/discovery/accounts/:accountId', async (c) => {
     const accountId = c.req.param('accountId');
     const body = z

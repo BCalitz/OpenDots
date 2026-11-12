@@ -5016,3 +5016,109 @@ h3 {
     grid-template-columns: 1fr;
   }
 }
+
+/* Discovery with history: finding details, the morning brief and links. */
+.inbox-event p.discovery-detail {
+  color: #6f727e;
+}
+.inbox-event p.discovery-note {
+  color: #6f727e;
+  font-style: italic;
+}
+.inbox-event p.discovery-warning {
+  color: #b42318;
+}
+.inbox-brief .brief-section h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+}
+.inbox-brief .brief-section ul,
+.brief-links {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.inbox-brief .brief-section li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e7e6e3);
+  border-radius: 10px;
+}
+.inbox-brief .brief-section li div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.inbox-brief .brief-section li span {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.brief-links li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.brief-links li > span:nth-child(2) {
+  overflow-wrap: anywhere;
+}
+.brief-link-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef2f8;
+  color: #3d4a5c;
+}
+.brief-link-status.review {
+  background: #fdf3e1;
+  color: #7a4d00;
+}
+.brief-link-status.rejected {
+  background: #f3f3f2;
+  color: #6f727e;
+}
+.brief-link-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+.large-empty.small {
+  padding: 24px 16px;
+}
+.discovery-settings {
+  margin-top: 32px;
+  max-width: 640px;
+}
+.discovery-settings input:not([type='checkbox']) {
+  width: 100%;
+}
+.discovery-settings > .permission-row {
+  margin-top: 16px;
+}
+.discovery-settings .small {
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.discovery-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+:root[data-theme='dark'] .brief-link-status {
+  background: #22262d;
+  color: #c5cbd6;
+}
+:root[data-theme='dark'] .brief-link-status.review {
+  background: #33280f;
+  color: #f0c46a;
+}
+:root[data-theme='dark'] .inbox-event p.discovery-warning {
+  color: #f97066;
+}

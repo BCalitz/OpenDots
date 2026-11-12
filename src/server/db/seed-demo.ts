@@ -2,10 +2,16 @@
 // Usage: npm run seed-demo            adds three "Demo ·" sources and items
 //        npm run seed-demo -- --remove removes them and their tags
 // Every company, person and address here is fictional.
-import { databaseUrl, openDatabase } from './index.js';
+import { databaseUrl, openDatabase, sql } from './index.js';
 import { InboxStore } from '../inbox/store.js';
 import type { InboxEvent } from '../inbox/source.js';
-import type { SourceKind } from '../../shared/inbox-types.js';
+import type {
+  Asked,
+  InboxEventView,
+  Route,
+  SourceKind,
+  Urgency,
+} from '../../shared/inbox-types.js';
 
 const PREFIX = 'Demo · ';
 const DAY = 86_400_000;
@@ -240,6 +246,140 @@ const items: Item[] = [
 
 const db = await openDatabase(databaseUrl());
 const store = new InboxStore(db);
+
+/**
+ * Made-up discovery results, as if Jev had judged the items with their
+ * history, so the Inbox, Brief and links show something without a live
+ * model call. Marked as judged by "demo".
+ */
+async function seedFindings(added: InboxEventView[]) {
+  const dot = await db.row<{ id: string }>(
+    sql`SELECT id FROM dots ORDER BY created_at LIMIT 1`,
+  );
+  const byTitle = (start: string) => {
+    const event = added.find((item) => item.title.startsWith(start));
+    if (!event) throw new Error(`No demo item starts with "${start}".`);
+    return event;
+  };
+  const find = async (
+    start: string,
+    value: {
+      category: string;
+      urgency: Urgency;
+      asked: Asked;
+      route: Route | null;
+      reason: string;
+      attention?: boolean;
+    },
+  ) => {
+    const event = byTitle(start);
+    const finding = await store.saveFinding({
+      eventId: event.id,
+      attention: value.attention ?? true,
+      category: value.category,
+      confidence: value.attention === false ? 0.2 : 0.9,
+      reason: value.reason,
+      judgedBy: 'demo',
+      dotId: dot?.id ?? null,
+      urgency: value.urgency,
+      asked: value.asked,
+      route: value.route,
+    });
+    return { event, finding };
+  };
+  const invoice = await find('Invoice INV-2041', {
+    category: 'invoice',
+    urgency: 'tomorrow',
+    asked: 'action',
+    route: 'inform',
+    reason:
+      'an invoice sent to or by the owner; asks for an action, by tomorrow.',
+  });
+  const reminder = await find('Payment reminder', {
+    category: 'bill',
+    urgency: 'today',
+    asked: 'action',
+    route: 'inform',
+    reason: 'a bill the owner owes; asks for an action, today.',
+  });
+  const ignore = await find('Ignore the Acme reminder', {
+    category: 'request',
+    urgency: 'days',
+    asked: 'nothing',
+    route: null,
+    attention: false,
+    reason: 'says the earlier reminder is handled.',
+  });
+  const ops311 = await find('OPS-311', {
+    category: 'request',
+    urgency: 'hours',
+    asked: 'action',
+    route: 'inform',
+    reason:
+      'someone asking the owner to do something; asks for an action, within hours.',
+  });
+  const ops298 = byTitle('OPS-298');
+  const broken = byTitle('Export still broken');
+  const po = await find('Purchase order 9120', {
+    category: 'request',
+    urgency: 'tomorrow',
+    asked: 'reply',
+    route: 'draft',
+    reason:
+      'someone asking the owner a question; asks for a reply, by tomorrow.',
+  });
+  const sales = byTitle('SALES-77');
+  const refund = await find('OPS-312', {
+    category: 'request',
+    urgency: 'days',
+    asked: 'decision',
+    route: 'decide',
+    reason: 'a refund only the owner can approve; asks for a decision.',
+  });
+  const credit = await find('Credit note', {
+    category: 'invoice',
+    urgency: 'days',
+    asked: 'nothing',
+    route: 'tell',
+    reason: 'a credit note; nothing asked.',
+  });
+  // The Teams "ignore it" comes from the owner's organisation, so the
+  // reminder (and the invoice it chases) are resolved.
+  for (const { finding } of [invoice, reminder])
+    await store.updateFinding(finding.id, {
+      state: 'resolved',
+      delivery: 'held',
+      note: `A later item says this no longer needs you: ${ignore.event.title}`,
+    });
+  await store.updateFinding(ops311.finding.id, {
+    delivery: 'now',
+    note: `Made more urgent by a later item: ${broken.title}`,
+  });
+  const links = store.discovery;
+  await links.link(reminder.event.id, invoice.event.id, 1, 'linked');
+  await links.link(ignore.event.id, reminder.event.id, 1, 'linked');
+  await links.link(broken.id, ops311.event.id, 1, 'linked');
+  await links.link(ops311.event.id, ops298.id, 0.6, 'review');
+  await links.link(sales.id, po.event.id, 0.9, 'linked');
+  for (const [entry, section, title] of [
+    [po, 'drafts', 'a draft reply is ready'],
+    [refund, 'decisions', 'a decision for you'],
+    [credit, 'updates', 'something to know'],
+  ] as const) {
+    await links.queuePush({
+      findingId: entry.finding.id,
+      kind: 'finding',
+      title: `Dot: ${title}`,
+      body: entry.event.title,
+      threadId: null,
+      section,
+      urgent: false,
+      dueAt: null,
+      state: 'brief',
+    });
+    await store.updateFinding(entry.finding.id, { delivery: 'brief' });
+  }
+}
 try {
   for (const source of await store.sources())
     if (source.name.startsWith(PREFIX)) await store.remove(source.id);
@@ -270,6 +410,7 @@ try {
       }),
     );
     const added = await store.ingest(events);
+    await seedFindings(added);
     console.log(
       `Added ${added.length} made-up items in ${sources.length} "${PREFIX}" sources. Remove them with npm run seed-demo -- --remove.`,
     );

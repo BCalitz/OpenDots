@@ -19,6 +19,7 @@ import {
   type DiscoveryState,
 } from '../shared/inbox-types';
 import { api } from './api';
+import { DiscoverySettingsForm } from './DiscoverySettings';
 
 /** Common apps, offered as one-click buttons. Any Composio app slug works. */
 const SUGGESTED = [
@@ -371,6 +372,9 @@ export function AccountsView({
           Use the app’s Composio name, as listed at composio.dev/toolkits.
         </p>
       </form>
+      {discovery && (
+        <DiscoverySettingsForm state={discovery} onSaved={loadDiscovery} />
+      )}
     </main>
   );
 }

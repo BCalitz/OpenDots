@@ -10,6 +10,7 @@ import {
   Link2,
   List,
   Mail,
+  Newspaper,
   MessageSquare,
   Plus,
   RefreshCw,
@@ -30,6 +31,13 @@ import type {
 } from '../shared/inbox-types';
 import { api } from './api';
 import { InboxLinks } from './InboxLinks';
+import {
+  EventLinks,
+  InboxBrief,
+  deliveryText,
+  routeText,
+  urgencyText,
+} from './InboxBrief';
 import { relative } from './TaskPresentation';
 
 const kindIcon = {
@@ -62,6 +70,7 @@ const findingText: Record<string, string> = {
   investigating: 'Looking into it…',
   ready: 'Findings ready',
   failed: 'Could not finish',
+  resolved: 'No longer needed',
 };
 
 /** The event log and the sources that feed it (roadmap phase 3). */
@@ -81,7 +90,8 @@ export function InboxView({
     secret: string;
   }>();
   const [showDismissed, setShowDismissed] = useState(false);
-  const [tab, setTab] = useState<'items' | 'links'>('items');
+  const [tab, setTab] = useState<'items' | 'brief' | 'links'>('items');
+  const [open, setOpen] = useState<string>();
   const load = useCallback(
     () =>
       api<InboxState>(`/inbox${showDismissed ? '?all=1' : ''}`)
@@ -132,6 +142,7 @@ export function InboxView({
         {(
           [
             ['items', 'Items', List],
+            ['brief', 'Brief', Newspaper],
             ['links', 'Links', Link2],
           ] as const
         ).map(([id, label, Icon]) => (
@@ -148,6 +159,7 @@ export function InboxView({
         ))}
       </div>
       {tab === 'links' && <InboxLinks />}
+      {tab === 'brief' && <InboxBrief onThread={onThread} />}
       {tab === 'items' && (
         <>
           {secret && (
@@ -252,6 +264,29 @@ export function InboxView({
                         : ''}
                     </p>
                   )}
+                  {event.finding?.attention && (
+                    <p className="discovery-detail">
+                      {[
+                        event.finding.urgency &&
+                          urgencyText[event.finding.urgency],
+                        event.finding.route && routeText[event.finding.route],
+                        event.finding.delivery &&
+                          deliveryText[event.finding.delivery],
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </p>
+                  )}
+                  {event.finding?.injection && (
+                    <p className="discovery-warning">
+                      This item reads as trying to instruct an AI assistant. It
+                      is shown to you only; no Dot acts on it.
+                    </p>
+                  )}
+                  {event.finding?.note && (
+                    <p className="discovery-note">{event.finding.note}</p>
+                  )}
+                  {open === event.id && <EventLinks eventId={event.id} />}
                 </div>
                 <div className="inbox-event-actions">
                   {event.finding?.threadId && (
@@ -260,6 +295,19 @@ export function InboxView({
                       onClick={() => onThread(event.finding!.threadId!)}
                     >
                       Open findings
+                    </button>
+                  )}
+                  {event.finding && (
+                    <button
+                      className="icon-button"
+                      aria-label={`Items related to ${event.title}`}
+                      aria-expanded={open === event.id}
+                      title="Related items"
+                      onClick={() =>
+                        setOpen(open === event.id ? undefined : event.id)
+                      }
+                    >
+                      <Link2 size={15} />
                     </button>
                   )}
                   {event.finding &&

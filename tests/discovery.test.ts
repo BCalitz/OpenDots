@@ -74,8 +74,10 @@ const fakeJudge = (): Judge & { calls: string[] } => {
         category: payment ? 'payment' : 'other',
         confidence: payment ? 0.93 : 0.4,
         reason: payment ? 'PayFast payment, ref 8812345.' : 'Unclear.',
-        referencedEventId: null,
         urgency: null,
+        asked: payment ? 'reply' : 'nothing',
+        injection: false,
+        related: [],
       };
     },
   };
@@ -121,16 +123,48 @@ describe('discovery model', () => {
     expect(ruleVerdict(null)).toBeUndefined();
   });
 
-  it('asks Jev only the base attention/category questions when there are no candidates', async () => {
-    const { fetch, body } = stubFetch({
-      attention: { type: 'noul', noul: 0.9 },
-      category: {
-        type: 'choice',
-        choice: 'payment',
-        confidence: 0.8,
-        probabilities: {},
-      },
-    });
+  const baseAnswers = (overrides: Record<string, unknown> = {}) => ({
+    attention: { type: 'noul', noul: 0.9 },
+    category: {
+      type: 'choice',
+      choice: 'payment',
+      confidence: 0.8,
+      probabilities: {},
+    },
+    urgency: {
+      type: 'score',
+      // The expected score sits between levels; the most likely level wins.
+      score: 1.4,
+      confidence: 0.6,
+      legend: {},
+      probabilities: { 0: 0.1, 1: 0.2, 2: 0.6, 3: 0.1 },
+    },
+    asks_anything: { type: 'noul', noul: 0.8 },
+    what_asked: {
+      type: 'choice',
+      choice: 'reply',
+      confidence: 0.7,
+      probabilities: {},
+    },
+    injection: { type: 'noul', noul: 0.05 },
+    ...overrides,
+  });
+  const earlierAnswers = (label: string, same: number, resolves = 0.1) => ({
+    [`same__${label}`]: {
+      type: 'score',
+      score: same,
+      confidence: 0.8,
+      legend: {},
+      probabilities: {},
+    },
+    [`resolves__${label}`]: { type: 'noul', noul: resolves },
+    [`escalates__${label}`]: { type: 'noul', noul: 0.1 },
+    [`useful__${label}`]: { type: 'noul', noul: 0.8 },
+    [`contradicts__${label}`]: { type: 'noul', noul: 0.1 },
+  });
+
+  it('asks about the item alone when there is no history', async () => {
+    const { fetch, body } = stubFetch(baseAnswers());
     const verdict = await jevJudge({
       apiKey: 'unused',
       fetch,
@@ -150,38 +184,32 @@ describe('discovery model', () => {
       attention: true,
       category: 'payment',
       confidence: 0.9,
-      referencedEventId: null,
-      urgency: null,
+      urgency: 'today',
+      asked: 'reply',
+      injection: false,
+      related: [],
     });
-    expect(Object.keys(body().questions)).toEqual(['attention', 'category']);
+    expect(Object.keys(body().questions).sort()).toEqual(
+      [
+        'asks_anything',
+        'attention',
+        'category',
+        'injection',
+        'urgency',
+        'what_asked',
+      ].sort(),
+    );
+    expect(body().state).not.toHaveProperty('earlier');
+    // The raw answers are kept for retuning.
+    expect(verdict.answers).toMatchObject({ model: 'jev', earlier: {} });
   });
 
-  it('resolves which candidate was referenced, and reports the urgency for the caller to gate on', async () => {
+  it('asks about each earlier item by its path, and says why code found it', async () => {
     const { fetch, body } = stubFetch({
-      attention: { type: 'noul', noul: 0.2 },
-      category: {
-        type: 'choice',
-        choice: 'request',
-        confidence: 0.7,
-        probabilities: {},
-      },
-      references_any: { type: 'noul', noul: 0.9 },
-      which_candidate: {
-        type: 'choice',
-        choice: 'mail_1',
-        confidence: 0.9,
-        probabilities: {},
-      },
-      is_ask: { type: 'noul', noul: 0.85 },
-      urgency: {
-        type: 'score',
-        score: 2,
-        confidence: 0.8,
-        legend: {},
-        probabilities: {},
-      },
+      ...baseAnswers(),
+      ...earlierAnswers('mail_1', 2, 0.9),
     });
-    const candidate = candidateEvent();
+    const earlier = candidateEvent();
     const verdict = await jevJudge({
       apiKey: 'unused',
       fetch,
@@ -190,63 +218,127 @@ describe('discovery model', () => {
       {
         app: 'Teams',
         kind: 'message.received',
-        from: candidate.from,
-        title: 'Reply needed',
-        summary: 'Did you see my email about the invoice? Can you reply?',
+        from: earlier.from,
+        title: 'Ignore that',
+        summary: 'Invoice #4471 is paid, ignore my email.',
       },
-      [candidate],
+      [
+        {
+          event: earlier,
+          app: 'Gmail',
+          why: ['both mention invoice INV-4471'],
+        },
+      ],
       signal,
     );
-    expect(verdict.referencedEventId).toBe(candidate.id);
-    expect(verdict.urgency).toBe(1); // 0-2 score normalized to 0-1
-    expect(verdict.attention).toBe(false); // base signal alone, unaffected
-    expect(body().questions).toHaveProperty('references_any');
-    expect((body().state as { candidates: unknown[] }).candidates).toHaveLength(
-      1,
+    expect(verdict.related).toEqual([
+      {
+        eventId: earlier.id,
+        same: 1,
+        resolves: 0.9,
+        escalates: 0.1,
+        useful: 0.8,
+        contradicts: 0.1,
+      },
+    ]);
+    const state = body().state as {
+      earlier: Record<string, { found_by: string; app: string }>;
+    };
+    expect(state.earlier.mail_1).toMatchObject({
+      app: 'Gmail',
+      found_by: 'both mention invoice INV-4471',
+    });
+    expect(JSON.stringify(body().questions.resolves__mail_1)).toContain(
+      '`earlier.mail_1`',
     );
   });
 
-  it('does not set referencedEventId when Jev is not confident of a reference', async () => {
-    const { fetch } = stubFetch({
-      attention: { type: 'noul', noul: 0.2 },
-      category: {
-        type: 'choice',
-        choice: 'other',
-        confidence: 0.5,
-        probabilities: {},
-      },
-      references_any: { type: 'noul', noul: 0.2 },
-      which_candidate: {
-        type: 'choice',
-        choice: 'mail_1',
-        confidence: 0.3,
-        probabilities: {},
-      },
-      is_ask: { type: 'noul', noul: 0.1 },
-      urgency: {
-        type: 'score',
-        score: 0,
-        confidence: 0.9,
-        legend: {},
-        probabilities: {},
-      },
+  it('reads "nothing asked" only below 0.3, and flags instructions to an AI', async () => {
+    const judge = async (answers: Record<string, unknown>) =>
+      jevJudge({
+        apiKey: 'unused',
+        fetch: stubFetch(baseAnswers(answers)).fetch,
+        compression: false,
+      }).judge(
+        { app: 'Gmail', kind: 'mail', from: 'x', title: 'Hi', summary: 'Hi' },
+        [],
+        signal,
+      );
+    expect(
+      (await judge({ asks_anything: { type: 'noul', noul: 0.2 } })).asked,
+    ).toBe('nothing');
+    // Unsettled counts as asked, so nothing that might need the owner is dropped.
+    expect(
+      (await judge({ asks_anything: { type: 'noul', noul: 0.5 } })).asked,
+    ).toBe('reply');
+    expect(
+      (await judge({ injection: { type: 'noul', noul: 0.9 } })).injection,
+    ).toBe(true);
+  });
+
+  it('matches a name in one pass when only one candidate fits, and asks a Choice otherwise', async () => {
+    const entity = {
+      kind: 'person' as const,
+      normalized: 't nkosi',
+      value: 'T Nkosi',
+      candidates: [
+        { normalized: 'thandi nkosi', value: 'Thandi Nkosi' },
+        { normalized: 'themba nkosi', value: 'Themba Nkosi' },
+      ],
+    };
+    const item = {
+      app: 'Gmail',
+      kind: 'mail',
+      from: 'x',
+      title: 'From T Nkosi',
+      summary: 'Re: the stationery invoice',
+    };
+    let one = stubFetch({
+      c0: { type: 'noul', noul: 0.9 },
+      c1: { type: 'noul', noul: 0.1 },
     });
-    const verdict = await jevJudge({
-      apiKey: 'unused',
-      fetch,
-      compression: false,
-    }).judge(
-      {
-        app: 'Teams',
-        kind: 'message.received',
-        from: 'x',
-        title: 'Hi',
-        summary: 'Hi',
-      },
-      [candidateEvent()],
-      signal,
-    );
-    expect(verdict.referencedEventId).toBeNull();
+    expect(
+      await jevJudge({ apiKey: 'unused', fetch: one.fetch, compression: false })
+        .match!(entity, item, signal),
+    ).toBe('thandi nkosi');
+    one = stubFetch({
+      c0: { type: 'noul', noul: 0.6 },
+      c1: { type: 'noul', noul: 0.1 },
+    });
+    // One candidate, but not clearly the same: no match.
+    expect(
+      await jevJudge({ apiKey: 'unused', fetch: one.fetch, compression: false })
+        .match!(entity, item, signal),
+    ).toBeNull();
+    const calls: unknown[] = [];
+    const two = (async (_url: string, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as {
+        questions: Record<string, unknown>;
+      };
+      calls.push(request.questions);
+      const answers = request.questions.which
+        ? {
+            which: {
+              type: 'choice',
+              choice: 'known_2',
+              confidence: 0.9,
+              probabilities: { known_1: 0.1, known_2: 0.9 },
+            },
+          }
+        : { c0: { type: 'noul', noul: 0.7 }, c1: { type: 'noul', noul: 0.8 } };
+      return new Response(
+        JSON.stringify({ model: 'jev', answers, usage: {} }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      );
+    }) as typeof globalThis.fetch;
+    expect(
+      await jevJudge({ apiKey: 'unused', fetch: two, compression: false })
+        .match!(entity, item, signal),
+    ).toBe('thandi nkosi');
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -625,8 +717,8 @@ describe('discovery service', () => {
     // Flags everything; the second item references the first's candidate.
     const judge = (): Judge => ({
       name: 'fake-jev',
-      async judge(_item, candidates) {
-        const reference = candidates[0];
+      async judge(_item, history) {
+        const reference = history[0]?.event;
         return {
           attention: true,
           category: reference ? 'request' : 'payment',
@@ -634,8 +726,21 @@ describe('discovery service', () => {
           reason: reference
             ? 'Follow-up asking for a reply.'
             : 'Payment received.',
-          referencedEventId: reference?.id ?? null,
-          urgency: reference ? 1 : null,
+          urgency: 'today',
+          asked: 'reply',
+          injection: false,
+          related: reference
+            ? [
+                {
+                  eventId: reference.id,
+                  same: 1,
+                  resolves: 0,
+                  escalates: 0,
+                  useful: 0,
+                  contradicts: 0,
+                },
+              ]
+            : [],
         };
       },
     });
@@ -752,11 +857,18 @@ describe('discovery service', () => {
         threadId: null,
         referencedEventId: null,
         error: null,
+        urgency: null,
+        asked: 'reply',
+        injection: false,
+        route: 'draft',
+        delivery: null,
+        note: null,
         createdAt: 0,
         updatedAt: 0,
       },
     });
     expect(text).toMatch(/payment, 93% sure/);
+    expect(text).toMatch(/draft a reply/);
     expect(text).toMatch(/untrusted data/);
     // The item cannot close the code block it is quoted in.
     expect(text.match(/```/g)).toHaveLength(2);
@@ -973,5 +1085,137 @@ describe('discovery routes', () => {
         })
       ).status,
     ).toBe(404);
+  });
+});
+
+describe('discovery history routes', () => {
+  async function routes() {
+    const { Platform } = await import('../src/server/platform.js');
+    const { discoveryRoutes } =
+      await import('../src/server/discovery/routes.js');
+    const { store, workspace } = await testWorkspace();
+    const platform = await Platform.create(store, workspace, {
+      apiKey: 'fixture',
+      model: 'custom-model',
+      baseUrl: 'https://unused.invalid/v1',
+      voiceName: 'marin',
+      slackUsers: [],
+      embeddingBaseUrl: 'http://127.0.0.1:1/v1',
+    });
+    cleanup.push(() => platform.stop());
+    const app = discoveryRoutes(platform, () => undefined);
+    const send = (method: string, path: string, body?: unknown) =>
+      app.request(path, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    return { app, send, platform, inbox: workspace.inbox };
+  }
+
+  it('reads and validates delivery settings', async () => {
+    const f = await routes();
+    const state = await (await f.app.request('/discovery')).json();
+    expect(state.embeddings).toEqual({
+      configured: true,
+      model: 'nomic-embed-text',
+    });
+    expect(state.settings).toMatchObject({
+      briefTime: '07:30',
+      holdMinutes: 5,
+    });
+    const saved = await f.send('PUT', '/discovery/settings', {
+      briefTime: '08:15',
+      quietHours: null,
+      trusted: ['Brightlane.co.za', 'me@example.com'],
+      allowedApps: ['jira'],
+    });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({
+      briefTime: '08:15',
+      quietHours: null,
+      trusted: ['brightlane.co.za', 'me@example.com'],
+      allowedApps: ['jira'],
+    });
+    for (const bad of [
+      { briefTime: '25:00' },
+      { timeZone: 'Mars/Olympus' },
+      { trusted: ['not an address'] },
+      { holdMinutes: 500 },
+      { extra: true },
+    ])
+      expect((await f.send('PUT', '/discovery/settings', bad)).status).toBe(
+        400,
+      );
+  });
+
+  it('lists links to review and records the owner answer', async () => {
+    const f = await routes();
+    const { source } = await f.inbox.create({
+      name: 'Mail',
+      kind: 'mail',
+      type: 'webhook',
+      config: {},
+      notify: 'off',
+      intervalSeconds: 0,
+    });
+    const [a, b] = await f.inbox.ingest(
+      ['Invoice INV-2041', 'Reminder INV-2041'].map((title, index) => ({
+        sourceId: source.id,
+        externalId: `e${index}`,
+        kind: 'mail',
+        title,
+        summary: '',
+        raw: null,
+        occurredAt: Date.now() + index,
+      })),
+    );
+    await f.inbox.discovery.link(b.id, a.id, 0.6, 'review');
+    const review = await (
+      await f.app.request('/discovery/links/review')
+    ).json();
+    expect(review).toEqual([
+      expect.objectContaining({
+        eventId: b.id,
+        status: 'review',
+        item: expect.objectContaining({ title: 'Reminder INV-2041' }),
+        other: expect.objectContaining({ title: 'Invoice INV-2041' }),
+      }),
+    ]);
+    // Seen from the earlier item, the later one is the other end.
+    const fromA = await (
+      await f.app.request(`/inbox/events/${a.id}/links`)
+    ).json();
+    expect(fromA[0]).toMatchObject({
+      eventId: a.id,
+      otherEventId: b.id,
+      other: { title: 'Reminder INV-2041' },
+    });
+    expect(
+      (
+        await f.send('POST', '/discovery/links', {
+          eventId: a.id,
+          otherEventId: b.id,
+          status: 'rejected',
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      await (await f.app.request('/discovery/links/review')).json(),
+    ).toEqual([]);
+    // A later judgment never brings a rejected link back.
+    await f.inbox.discovery.link(b.id, a.id, 0.9, 'linked');
+    expect((await f.inbox.discovery.links(a.id))[0].status).toBe('rejected');
+    expect(
+      (
+        await f.send('POST', '/discovery/links', {
+          eventId: 'x',
+          otherEventId: 'y',
+          status: 'confirmed',
+        })
+      ).status,
+    ).toBe(404);
+    const brief = await (await f.app.request('/discovery/brief')).json();
+    expect(brief).toEqual({ next: [], last: null });
   });
 });

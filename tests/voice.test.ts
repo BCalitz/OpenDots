@@ -106,9 +106,12 @@ it('rejects unowned threads before provider contact and expires unactivated peer
   await vi.waitFor(async () =>
     expect((await f.workspace.call(call.id)).status).toBe('failed'),
   );
-  expect(
-    f.transport.mock.calls.some(([url]) => String(url).endsWith('/hangup')),
-  ).toBe(true);
+  // The call is marked failed first and hung up after, so wait for that too.
+  await vi.waitFor(() =>
+    expect(
+      f.transport.mock.calls.some(([url]) => String(url).endsWith('/hangup')),
+    ).toBe(true),
+  );
 });
 it('aborts a pending history lookup without starting a provider session', async () => {
   const f = await fixture();

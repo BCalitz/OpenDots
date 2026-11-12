@@ -54,6 +54,9 @@ const config: PlatformConfig = {
   composioApiKey: process.env.COMPOSIO_API_KEY || undefined,
   typesafeApiKey: process.env.TYPESAFE_API_KEY || undefined,
   discoveryThreshold: discoveryThresholdFromEnv(process.env),
+  embeddingBaseUrl: process.env.EMBEDDING_BASE_URL || undefined,
+  embeddingModel: process.env.EMBEDDING_MODEL || undefined,
+  embeddingApiKey: process.env.EMBEDDING_API_KEY || undefined,
   computerSupervisorUrl: process.env.COMPUTER_SUPERVISOR_URL,
   computerSupervisorToken: process.env.COMPUTER_SUPERVISOR_TOKEN,
   computerToken: process.env.COMPUTER_TOKEN,
@@ -71,7 +74,7 @@ const config: PlatformConfig = {
   slackDotId: process.env.SLACK_DOT_ID || undefined,
   ownerToken,
 };
-const platform = await Platform.create(store, workspace, config);
+const platform = await Platform.create(store, workspace, config, { push });
 console.log('Conversations are stored in Postgres.');
 const legacy = legacySettingsNotice(process.env);
 if (legacy) console.warn(legacy);
@@ -147,18 +150,6 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`OpenDots template listening on http://${host}:${info.port}`);
   runner.start();
   platform.inbox.onEvents(pushNotifier(push));
-  platform.discovery.onReady(async (finding, event) => {
-    const dotName =
-      (finding.dotId && (await workspace.dot(finding.dotId))?.name) ||
-      'Your Dot';
-    return push.send({
-      title: `${dotName} looked into something for you`,
-      body: push.previews
-        ? `${event.title}: ${finding.reason}`.slice(0, 160)
-        : 'Open the conversation to see what it found and suggests.',
-      data: { threadId: finding.threadId ?? undefined },
-    });
-  });
   platform.inbox.start();
   void platform
     .start()

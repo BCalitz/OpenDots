@@ -74,9 +74,40 @@ export interface InboxEventView {
  * - investigating: a Dot is looking into it, read-only.
  * - ready: the Dot's findings and proposal are in `threadId`.
  * - failed: the investigation did not finish; see `error`.
+ * - resolved: a later item said it no longer needs the owner.
  */
 export type FindingState =
-  'ignored' | 'flagged' | 'investigating' | 'ready' | 'failed';
+  'ignored' | 'flagged' | 'investigating' | 'ready' | 'failed' | 'resolved';
+/** How soon an item needs handling, as Jev read it. */
+export type Urgency = 'days' | 'tomorrow' | 'today' | 'hours';
+export const URGENCIES: Urgency[] = ['days', 'tomorrow', 'today', 'hours'];
+/** What an item asks of the owner. */
+export type Asked = 'nothing' | 'information' | 'reply' | 'action' | 'decision';
+/**
+ * What the Dot does with a flagged item, decided in code from what is asked
+ * and what the owner allows:
+ * - tell: only tell the owner; no investigation.
+ * - draft: investigate and draft a reply for the owner to send.
+ * - propose: investigate and propose an action the owner approves.
+ * - inform: an action the Dot can't or may not do; say what, where and who.
+ * - decide: gather the facts and options; propose nothing.
+ */
+export type Route = 'tell' | 'draft' | 'propose' | 'inform' | 'decide';
+/** When the owner hears about it: now, after the hold window, in the
+ * morning brief, or not at all. */
+export type Delivery = 'now' | 'held' | 'brief' | 'none';
+/** An earlier item found to be about the same thing. */
+export interface EventLinkView {
+  eventId: string;
+  otherEventId: string;
+  /** 0 to 1, from Jev's "same thing?" score. */
+  score: number;
+  status: 'linked' | 'review' | 'confirmed' | 'rejected';
+  createdAt: number;
+  /** The item itself (`eventId`) and the one it links to; null once pruned. */
+  item: { title: string; from: string | null; occurredAt: number } | null;
+  other: { title: string; from: string | null; occurredAt: number } | null;
+}
 export interface FindingView {
   id: string;
   eventId: string;
@@ -95,6 +126,14 @@ export interface FindingView {
    * sender and asking for an action. */
   referencedEventId: string | null;
   error: string | null;
+  urgency: Urgency | null;
+  asked: Asked | null;
+  /** The item reads as instructing an AI assistant. */
+  injection: boolean;
+  route: Route | null;
+  delivery: Delivery | null;
+  /** Something a later item said, such as "X says this can be ignored". */
+  note: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -176,4 +215,35 @@ export interface DiscoveryState {
   accounts: DiscoveryAccountView[];
   /** Whether Jev (TYPESAFE_API_KEY) is set up to decide what needs attention. */
   model: { configured: boolean };
+  /** Whether an embedding model is set up for similar items. */
+  embeddings: { configured: boolean; model: string | null };
+  settings: DiscoverySettings;
+}
+/** When and how discovery reaches the owner, and what Dots may do. */
+export interface DiscoverySettings {
+  /** Local time of the morning brief, "HH:MM". */
+  briefTime: string;
+  /** No pushes except "within hours" between these local times; null for none. */
+  quietHours: { start: string; end: string } | null;
+  /** Minutes a non-urgent push waits, so a quick follow-up can cancel it. */
+  holdMinutes: number;
+  /** IANA time zone for the brief and quiet hours. */
+  timeZone: string;
+  /**
+   * The owner's own addresses and organisation domains. Besides the
+   * original sender, only these may say an earlier item can be ignored.
+   */
+  trusted: string[];
+  /** Apps (Composio toolkits) where a Dot may propose actions for approval. */
+  allowedApps: string[];
+}
+/** One item waiting for the morning brief. */
+export interface BriefEntry {
+  findingId: string | null;
+  eventId: string | null;
+  title: string;
+  body: string;
+  threadId: string | null;
+  section: 'decisions' | 'drafts' | 'updates';
+  createdAt: number;
 }

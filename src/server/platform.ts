@@ -24,8 +24,16 @@ import { InboxEngine } from './inbox/engine.js';
 import { composioReader } from './composio.js';
 import { DiscoveryService, type Investigate } from './discovery/service.js';
 import { jevJudge, type Judge } from './discovery/classifier.js';
+import { DeliveryService } from './discovery/delivery.js';
+import { openAiEmbedder, type Embedder } from './discovery/embeddings.js';
+import type { PushService } from './push.js';
 import { investigationMessage } from './discovery/investigation.js';
 
+export interface PlatformOptions {
+  fetch?: typeof fetch;
+  /** Mobile push; discovery delivery is off without it. */
+  push?: PushService;
+}
 export class Platform {
   readonly setupTelemetry: SetupTelemetry;
   readonly pages: PageService;
@@ -35,6 +43,10 @@ export class Platform {
   readonly inbox: InboxEngine;
   /** Flags inbox items that need the owner and investigates them read-only. */
   readonly discovery: DiscoveryService;
+  /** Discovery's pushes: now, after a hold, or in the morning brief. */
+  readonly delivery?: DeliveryService;
+  /** Similar items by wording, when EMBEDDING_BASE_URL is set. */
+  readonly embedder?: Embedder;
   /** Threads, runs and their events, in this server's database. */
   readonly runner: ThreadRunner;
   /** Runs every turn: chat, mobile, voice, schedules, delegation, Slack. */
@@ -56,7 +68,7 @@ export class Platform {
     store: Store,
     workspace: WorkspaceStore,
     config: PlatformConfig,
-    options: { fetch?: typeof fetch } = {},
+    options: PlatformOptions = {},
   ) {
     let slackDotId: string | undefined;
     if (slackSetup(config) === 'configured') {
@@ -86,7 +98,7 @@ export class Platform {
     readonly config: PlatformConfig,
     setupTelemetry: SetupTelemetry,
     slackDotId: string | undefined,
-    private options: { fetch?: typeof fetch } = {},
+    private options: PlatformOptions = {},
   ) {
     const paused = async () => (await store.settings()).paused;
     this.setupTelemetry = setupTelemetry;
@@ -106,10 +118,34 @@ export class Platform {
         return reader;
       },
     });
+    const push = options.push;
+    this.delivery = push
+      ? new DeliveryService(
+          workspace.inbox.discovery,
+          (message) => push.send(message),
+          {
+            previews: () => push.previews,
+          },
+        )
+      : undefined;
+    const embedder = config.embeddingBaseUrl
+      ? openAiEmbedder({
+          baseUrl: config.embeddingBaseUrl,
+          model: config.embeddingModel ?? 'nomic-embed-text',
+          apiKey: config.embeddingApiKey,
+          fetch: options.fetch,
+        })
+      : undefined;
+    this.embedder = embedder;
     this.discovery = new DiscoveryService(workspace.inbox, {
       judge: () => this.jev(),
       investigate: (input, signal) => this.investigate(input, signal),
       threshold: config.discoveryThreshold,
+      embedder: () => embedder,
+      delivery: this.delivery,
+      dotName: async (dotId) => (await workspace.dot(dotId))?.name,
+      appsAllowed: async () => (await store.settings()).appsAllowed,
+      previews: () => push?.previews ?? false,
     });
     this.inbox.onEvents(this.discovery.listener);
     this.pages = new PageService(workspace, () => {
@@ -162,6 +198,7 @@ export class Platform {
   async start() {
     this.setupTelemetry.start();
     await this.discovery.start();
+    this.delivery?.start();
     if (!this.channel) return;
     try {
       await this.channel.start();
@@ -177,6 +214,7 @@ export class Platform {
   async stop() {
     this.inbox.stop();
     this.discovery.stop();
+    this.delivery?.stop();
     await this.setupTelemetry.stop();
     await this.channel?.stop();
     this.approvals.close();

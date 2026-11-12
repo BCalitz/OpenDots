@@ -6,7 +6,9 @@ import {
 } from 'node:crypto';
 import { sql, type Db } from '../db/index.js';
 import type {
+  Asked,
   ComposioSourceConfig,
+  Delivery,
   FindingState,
   FindingView,
   InboxEventState,
@@ -15,12 +17,15 @@ import type {
   InboxSourceView,
   LinksState,
   McpSourceConfig,
+  Route,
   SourceConfig,
   SourceKind,
   SourceType,
+  Urgency,
 } from '../../shared/inbox-types.js';
 import type { InboxEvent } from './source.js';
 import { extractTags } from './tags.js';
+import { DiscoveryStore } from '../discovery/store.js';
 
 const MAX_EVENTS_PER_SOURCE = 2000;
 const MAX_TEXT = 2000;
@@ -57,7 +62,7 @@ const isWebUrl = (url: string) => /^https?:\/\//i.test(url);
 /** Sources the poller runs on a timer. */
 const POLLED = sql.raw("type IN ('mcp', 'composio')");
 const FINDING = sql.raw(
-  'id, event_id, attention, category, confidence, reason, judged_by, state, dot_id, thread_id, referenced_event_id, error, created_at, updated_at',
+  'id, event_id, attention, category, confidence, reason, judged_by, state, dot_id, thread_id, referenced_event_id, error, urgency, asked, injection, route, delivery, note, created_at, updated_at',
 );
 type EventRow = Omit<InboxEventView, 'finding'> & {
   findingId: string | null;
@@ -65,7 +70,11 @@ type EventRow = Omit<InboxEventView, 'finding'> & {
 const EVENT_QUERY = sql`SELECT e.id, e.source_id, COALESCE(s.name, 'Removed source') AS source_name, e.external_id, e.kind, e.title, e.summary, e.priority, e.sender AS "from", e.url, e.occurred_at, e.received_at, e.state, f.id AS finding_id FROM inbox_events e LEFT JOIN inbox_sources s ON s.id=e.source_id LEFT JOIN discovery_findings f ON f.event_id=e.id`;
 
 export class InboxStore {
-  constructor(private db: Db) {}
+  /** Links, embeddings, delivery and settings for discovery with history. */
+  readonly discovery: DiscoveryStore;
+  constructor(private db: Db) {
+    this.discovery = new DiscoveryStore(db);
+  }
   private row(id: string) {
     return this.db.row<SourceRow>(
       sql`SELECT * FROM inbox_sources WHERE id=${id}`,
@@ -160,6 +169,7 @@ export class InboxStore {
   }
   remove(id: string) {
     return this.db.transaction(async () => {
+      await this.discovery.forgetSource(id);
       await this.db.run(
         sql`DELETE FROM discovery_findings WHERE event_id IN (SELECT id FROM inbox_events WHERE source_id=${id})`,
       );
@@ -452,20 +462,56 @@ export class InboxStore {
     judgedBy: string;
     dotId: string | null;
     referencedEventId?: string | null;
+    urgency?: Urgency | null;
+    asked?: Asked | null;
+    injection?: boolean;
+    route?: Route | null;
+    /** Jev's raw answers, kept so thresholds can be retuned later. */
+    answers?: unknown;
   }) {
     const now = Date.now();
     await this.db.run(
-      sql`INSERT INTO discovery_findings (id, event_id, attention, category, confidence, reason, judged_by, state, dot_id, referenced_event_id, created_at, updated_at) VALUES (${randomUUID()}, ${value.eventId}, ${value.attention}, ${clip(value.category, 40)}, ${Math.min(Math.max(value.confidence, 0), 1)}, ${clip(value.reason, 500)}, ${clip(value.judgedBy, 120)}, ${value.attention ? 'flagged' : 'ignored'}, ${value.dotId}, ${value.referencedEventId ?? null}, ${now}, ${now}) ON CONFLICT (event_id) DO NOTHING`,
+      sql`INSERT INTO discovery_findings (id, event_id, attention, category, confidence, reason, judged_by, state, dot_id, referenced_event_id, urgency, asked, injection, route, answers, created_at, updated_at) VALUES (${randomUUID()}, ${value.eventId}, ${value.attention}, ${clip(value.category, 40)}, ${Math.min(Math.max(value.confidence, 0), 1)}, ${clip(value.reason, 500)}, ${clip(value.judgedBy, 120)}, ${value.attention ? 'flagged' : 'ignored'}, ${value.dotId}, ${value.referencedEventId ?? null}, ${value.urgency ?? null}, ${value.asked ?? null}, ${value.injection ?? false}, ${value.route ?? null}, ${value.answers === undefined ? null : JSON.stringify(value.answers)}, ${now}, ${now}) ON CONFLICT (event_id) DO NOTHING`,
     );
     return (await this.findingForEvent(value.eventId))!;
   }
   async updateFinding(
     id: string,
-    patch: { state: FindingState; threadId?: string; error?: string | null },
+    patch: {
+      state?: FindingState;
+      threadId?: string;
+      error?: string | null;
+      attention?: boolean;
+      urgency?: Urgency;
+      route?: Route;
+      delivery?: Delivery;
+      note?: string;
+    },
   ) {
+    const sets = [sql`updated_at=${Date.now()}`];
+    if (patch.state) {
+      sets.push(sql`state=${patch.state}`);
+      // A new state clears the previous error unless one is given.
+      sets.push(sql`error=${patch.error ? clip(patch.error, 500) : null}`);
+    } else if (patch.error !== undefined)
+      sets.push(sql`error=${patch.error ? clip(patch.error, 500) : null}`);
+    if (patch.threadId) sets.push(sql`thread_id=${patch.threadId}`);
+    if (patch.attention !== undefined)
+      sets.push(sql`attention=${patch.attention}`);
+    if (patch.urgency) sets.push(sql`urgency=${patch.urgency}`);
+    if (patch.route) sets.push(sql`route=${patch.route}`);
+    if (patch.delivery) sets.push(sql`delivery=${patch.delivery}`);
+    if (patch.note) sets.push(sql`note=${clip(patch.note, 500)}`);
     await this.db.run(
-      sql`UPDATE discovery_findings SET state=${patch.state}, thread_id=COALESCE(${patch.threadId ?? null}::text, thread_id), error=${patch.error ? clip(patch.error, 500) : null}, updated_at=${Date.now()} WHERE id=${id}`,
+      sql`UPDATE discovery_findings SET ${sql.join(sets, ', ')} WHERE id=${id}`,
     );
     return this.finding(id);
+  }
+  /** Jev's stored answers for a finding, as saved. */
+  async findingAnswers(id: string): Promise<unknown> {
+    const row = await this.db.row<{ answers: string | null }>(
+      sql`SELECT answers FROM discovery_findings WHERE id=${id}`,
+    );
+    return row?.answers ? (JSON.parse(row.answers) as unknown) : null;
   }
 }

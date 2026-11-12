@@ -261,9 +261,9 @@ Routes: `GET /api/chat/:threadId/events?after=<seq>` (Server-Sent Events: histor
 
 **Status:** first part implemented as **discovery** (see [SETUP.md](SETUP.md#discovery), `src/server/discovery/`, `src/server/inbox/composio-source.ts` and `tests/discovery.test.ts`): per-account sources on Composio apps (Gmail, Outlook, Teams), Jev (TypeSafe's System One model, `TYPESAFE_API_KEY`) flags what needs the owner and checks a new item against recent ones from the same sender, and a read-only investigation per flagged item in its own thread (`TurnSource` `discovery`) — a correlated follow-up continues the referenced item's own conversation instead of opening a second one. "Handle it" is the owner replying in that thread. Not done yet: the proposals table and three-button choices, actionable push, snoozing, and dismissals feeding the rules. Every judged item is stored in `discovery_findings`, which is the labelled data a small trained classifier (SetFit or ModernBERT) needs later.
 
-**Status, discovery correlation today:** narrow on purpose. `recentFrom()` (`src/server/inbox/store.ts`) matches candidates by exact sender string within a 72-hour window (`DiscoveryService.windowMs`), and that's the only thing `referencedEventId` is ever set from. Each judged item's `category` is stored in `discovery_findings`, but nothing queries by it — it's display text in the Inbox, not a search index. A new source's first check only backfills 24 hours (`FIRST_LOOKBACK_MS`), and events are capped at 2,000 per source (`MAX_EVENTS_PER_SOURCE`), with findings pruned alongside them. None of this reaches back further than a few days; something from a year or five years ago is structurally outside what discovery looks at today.
+**Status, discovery correlation:** built as described under "Discovery with history" below. Each item is judged with up to 12 earlier items found by shared tags (which are never pruned), the same sender within 72 hours, and similar wording when embeddings are set up; `referencedEventId` is the strongest "same thing" link. Items are still capped at 2,000 per source (`MAX_EVENTS_PER_SOURCE`) and a new source's first check backfills 24 hours (`FIRST_LOOKBACK_MS`), so history beyond that reaches back only as far as tags of pruned items, which carry no text for Jev to read. Older mail is not backfilled yet.
 
-### Proposed: discovery with history (not implemented)
+### Discovery with history (built; thresholds not yet tuned on real items)
 
 Today each item is judged alone, links only to the same sender within 72 hours, every finished investigation pushes at once, and the Dot investigates every flagged item the same way. That leaves four problems:
 
@@ -388,14 +388,16 @@ Discovery moves to Postgres along with the rest of OpenDots; see the build order
 2. **Async data layer** (built): a connection pool, migrations, and a test database for the test suite (`src/server/db/`).
 3. **Move the 11 stores** (built: `store.ts`, `workspace.ts`, `pages.ts`, `inbox/store.ts`, `engine/thread-runner.ts`, `engine/approvals.ts`, `connection-store.ts`, `usage-store.ts`, `computer-store.ts`, `push.ts`, `channels/service.ts`) from synchronous `node:sqlite` to async Postgres.
 4. **Import SQLite** (built): a one-time copy of an existing `DATABASE_PATH` file (`npm run import-sqlite`).
-5. **Jev upgrades:** store raw answers, and add the injection, urgency and "what is asked" questions.
-6. **Tags and lookup:** `event_tags`, regex extraction, code lookup, Jev match, judging in context, and updating earlier items. Built so far: `event_tags`, regex extraction and normalization (`src/server/inbox/tags.ts`), trigram matching of similar tags, and the Inbox **Links** view that shows them; `npm run seed-demo` loads made-up items to try it.
-7. **Similar items:** embed every item and add the closest to the history.
-8. **Routing and delivery:** the "what the Dot does" table, the allowed list, urgency rules, quiet hours, the hold window, the morning brief, and drafts.
+5. **Jev upgrades** (built): raw answers stored per finding, and the injection, urgency and "what is asked" questions (`src/server/discovery/classifier.ts`).
+6. **Tags and lookup** (built): `event_tags`, regex extraction and free-form names (`src/server/inbox/tags.ts`), code lookup by exact and near tags (`src/server/discovery/store.ts`), Jev match for unsettled names, judging in context, and updating earlier items (`src/server/discovery/service.ts`); the Inbox **Links** view and per-item links, with confirm and reject.
+7. **Similar items** (built): any OpenAI-compatible embeddings endpoint (`EMBEDDING_BASE_URL`, `src/server/discovery/embeddings.ts`), vectors in `item_embeddings`, the closest added to the history.
+8. **Routing and delivery** (built): the route table, the per-app allowed list, the delivery table, quiet hours, the hold window, the morning brief and corrections (`src/server/discovery/delivery.ts`), settings on the Accounts page and the Inbox **Brief** tab. Drafts stay in the OpenDots conversation.
+
+Not built from this plan: the Choice per tag over the regex's own spans (pre-parsed value extraction), the re-read pass of the Jev match (names have no longer text to re-read), Teams tenant as "your organisation" (domains only), and drafting overnight (items are investigated as they arrive and only delivered in the brief).
 
 Step 8 doesn't need the Postgres move and could ship earlier on top of step 5.
 
-**Not decided yet:** the morning brief time, quiet hours, how long the hold window is, and whether drafts go to the mailbox's drafts folder (through Composio) or stay in the OpenDots thread.
+**Defaults chosen, all owner settings:** the morning brief at 07:30, quiet hours 22:00 to 07:00, a 5-minute hold, and drafts kept in the OpenDots conversation (writing to the mailbox's drafts folder through Composio is not built).
 
 Before relying on any threshold, test the questions against real items through the live API. This sends mail text to TypeSafe with `TYPESAFE_API_KEY`, so ask the owner first.
 

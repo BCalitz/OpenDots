@@ -110,6 +110,41 @@ CREATE INDEX event_tags_trgm ON event_tags USING gin (normalized public.gin_trgm
 DELETE FROM event_tags WHERE event_id IN (SELECT id FROM inbox_events);
 `,
   },
+  {
+    version: 4,
+    name: 'discovery with history',
+    sql: `
+-- What Jev said about each item, and what code made of it.
+ALTER TABLE discovery_findings
+  ADD COLUMN urgency TEXT,
+  ADD COLUMN asked TEXT,
+  ADD COLUMN injection BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN route TEXT,
+  ADD COLUMN delivery TEXT,
+  ADD COLUMN note TEXT,
+  ADD COLUMN answers TEXT;
+
+-- Items found to be about the same thing. status: linked (0.8 or more),
+-- review (0.5 to 0.8), confirmed or rejected by the owner.
+CREATE TABLE event_links(event_id TEXT NOT NULL, other_event_id TEXT NOT NULL, score DOUBLE PRECISION NOT NULL, status TEXT NOT NULL, created_at BIGINT NOT NULL, decided_at BIGINT, PRIMARY KEY(event_id, other_event_id));
+CREATE INDEX event_links_other ON event_links(other_event_id);
+CREATE INDEX event_links_status ON event_links(status);
+
+-- One vector per item, for similar items. The dimension depends on the
+-- embedding model, so the column is untyped and rows are compared within
+-- one model.
+CREATE TABLE item_embeddings(event_id TEXT PRIMARY KEY, model TEXT NOT NULL, embedding public.vector NOT NULL, created_at BIGINT NOT NULL);
+CREATE INDEX item_embeddings_model ON item_embeddings(model);
+
+-- Pushes waiting for the hold window, quiet hours or the morning brief.
+-- state: queued, brief, sent or cancelled. kind: finding, correction or brief.
+CREATE TABLE discovery_pushes(id TEXT PRIMARY KEY, finding_id TEXT, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, thread_id TEXT, section TEXT, urgent BOOLEAN NOT NULL DEFAULT false, due_at BIGINT, state TEXT NOT NULL, created_at BIGINT NOT NULL, sent_at BIGINT, seq BIGINT GENERATED ALWAYS AS IDENTITY);
+CREATE INDEX discovery_pushes_state ON discovery_pushes(state, due_at);
+CREATE INDEX discovery_pushes_finding ON discovery_pushes(finding_id);
+
+CREATE TABLE discovery_settings(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.
