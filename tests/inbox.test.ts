@@ -6,10 +6,11 @@ import { testWorkspace } from './fixtures/db.js';
 import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
+import { ConnectorService } from '../src/server/connectors/service.js';
 import {
-  ConnectionService,
+  McpConnector,
   type McpTransportFactory,
-} from '../src/server/connections.js';
+} from '../src/server/connectors/mcp.js';
 import { InboxEngine, type NewEvents } from '../src/server/inbox/engine.js';
 import { eventsFromResult, withSince } from '../src/server/inbox/mcp-source.js';
 import { normalizePriority } from '../src/server/inbox/source.js';
@@ -63,16 +64,18 @@ async function engineFixture(tickets: Ticket[], paused = false) {
   const { workspace } = await testWorkspace();
   const dot = (await workspace.dots())[0];
   const server = ticketServer(tickets);
-  const connections = new ConnectionService(
-    workspace.connections,
-    server.transport,
+  const connectors = new ConnectorService(
+    workspace.accounts,
+    workspace.actions,
+    [new McpConnector(server.transport)],
   );
-  const connection = await connections.add(dot.id, {
+  const account = await connectors.add(workspace.ownerId, 'mcp', {
     name: 'Tickets',
     url: 'https://tickets.invalid/mcp',
   });
+  await connectors.grant(workspace.ownerId, dot.id, account.id);
   const state = { paused };
-  const engine = new InboxEngine(workspace.inbox, connections, {
+  const engine = new InboxEngine(workspace.inbox, connectors, {
     paused: async () => state.paused,
   });
   resources.push(() => engine.stop());
@@ -86,12 +89,12 @@ async function engineFixture(tickets: Ticket[], paused = false) {
     intervalSeconds: 300,
     config: {
       dotId: dot.id,
-      connectionId: connection.id,
+      accountId: account.id,
       tool: 'list_my_tickets',
       arguments: { assignee: 'me', since: '{{since}}' },
     },
   });
-  return { workspace, engine, source, batches, server, state, dot, connection };
+  return { workspace, engine, source, batches, server, state, dot, account };
 }
 
 it('polls a read-only MCP list tool, dedupes, and resumes from its cursor', async () => {
@@ -148,9 +151,7 @@ it('polls a read-only MCP list tool, dedupes, and resumes from its cursor', asyn
 });
 
 it('records an error instead of running a tool that needs approval', async () => {
-  const { workspace, engine, connection, dot, batches } = await engineFixture(
-    [],
-  );
+  const { workspace, engine, account, dot, batches } = await engineFixture([]);
   const { source } = await workspace.inbox.create({
     name: 'Bad',
     kind: 'ticket',
@@ -159,7 +160,7 @@ it('records an error instead of running a tool that needs approval', async () =>
     intervalSeconds: 300,
     config: {
       dotId: dot.id,
-      connectionId: connection.id,
+      accountId: account.id,
       tool: 'close_ticket',
       arguments: { id: 'x' },
     },
@@ -420,14 +421,17 @@ it('only accepts MCP sources whose tool can run without asking', async () => {
     description: '',
     inputSchema: { type: 'object' },
     readOnly: !requiresApproval,
-    enabled: true,
-    requiresApproval,
   });
-  const connection = await workspace.connections.create(
-    dot.id,
-    { name: 'Tickets', url: 'https://tickets.invalid/mcp' },
+  const account = await workspace.accounts.create(
+    workspace.ownerId,
+    {
+      connector: 'mcp',
+      name: 'Tickets',
+      config: { url: 'https://tickets.invalid/mcp' },
+    },
     [tool('list_my_tickets', false), tool('close_ticket', true)],
   );
+  await workspace.accounts.grant(workspace.ownerId, dot.id, account.id);
   const create = (name: string) =>
     app.request('/api/inbox/sources', {
       method: 'POST',
@@ -436,7 +440,7 @@ it('only accepts MCP sources whose tool can run without asking', async () => {
         type: 'mcp',
         name: 'Mine',
         kind: 'ticket',
-        config: { dotId: dot.id, connectionId: connection.id, tool: name },
+        config: { dotId: dot.id, accountId: account.id, tool: name },
       }),
     });
   const gated = await create('close_ticket');

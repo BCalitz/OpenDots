@@ -8,7 +8,11 @@ const path =
   process.argv[2] ?? process.env.DATABASE_PATH ?? 'data/opendots.sqlite';
 const db = await openDatabase(databaseUrl());
 try {
-  const report = await importSqlite(db, path);
+  const report = await importSqlite(
+    db,
+    path,
+    process.env.OWNER_ID ?? 'opendots-owner',
+  );
   for (const { table, rows, skipped } of report)
     console.log(
       `${table}: ${rows} row${rows === 1 ? '' : 's'}${skipped.length ? ` (not copied: ${skipped.join(', ')})` : ''}`,

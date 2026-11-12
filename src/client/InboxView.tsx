@@ -22,7 +22,7 @@ import {
   X,
 } from 'lucide-react';
 import type { Dot } from '../shared/types';
-import type { Connection } from '../shared/connection-types';
+import type { Account, Grant } from '../shared/connection-types';
 import type {
   InboxEventView,
   InboxNotify,
@@ -553,7 +553,9 @@ function AddSource({
   const [kind, setKind] = useState<SourceKind>('ticket');
   const [notify, setNotify] = useState<InboxNotify>('urgent');
   const [dotId, setDotId] = useState(dots[0]?.id ?? '');
-  const [connections, setConnections] = useState<Connection[]>([]);
+  const [access, setAccess] = useState<{ account: Account; grant: Grant }[]>(
+    [],
+  );
   const [target, setTarget] = useState('');
   const [args, setArgs] = useState('{\n  "assignee": "me"\n}');
   const [minutes, setMinutes] = useState('5');
@@ -563,22 +565,33 @@ function AddSource({
   useEffect(() => {
     if (!dotId) return;
     let active = true;
-    void api<Connection[]>(`/dots/${dotId}/connections`)
-      .then((value) => {
-        if (active) setConnections(value);
+    void Promise.all([
+      api<Account[]>('/accounts'),
+      api<Grant[]>(`/dots/${dotId}/grants`),
+    ])
+      .then(([accounts, grants]) => {
+        if (!active) return;
+        setAccess(
+          grants.flatMap((grant) => {
+            const account = accounts.find(
+              (item) => item.id === grant.accountId,
+            );
+            return account ? [{ account, grant }] : [];
+          }),
+        );
       })
-      .catch(() => active && setConnections([]));
+      .catch(() => active && setAccess([]));
     return () => {
       active = false;
     };
   }, [dotId]);
-  const tools = connections.flatMap((connection) =>
-    connection.tools
-      .filter((tool) => tool.enabled)
-      .map((tool) => ({ connection, tool })),
+  const tools = access.flatMap(({ account, grant }) =>
+    grant.tools
+      .filter((tool) => tool.policy !== 'block')
+      .map((tool) => ({ account, tool })),
   );
   const picked = tools.find(
-    (item) => `${item.connection.id}:${item.tool.name}` === target,
+    (item) => `${item.account.id}:${item.tool.name}` === target,
   );
   return (
     <section className="task-detail-card add-source">
@@ -609,7 +622,7 @@ function AddSource({
               intervalSeconds: Math.max(1, Number(minutes) || 5) * 60,
               config: {
                 dotId,
-                connectionId: picked.connection.id,
+                accountId: picked.account.id,
                 tool: picked.tool.name,
                 arguments: parsed,
                 ...(itemsPath.trim()
@@ -729,14 +742,14 @@ function AddSource({
                   ? 'Choose a tool'
                   : 'This Dot has no connection tools. Add one in its settings.'}
               </option>
-              {tools.map(({ connection, tool }) => (
+              {tools.map(({ account, tool }) => (
                 <option
-                  key={`${connection.id}:${tool.name}`}
-                  value={`${connection.id}:${tool.name}`}
-                  disabled={tool.requiresApproval}
+                  key={`${account.id}:${tool.name}`}
+                  value={`${account.id}:${tool.name}`}
+                  disabled={tool.policy === 'ask'}
                 >
-                  {connection.name}: {tool.title}
-                  {tool.requiresApproval
+                  {account.name}: {tool.title}
+                  {tool.policy === 'ask'
                     ? ' (asks first, cannot run on a timer)'
                     : ''}
                 </option>

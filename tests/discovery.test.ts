@@ -18,7 +18,7 @@ import {
 import { investigationMessage } from '../src/server/discovery/investigation.js';
 import { composioTools, toolSlugs } from '../src/server/composio-tools.js';
 import { detachedContext } from '../src/server/engine/tools.js';
-import type { ConnectionService } from '../src/server/connections.js';
+import type { ConnectorService } from '../src/server/connectors/service.js';
 import type { InboxEvent } from '../src/server/inbox/source.js';
 import type { InboxEventView } from '../src/shared/inbox-types.js';
 import { DotEngine } from '../src/server/engine/index.js';
@@ -594,7 +594,7 @@ describe('discovery sources', () => {
     const execute = vi.fn<ComposioExecute>(async () => ({
       messages: [{ messageId: 'm1', subject: 'Hello' }],
     }));
-    const engine = new InboxEngine(store, {} as ConnectionService, {
+    const engine = new InboxEngine(store, {} as ConnectorService, {
       paused: async () => false,
       composio: () => execute,
     });
@@ -605,7 +605,7 @@ describe('discovery sources', () => {
     expect(await store.events({ sourceId: source.id })).toHaveLength(1);
     expect(batches).toHaveLength(1);
 
-    const noKey = new InboxEngine(store, {} as ConnectionService, {
+    const noKey = new InboxEngine(store, {} as ConnectorService, {
       paused: async () => false,
     });
     await store.pollNow(source.id);

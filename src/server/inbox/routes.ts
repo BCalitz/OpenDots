@@ -23,7 +23,7 @@ const fields = z
 const mcpConfig = z
   .object({
     dotId: z.string().min(1).max(200),
-    connectionId: z.string().min(1).max(200),
+    accountId: z.string().min(1).max(200),
     tool: z.string().min(1).max(128),
     arguments: z.record(z.string(), z.unknown()).default({}),
     fields: fields.optional(),
@@ -57,14 +57,14 @@ async function validateMcp(
   config: z.infer<typeof mcpConfig>,
 ) {
   if (!(await platform.workspace.dot(config.dotId))) return 'Dot not found.';
-  const connection = await platform.workspace.connections.get(
-    config.connectionId,
+  const grant = (await platform.connectors.grants(config.dotId)).find(
+    (item) => item.accountId === config.accountId,
   );
-  if (!connection || connection.dotId !== config.dotId)
-    return 'That connection does not belong to this Dot.';
-  const tool = connection.tools.find((item) => item.name === config.tool);
-  if (!tool?.enabled) return 'That tool is not enabled on the connection.';
-  if (tool.requiresApproval)
+  if (!grant) return 'This Dot does not use that account.';
+  const tool = grant.tools.find((item) => item.name === config.tool);
+  if (!tool || tool.policy === 'block')
+    return 'That tool is not enabled for this Dot.';
+  if (tool.policy === 'ask')
     return 'This tool asks for approval on every call, so it cannot run on a timer. Pick a read-only list tool, or let this one run without asking.';
   if (JSON.stringify(config.arguments).length > 8000)
     return 'Tool arguments are too large.';

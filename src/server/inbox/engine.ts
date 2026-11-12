@@ -1,4 +1,4 @@
-import type { ConnectionService } from '../connections.js';
+import type { ConnectorService } from '../connectors/service.js';
 import type {
   ComposioSourceConfig,
   InboxEventView,
@@ -34,7 +34,7 @@ export class InboxEngine {
   private listeners: Listener[] = [];
   constructor(
     readonly store: InboxStore,
-    private connections: ConnectionService,
+    private connectors: ConnectorService,
     private options: {
       paused: () => Promise<boolean>;
       /** Runs Composio tools for discovery sources; unset without a key. */
@@ -59,13 +59,13 @@ export class InboxEngine {
         execute,
       );
     }
-    if (!('connectionId' in record.config))
-      throw new Error('This source is missing its connection settings.');
+    if (!('accountId' in record.config))
+      throw new Error('This source is missing its account settings.');
     return new McpListSource(
       record.id,
       record.kind,
       record.config as McpSourceConfig,
-      this.connections,
+      this.connectors,
     );
   }
   onEvents(listener: Listener) {

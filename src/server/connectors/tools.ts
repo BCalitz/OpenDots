@@ -1,8 +1,9 @@
 import type { JSONSchema } from '@tanstack/ai';
-import type { Tool, ToolContext } from './engine/tools.js';
-import type { ApprovalKind, ApprovalStatus } from '../shared/approvals.js';
-import type { ConnectionService } from './connections.js';
-import type { UsageStore } from './usage-store.js';
+import type { Tool, ToolContext } from '../engine/tools.js';
+import type { ApprovalKind, ApprovalStatus } from '../../shared/approvals.js';
+import type { GrantedTool } from '../../shared/connection-types.js';
+import type { ConnectorService } from './service.js';
+import type { UsageStore } from '../usage-store.js';
 
 /** Asks the owner to approve something and waits for the answer. */
 export type Approve = (
@@ -22,37 +23,37 @@ export function notApproved(status: ApprovalStatus, what: string) {
   };
 }
 
-// Connected MCP tools for one Dot. A tool that needs approval waits for the
-// owner's decision on the exact connection, tool and arguments it was called
+// Connected tools for one Dot. A tool whose policy is "ask" waits for the
+// owner's decision on the exact account, tool and arguments it was called
 // with, then runs once. Without `approve` (schedules, voice, Slack) gated
 // tools never run.
-export async function connectionTools(
-  connections: ConnectionService,
+export async function connectorTools(
+  connectors: ConnectorService,
   dotId: string,
   threadId: string,
   check: () => Promise<void>,
   signal: AbortSignal,
   approve: Approve | undefined,
   log?: UsageStore,
-  /** Only tools the server marks read-only and that run without asking. */
+  /** Only tools the service marks read-only and that run without asking. */
   readOnly = false,
 ) {
-  const readable = (tool: { readOnly: boolean; requiresApproval: boolean }) =>
-    !readOnly || (tool.readOnly && !tool.requiresApproval);
-  return (await connections.tools(dotId))
+  const readable = (tool: GrantedTool) =>
+    !readOnly || (tool.readOnly && tool.policy === 'allow');
+  return (await connectors.tools(dotId))
     .filter((exposed) => readable(exposed.tool))
     .map((exposed): Tool => ({
       name: exposed.name,
       description:
-        `[${exposed.connection.name}${exposed.tool.requiresApproval ? ', needs owner approval' : ''}] ${exposed.tool.title}: ${exposed.tool.description}`.slice(
+        `[${exposed.account.name}${exposed.tool.policy === 'ask' ? ', needs owner approval' : ''}] ${exposed.tool.title}: ${exposed.tool.description}`.slice(
           0,
           1024,
         ),
       parameters: exposed.tool.inputSchema as JSONSchema,
       execute: async (args: unknown, context: ToolContext) => {
         await check();
-        // Re-resolve so a tool the owner just disabled or gated is honored.
-        const current = await connections.resolve(dotId, exposed.name);
+        // Re-resolve so a tool the owner just blocked or gated is honored.
+        const current = await connectors.resolve(dotId, exposed.name);
         const input = (args ?? {}) as Record<string, unknown>;
         if (!readable(current.tool))
           return {
@@ -60,7 +61,7 @@ export async function connectionTools(
             message:
               'This turn is read-only and this tool can change things. Describe it in your proposal instead.',
           };
-        if (current.tool.requiresApproval) {
+        if (current.tool.policy === 'ask') {
           if (!approve)
             return {
               status: 'unavailable',
@@ -68,17 +69,17 @@ export async function connectionTools(
                 'This action needs owner approval in an OpenDots chat. Ask the owner to continue there.',
             };
           // The stored request is what runs, never arguments sent later.
-          const approvalId = await connections.store.createApproval({
+          const approvalId = await connectors.actions.createApproval({
             threadId,
             dotId,
-            connectionId: current.connection.id,
+            accountId: current.account.id,
             tool: current.tool.name,
             arguments: input,
           });
           const decision = await approve(context, {
             kind: 'connection_action',
             payload: {
-              connection: current.connection.name,
+              connection: current.account.name,
               title: current.tool.title,
               description: current.tool.description,
               arguments: input,
@@ -89,17 +90,18 @@ export async function connectionTools(
           if (decision !== 'approved') return notApproved(decision, 'action');
           // One run per tool call, even if the decision arrives twice.
           if (
-            !(await connections.store.claimAction(
+            !(await connectors.actions.claimAction({
               threadId,
-              context.toolCallId,
+              toolCallId: context.toolCallId,
               approvalId,
-              current.connection.id,
-              current.tool.name,
-            ))
+              accountId: current.account.id,
+              dotId,
+              tool: current.tool.name,
+            }))
           )
             return { approved: true, error: 'This action already ran.' };
-          const result = await connections.call(current, input, signal);
-          await connections.store.finishAction(
+          const result = await connectors.call(current, input, signal);
+          await connectors.actions.finishAction(
             threadId,
             context.toolCallId,
             result,
@@ -112,11 +114,11 @@ export async function connectionTools(
           dotId,
           threadId,
           kind: 'mcp',
-          target: current.connection.name,
+          target: current.account.name,
           action: current.tool.name,
           readOnly: current.tool.readOnly,
         });
-        const result = await connections.call(current, input, signal);
+        const result = await connectors.call(current, input, signal);
         if (entry)
           await log!.finishAction(
             entry,

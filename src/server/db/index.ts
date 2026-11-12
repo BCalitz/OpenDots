@@ -124,6 +124,8 @@ export interface DatabaseOptions {
   /** Use this schema instead of public; tests get one each. */
   schema?: string;
   max?: number;
+  /** Stop migrating after this version, so a test can migrate the rest itself. */
+  migrateThrough?: number;
 }
 
 /** Connects to Postgres and applies any pending migrations. */
@@ -144,7 +146,7 @@ export async function openDatabase(
   try {
     if (schema) await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
     const db = new Db(pool);
-    await migrate(db);
+    await migrate(db, options.migrateThrough);
     return db;
   } catch (error) {
     await pool.end();

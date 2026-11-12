@@ -196,12 +196,89 @@ CREATE INDEX conv_runs_shown_in ON conv_runs(shown_in);
 DROP TABLE thread_links;
 `,
   },
+  {
+    version: 9,
+    name: 'accounts and grants',
+    sql: `
+-- A connected account is one login to one outside service, belonging to one
+-- user. A grant lets one Dot use an account, with a policy per tool. This
+-- replaces mcp_connections, where every Dot kept its own copy of a login.
+-- connector names the code that talks to the service; config holds what is
+-- safe to show (an endpoint) and secret what is not (a token); tools is the
+-- service's catalog of what it offers, with no permissions in it.
+CREATE TABLE accounts(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, connector TEXT NOT NULL, name TEXT NOT NULL, config TEXT NOT NULL, secret TEXT, tools TEXT NOT NULL, error TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, seq BIGINT GENERATED ALWAYS AS IDENTITY);
+CREATE INDEX accounts_user ON accounts(user_id, created_at);
+CREATE TABLE grants(id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, dot_id TEXT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, seq BIGINT GENERATED ALWAYS AS IDENTITY, UNIQUE(account_id, dot_id));
+CREATE INDEX grants_dot ON grants(dot_id);
+-- policy: allow (runs on its own), ask (the user approves each call) or block.
+CREATE TABLE grant_policies(grant_id TEXT NOT NULL REFERENCES grants(id) ON DELETE CASCADE, tool TEXT NOT NULL, policy TEXT NOT NULL, PRIMARY KEY(grant_id, tool));
+
+-- Approval receipts follow the account, and now record the Dot themselves.
+ALTER TABLE mcp_approvals RENAME TO connector_approvals;
+ALTER TABLE connector_approvals RENAME COLUMN connection_id TO account_id;
+ALTER TABLE mcp_actions RENAME TO connector_actions;
+ALTER TABLE connector_actions RENAME COLUMN connection_id TO account_id;
+ALTER TABLE connector_actions ADD COLUMN dot_id TEXT;
+ALTER INDEX mcp_actions_approval RENAME TO connector_actions_approval;
+ALTER INDEX mcp_actions_pkey RENAME TO connector_actions_pkey;
+UPDATE connector_actions a SET dot_id=c.dot_id FROM mcp_connections c WHERE c.id=a.account_id;
+
+-- Existing connections become accounts. Connections to the same endpoint
+-- with the same token are one login, so they become one account with a
+-- grant for each Dot that had it. Everything so far belongs to the one
+-- user the install has: the owner recorded on its threads, or the default
+-- OWNER_ID when there are none yet.
+CREATE TEMP TABLE connection_map ON COMMIT DROP AS
+SELECT id AS connection_id, dot_id, tools,
+  first_value(id) OVER (PARTITION BY url, COALESCE(token, '') ORDER BY created_at, seq) AS account_id
+FROM mcp_connections;
+
+INSERT INTO accounts (id, user_id, connector, name, config, secret, tools, error, created_at, updated_at)
+SELECT c.id,
+  COALESCE((SELECT owner_id FROM thread_bindings ORDER BY created_at, id LIMIT 1), 'opendots-owner'),
+  'mcp', c.name, jsonb_build_object('url', c.url)::text, c.token,
+  (SELECT COALESCE(jsonb_agg(entry.tool - 'enabled' - 'requiresApproval' ORDER BY entry.ord), '[]'::jsonb)
+     FROM jsonb_array_elements(c.tools::jsonb) WITH ORDINALITY AS entry(tool, ord))::text,
+  c.error, c.created_at, c.updated_at
+FROM mcp_connections c JOIN connection_map m ON m.connection_id=c.id
+WHERE m.account_id=c.id;
+
+-- The first connection of each account and Dot supplies the grant and its
+-- policies: not enabled is block, needing approval is ask, the rest allow.
+CREATE TEMP TABLE grant_map ON COMMIT DROP AS
+SELECT DISTINCT ON (m.account_id, m.dot_id) c.id AS grant_id, m.account_id, m.dot_id, c.created_at, c.updated_at, c.tools
+FROM connection_map m JOIN mcp_connections c ON c.id=m.connection_id
+ORDER BY m.account_id, m.dot_id, c.created_at, c.seq;
+
+INSERT INTO grants (id, account_id, dot_id, created_at, updated_at)
+SELECT grant_id, account_id, dot_id, created_at, updated_at FROM grant_map ORDER BY created_at;
+
+INSERT INTO grant_policies (grant_id, tool, policy)
+SELECT g.grant_id, entry.tool->>'name',
+  CASE WHEN COALESCE((entry.tool->>'enabled')::boolean, true) = false THEN 'block'
+       WHEN COALESCE((entry.tool->>'requiresApproval')::boolean, true) THEN 'ask'
+       ELSE 'allow' END
+FROM grant_map g, jsonb_array_elements(g.tools::jsonb) AS entry(tool)
+ON CONFLICT DO NOTHING;
+
+UPDATE connector_approvals r SET account_id=m.account_id FROM connection_map m WHERE r.account_id=m.connection_id;
+UPDATE connector_actions r SET account_id=m.account_id FROM connection_map m WHERE r.account_id=m.connection_id;
+-- Inbox sources that watch a connection tool now point at its account.
+UPDATE inbox_sources s SET config=jsonb_set(s.config::jsonb - 'connectionId', '{accountId}', to_jsonb(m.account_id))::text
+FROM connection_map m WHERE s.type='mcp' AND s.config::jsonb->>'connectionId'=m.connection_id;
+DROP TABLE mcp_connections;
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.
 const MIGRATION_LOCK = 0x0d076;
 
-export async function migrate(db: Db) {
+/**
+ * Applies pending migrations. `through` stops after that version, so a test
+ * can build an older database, fill it, and migrate it forward.
+ */
+export async function migrate(db: Db, through = Infinity) {
   await db.transaction(async () => {
     await db.exec(`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK})`);
     await db.exec(
@@ -215,7 +292,8 @@ export async function migrate(db: Db) {
       ).map((row) => row.version),
     );
     for (const migration of migrations) {
-      if (applied.has(migration.version)) continue;
+      if (applied.has(migration.version) || migration.version > through)
+        continue;
       await db.exec(migration.sql);
       await db.query(
         sql`INSERT INTO schema_migrations VALUES (${migration.version}, ${migration.name}, ${Date.now()})`,

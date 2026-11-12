@@ -1,5 +1,6 @@
 import { ComputerStore } from './computer-store.js';
-import { ConnectionStore } from './connection-store.js';
+import { AccountStore } from './connectors/accounts.js';
+import { ActionStore } from './connectors/actions.js';
 import { Pages } from './pages.js';
 import { UsageStore } from './usage-store.js';
 import { InboxStore } from './inbox/store.js';
@@ -45,7 +46,8 @@ function fromBinding({
 export class WorkspaceStore {
   readonly pages: Pages;
   readonly computers: ComputerStore;
-  readonly connections: ConnectionStore;
+  readonly accounts: AccountStore;
+  readonly actions: ActionStore;
   readonly usage: UsageStore;
   readonly inbox: InboxStore;
   /** A workspace with at least one Space and Dot. */
@@ -59,7 +61,8 @@ export class WorkspaceStore {
     readonly ownerId: string,
   ) {
     this.computers = new ComputerStore(db);
-    this.connections = new ConnectionStore(db);
+    this.accounts = new AccountStore(db);
+    this.actions = new ActionStore(db);
     this.usage = new UsageStore(db);
     this.inbox = new InboxStore(db);
     this.pages = new Pages(db, (id) => this.spaceExists(id));

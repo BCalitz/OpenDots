@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ComputerService } from './computer-service.js';
-import { ConnectionService } from './connections.js';
+import { ConnectorService } from './connectors/service.js';
 import { PageService } from './page-service.js';
 import { Store } from './store.js';
 import { WorkspaceStore } from './workspace.js';
@@ -52,7 +52,7 @@ export class Platform {
   readonly setupTelemetry: SetupTelemetry;
   readonly pages: PageService;
   readonly computers: ComputerService;
-  readonly connections: ConnectionService;
+  readonly connectors: ConnectorService;
   /** Event engine: sources, the event log and the poller. */
   readonly inbox: InboxEngine;
   /** Flags inbox items that need the owner and investigates them read-only. */
@@ -124,10 +124,13 @@ export class Platform {
     const paused = async () => (await store.settings()).paused;
     this.setupTelemetry = setupTelemetry;
     this.computers = new ComputerService(workspace, config, paused);
-    this.connections = new ConnectionService(workspace.connections);
+    this.connectors = new ConnectorService(
+      workspace.accounts,
+      workspace.actions,
+    );
     let reader: ReturnType<typeof composioReader> | undefined;
     let readerKey: string | undefined;
-    this.inbox = new InboxEngine(workspace.inbox, this.connections, {
+    this.inbox = new InboxEngine(workspace.inbox, this.connectors, {
       paused,
       composio: () => {
         const key = config.composioApiKey;

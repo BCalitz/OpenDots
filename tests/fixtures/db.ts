@@ -27,11 +27,15 @@ const dropSchema = async (schema: string) => {
  * A fresh, migrated database in its own schema. It is dropped when the
  * current test ends, or after the file when created outside a test.
  */
-export async function testDb(): Promise<Db> {
+export async function testDb(migrateThrough?: number): Promise<Db> {
   const schema = `test_${randomUUID().replaceAll('-', '')}`;
   let db: Db;
   try {
-    db = await openDatabase(TEST_DATABASE_URL, { schema, max: 4 });
+    db = await openDatabase(TEST_DATABASE_URL, {
+      schema,
+      max: 4,
+      migrateThrough,
+    });
   } catch (error) {
     throw new Error(
       `Tests need Postgres at ${TEST_DATABASE_URL}. Run \`npm run test:db\` or set TEST_DATABASE_URL. (${error instanceof Error ? error.message : String(error)})`,

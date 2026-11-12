@@ -5,12 +5,12 @@ import { z } from 'zod';
 import { parallelSources } from '../parallel.js';
 import { ComputerService } from '../computer-service.js';
 import { computerTools } from '../computer-tools.js';
-import { ConnectionService } from '../connections.js';
+import { ConnectorService } from '../connectors/service.js';
 import {
-  connectionTools,
+  connectorTools,
   notApproved,
   type Approve,
-} from '../connection-tools.js';
+} from '../connectors/tools.js';
 import { pageReviewSchema, pageReviewTool } from '../../shared/page-review.js';
 import {
   approvalRequestSchema,
@@ -381,16 +381,14 @@ export class DotEngine {
           `${dot.name} reached its monthly limit of ${cap.toLocaleString('en-US')} tokens. Raise or remove the limit in this Dot's settings to continue.`,
         );
       const initialSettings = await store.settings();
-      const initialConnections = await workspace.connections.fingerprint(
-        dot.id,
-      );
+      const initialConnections = await workspace.accounts.fingerprint(dot.id);
       // A turn keeps the permissions it started with. Any change stops it.
       const check = async () => {
         controller.signal.throwIfAborted();
         const [settings, current, connections] = await Promise.all([
           store.settings(),
           workspace.dot(dot.id),
-          workspace.connections.fingerprint(dot.id),
+          workspace.accounts.fingerprint(dot.id),
         ]);
         if (settings.paused)
           abort('OpenDots was paused, so this turn stopped.');
@@ -469,8 +467,8 @@ export class DotEngine {
           this.reviewTool(dot.id, run.threadId, approve, check),
           this.approvalRequestTool(approve, check),
         );
-      const connected = await connectionTools(
-        new ConnectionService(workspace.connections),
+      const connected = await connectorTools(
+        new ConnectorService(workspace.accounts, workspace.actions),
         dot.id,
         run.threadId,
         check,

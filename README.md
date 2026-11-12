@@ -104,7 +104,7 @@ Ask a Dot to show a draft before saving it. An approval card pauses the turn for
 
 ### Connections
 
-Give a Dot tools from any MCP server, such as email, calendar, GitHub, or your own services. Read-only tools run on their own. Any other tool pauses for an **Approve & run** card in chat, and only your approval runs it. You can turn each tool on or off per Dot. See [Connections](docs/CONNECTIONS.md).
+Give a Dot tools from any MCP server, such as email, calendar, GitHub, or your own services. Read-only tools run on their own. Any other tool pauses for an **Approve & run** card in chat, and only your approval runs it. Connect a service once, choose which Dots may use it, and set each tool to allow, ask first or block per Dot. See [Connections](docs/CONNECTIONS.md).
 
 ### Connected apps
 
@@ -211,7 +211,7 @@ OpenDots records bounded browser setup stages and first successful assistant act
 | Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                           |
 | Browser                    | Separate read-only public-page service with page capture and navigation limits                                      |
 | Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                   |
-| Connections                | Per-Dot MCP servers, Composio connected apps, per-tool access, and server-side owner approval for MCP write actions |
+| Connections                | Accounts shared across Dots, per-Dot tool policies, Composio apps, and server-side owner approval for write actions |
 | Appearance                 | System, light, and dark themes; dark colors are derived at build time from the light styles                         |
 | Memory                     | User-managed preferences that permitted Dots can use                                                                |
 | Deployment                 | Local Node setup and separate application/browser containers                                                        |

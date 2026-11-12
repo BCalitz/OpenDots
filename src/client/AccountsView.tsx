@@ -75,7 +75,7 @@ export function AccountsView({
   );
   const load = useCallback(
     () =>
-      api<ConnectedAccount[]>('/accounts')
+      api<ConnectedAccount[]>('/composio/accounts')
         .then((value) => {
           setAccounts(value);
           setError('');
@@ -119,7 +119,7 @@ export function AccountsView({
     setBusy(slug);
     try {
       const { redirectUrl } = await api<{ redirectUrl: string; name: string }>(
-        '/accounts',
+        '/composio/accounts',
         'POST',
         { toolkit: slug },
       );
@@ -169,7 +169,10 @@ export function AccountsView({
       return;
     setBusy(account.id);
     try {
-      await api(`/accounts/${encodeURIComponent(account.id)}`, 'DELETE');
+      await api(
+        `/composio/accounts/${encodeURIComponent(account.id)}`,
+        'DELETE',
+      );
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

@@ -246,19 +246,24 @@ it('counts usage per UTC calendar month', async () => {
 it('lists every outside action in one audit trail', async () => {
   const { app, workspace } = await start();
   const dot = (await workspace.dots())[0];
-  const connection = await workspace.connections.create(
-    dot.id,
-    { name: 'Tickets', url: 'https://tickets.invalid/mcp' },
+  const account = await workspace.accounts.create(
+    workspace.ownerId,
+    {
+      connector: 'mcp',
+      name: 'Tickets',
+      config: { url: 'https://tickets.invalid/mcp' },
+    },
     [],
   );
-  await workspace.connections.claimAction(
-    'thread',
-    'call-1',
-    'approval',
-    connection.id,
-    'close_ticket',
-  );
-  await workspace.connections.finishAction('thread', 'call-1', {
+  await workspace.actions.claimAction({
+    threadId: 'thread',
+    toolCallId: 'call-1',
+    approvalId: 'approval',
+    accountId: account.id,
+    dotId: dot.id,
+    tool: 'close_ticket',
+  });
+  await workspace.actions.finishAction('thread', 'call-1', {
     isError: false,
     text: 'ok',
   });

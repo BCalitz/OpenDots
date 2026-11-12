@@ -1,14 +1,22 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { PlugZap, RefreshCw, Trash2 } from 'lucide-react';
-import type { Connection } from '../shared/connection-types';
+import type { Account, Grant, ToolPolicy } from '../shared/connection-types';
 import { api } from './api';
 // Lives inside the Dot form, so it saves immediately through its own
 // requests and keeps Enter from submitting the surrounding form.
 const stayInSection = (event: KeyboardEvent) => {
   if (event.key === 'Enter') event.preventDefault();
 };
+const POLICIES: { value: ToolPolicy; label: string }[] = [
+  { value: 'allow', label: 'Allow' },
+  { value: 'ask', label: 'Ask first' },
+  { value: 'block', label: 'Block' },
+];
+const dotPath = (dotId: string, accountId: string) =>
+  `/dots/${encodeURIComponent(dotId)}/grants/${encodeURIComponent(accountId)}`;
 export function ConnectionsSection({ dotId }: { dotId: string }) {
-  const [connections, setConnections] = useState<Connection[]>();
+  const [accounts, setAccounts] = useState<Account[]>();
+  const [grants, setGrants] = useState<Grant[]>([]);
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const [token, setToken] = useState('');
@@ -16,8 +24,15 @@ export function ConnectionsSection({ dotId }: { dotId: string }) {
   const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
-    void api<Connection[]>(`/dots/${encodeURIComponent(dotId)}/connections`)
-      .then((value) => active && setConnections(value))
+    void Promise.all([
+      api<Account[]>('/accounts'),
+      api<Grant[]>(`/dots/${encodeURIComponent(dotId)}/grants`),
+    ])
+      .then(([list, granted]) => {
+        if (!active) return;
+        setAccounts(list);
+        setGrants(granted);
+      })
       .catch(
         (cause) =>
           active &&
@@ -42,24 +57,32 @@ export function ConnectionsSection({ dotId }: { dotId: string }) {
       setBusy('');
     }
   };
-  const replace = (next: Connection) =>
-    setConnections((list) =>
+  const replaceAccount = (next: Account) =>
+    setAccounts((list) =>
       list?.map((item) => (item.id === next.id ? next : item)),
     );
+  const replaceGrant = (next: Grant) =>
+    setGrants((list) => [
+      ...list.filter((item) => item.accountId !== next.accountId),
+      next,
+    ]);
   const add = async () => {
-    const created = await run('add', () =>
-      api<Connection>(
-        `/dots/${encodeURIComponent(dotId)}/connections`,
-        'POST',
-        {
-          name: name.trim(),
-          url: url.trim(),
-          ...(token.trim() ? { token: token.trim() } : {}),
-        },
-      ),
-    );
+    const created = await run('add', async () => {
+      const account = await api<Account>('/accounts', 'POST', {
+        connector: 'mcp',
+        name: name.trim(),
+        url: url.trim(),
+        ...(token.trim() ? { token: token.trim() } : {}),
+      });
+      // Connecting from a Dot's settings means this Dot is meant to use it.
+      return {
+        account,
+        grant: await api<Grant>(dotPath(dotId, account.id), 'PUT', {}),
+      };
+    });
     if (!created) return;
-    setConnections((list) => [...(list ?? []), created]);
+    setAccounts((list) => [...(list ?? []), created.account]);
+    replaceGrant(created.grant);
     setName('');
     setUrl('');
     setToken('');
@@ -68,118 +91,156 @@ export function ConnectionsSection({ dotId }: { dotId: string }) {
     <fieldset className="space-access-fields connections-fields">
       <legend>Connections</legend>
       <p className="muted">
-        Give this Dot tools from MCP servers. Read-only tools run on their own;
-        anything else asks you in chat before it runs. Tokens stay on the
-        server.
+        Connect a service once, then choose which Dots may use it. For each
+        tool, choose whether it runs on its own, asks you in chat first, or is
+        blocked. Secrets stay on the server.
       </p>
-      {connections?.map((connection) => (
-        <div className="connection" key={connection.id}>
-          <div className="connection-head">
-            <PlugZap size={15} />
-            <span>
-              <strong>{connection.name}</strong>
-              <small>
-                {new URL(connection.url).host}
-                {connection.hasToken ? ' · token saved' : ''}
-              </small>
-            </span>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label={`Refresh ${connection.name} tools`}
-              disabled={!!busy}
-              onClick={async () => {
-                const next = await run(connection.id, () =>
-                  api<Connection>(
-                    `/connections/${connection.id}/refresh`,
-                    'POST',
-                    {},
-                  ),
-                );
-                if (next) replace(next);
-              }}
-            >
-              <RefreshCw size={15} />
-            </button>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label={`Remove ${connection.name}`}
-              disabled={!!busy}
-              onClick={async () => {
-                if (!window.confirm(`Remove ${connection.name} from this Dot?`))
-                  return;
-                const done = await run(connection.id, () =>
-                  api(`/connections/${connection.id}`, 'DELETE'),
-                );
-                if (done)
-                  setConnections((list) =>
-                    list?.filter((item) => item.id !== connection.id),
+      {accounts?.map((account) => {
+        const grant = grants.find((item) => item.accountId === account.id);
+        return (
+          <div className="connection" key={account.id}>
+            <div className="connection-head">
+              <PlugZap size={15} />
+              <span>
+                <strong>{account.name}</strong>
+                <small>
+                  {account.detail}
+                  {account.hasSecret ? ' · token saved' : ''}
+                </small>
+              </span>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={`Refresh ${account.name} tools`}
+                disabled={!!busy}
+                onClick={async () => {
+                  const next = await run(account.id, () =>
+                    api<Account>(
+                      `/accounts/${encodeURIComponent(account.id)}/refresh`,
+                      'POST',
+                      {},
+                    ),
                   );
-              }}
-            >
-              <Trash2 size={15} />
-            </button>
-          </div>
-          {connection.error && (
-            <p className="chat-error" role="alert">
-              {connection.error}
-            </p>
-          )}
-          {!connection.tools.length && (
-            <p className="muted">This server offers no tools.</p>
-          )}
-          <ul className="connection-tools">
-            {connection.tools.map((tool) => {
-              const patch = async (value: {
-                enabled?: boolean;
-                requiresApproval?: boolean;
-              }) => {
-                const next = await run(connection.id, () =>
-                  api<Connection>(
-                    `/connections/${connection.id}/tools/${encodeURIComponent(tool.name)}`,
-                    'PATCH',
-                    value,
-                  ),
-                );
-                if (next) replace(next);
-              };
-              return (
-                <li key={tool.name}>
-                  <label className="permission-row">
-                    <input
-                      type="checkbox"
-                      checked={tool.enabled}
-                      disabled={!!busy}
-                      onChange={(event) =>
-                        void patch({ enabled: event.target.checked })
-                      }
-                    />
-                    <span>
-                      <strong>
-                        {tool.title}
-                        {tool.readOnly && <em>read-only</em>}
-                      </strong>
-                      {tool.description && <small>{tool.description}</small>}
+                  if (!next) return;
+                  replaceAccount(next);
+                  // New tools get a default policy on this Dot's grant.
+                  setGrants(
+                    await api<Grant[]>(
+                      `/dots/${encodeURIComponent(dotId)}/grants`,
+                    ),
+                  );
+                }}
+              >
+                <RefreshCw size={15} />
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={`Remove ${account.name} from every Dot`}
+                disabled={!!busy}
+                onClick={async () => {
+                  if (
+                    !window.confirm(
+                      `Remove ${account.name}? Every Dot that uses it loses access.`,
+                    )
+                  )
+                    return;
+                  const done = await run(account.id, () =>
+                    api(
+                      `/accounts/${encodeURIComponent(account.id)}`,
+                      'DELETE',
+                    ),
+                  );
+                  if (done) {
+                    setAccounts((list) =>
+                      list?.filter((item) => item.id !== account.id),
+                    );
+                    setGrants((list) =>
+                      list.filter((item) => item.accountId !== account.id),
+                    );
+                  }
+                }}
+              >
+                <Trash2 size={15} />
+              </button>
+            </div>
+            {account.error && (
+              <p className="chat-error" role="alert">
+                {account.error}
+              </p>
+            )}
+            <label className="permission-row">
+              <input
+                type="checkbox"
+                checked={!!grant}
+                disabled={!!busy}
+                onChange={async (event) => {
+                  if (event.target.checked) {
+                    const next = await run(account.id, () =>
+                      api<Grant>(dotPath(dotId, account.id), 'PUT', {}),
+                    );
+                    if (next) replaceGrant(next);
+                  } else {
+                    const done = await run(account.id, () =>
+                      api(dotPath(dotId, account.id), 'DELETE'),
+                    );
+                    if (done)
+                      setGrants((list) =>
+                        list.filter((item) => item.accountId !== account.id),
+                      );
+                  }
+                }}
+              />
+              <span>
+                <strong>Use in this Dot</strong>
+              </span>
+            </label>
+            {grant && !grant.tools.length && (
+              <p className="muted">This service offers no tools.</p>
+            )}
+            {grant && (
+              <ul className="connection-tools">
+                {grant.tools.map((tool) => (
+                  <li key={tool.name}>
+                    <span className="permission-row">
+                      <span>
+                        <strong>
+                          {tool.title}
+                          {tool.readOnly && <em>read-only</em>}
+                        </strong>
+                        {tool.description && <small>{tool.description}</small>}
+                      </span>
                     </span>
-                  </label>
-                  <label className="connection-approval">
-                    <input
-                      type="checkbox"
-                      checked={tool.requiresApproval}
-                      disabled={!!busy || !tool.enabled}
-                      onChange={(event) =>
-                        void patch({ requiresApproval: event.target.checked })
-                      }
-                    />
-                    Ask first
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      ))}
+                    <label className="connection-approval">
+                      <select
+                        aria-label={`${tool.title} access`}
+                        value={tool.policy}
+                        disabled={!!busy}
+                        onChange={async (event) => {
+                          const next = await run(account.id, () =>
+                            api<Grant>(
+                              `${dotPath(dotId, account.id)}/tools/${encodeURIComponent(tool.name)}`,
+                              'PATCH',
+                              { policy: event.target.value },
+                            ),
+                          );
+                          if (next) replaceGrant(next);
+                        }}
+                      >
+                        {POLICIES.map(({ value, label }) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
       <div className="connection-add">
         <label className="field-label" htmlFor="connection-name">
           Add an MCP server

@@ -1,4 +1,4 @@
-import type { ConnectionService } from '../connections.js';
+import type { ConnectorService } from '../connectors/service.js';
 import type { McpSourceConfig, SourceKind } from '../../shared/inbox-types.js';
 import {
   defaultEventKind,
@@ -156,7 +156,7 @@ export function withSince(args: unknown, since: Date | null): unknown {
 }
 
 /**
- * A source backed by a read-only list tool on an MCP connection, such as
+ * A source backed by a read-only list tool on a connected account, such as
  * "tasks assigned to me" on a ticket system's MCP server. Called on a timer,
  * so it only runs tools the owner allowed to run without asking.
  */
@@ -165,19 +165,19 @@ export class McpListSource implements Source {
     readonly id: string,
     readonly kind: SourceKind,
     private config: McpSourceConfig,
-    private connections: ConnectionService,
+    private connectors: ConnectorService,
   ) {}
   async poll(since: Date | null, signal: AbortSignal) {
-    const tool = await this.connections.bound(
+    const tool = await this.connectors.bound(
       this.config.dotId,
-      this.config.connectionId,
+      this.config.accountId,
       this.config.tool,
     );
-    if (tool.tool.requiresApproval)
+    if (tool.tool.policy !== 'allow')
       throw new Error(
         'This tool asks for approval on every call, so it cannot run on a timer. Pick a read-only list tool, or let this one run without asking.',
       );
-    const result = await this.connections.call(
+    const result = await this.connectors.call(
       tool,
       withSince(this.config.arguments, since) as Record<string, unknown>,
       signal,

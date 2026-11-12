@@ -128,9 +128,9 @@ export class UsageStore {
     );
     return this.db.rows<AuditEntry>(
       sql`SELECT id, at, dot_id, thread_id, kind, target, action, actor, approved, outcome FROM (
-          SELECT 'mcp:' || a.thread_id || ':' || a.tool_call_id AS id, a.created_at AS at, c.dot_id, a.thread_id, 'mcp' AS kind, COALESCE(c.name, 'Removed connection') AS target, a.tool AS action, 'agent' AS actor, true AS approved, false AS read_only,
+          SELECT 'mcp:' || a.thread_id || ':' || a.tool_call_id AS id, a.created_at AS at, a.dot_id, a.thread_id, 'mcp' AS kind, COALESCE(c.name, 'Removed connection') AS target, a.tool AS action, 'agent' AS actor, true AS approved, false AS read_only,
             CASE WHEN a.status<>'done' THEN 'pending' WHEN ${failed} THEN 'failed' ELSE 'succeeded' END AS outcome
-          FROM mcp_actions a LEFT JOIN mcp_connections c ON c.id=a.connection_id
+          FROM connector_actions a LEFT JOIN accounts c ON c.id=a.account_id
           UNION ALL
           SELECT 'log:' || id, created_at, dot_id, thread_id, kind, target, action, 'agent', false, read_only, outcome FROM action_log
           UNION ALL

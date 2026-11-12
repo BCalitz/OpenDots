@@ -57,7 +57,9 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     }
     return accounts;
   };
-  app.route('/', accountRoutes(accountService));
+  // Composio's accounts live under /composio so /accounts can be the
+  // connector accounts. This goes away with Composio.
+  app.route('/composio', accountRoutes(accountService));
   app.route('/', discoveryRoutes(platform, accountService));
   app.post('/setup-telemetry', async (c) => {
     const parsed = setupInputSchema.safeParse(

@@ -1,5 +1,5 @@
 import { computerRoutes } from './computer-routes.js';
-import { connectionRoutes } from './connection-routes.js';
+import { connectorRoutes } from './connectors/routes.js';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { timingSafeEqual } from 'node:crypto';
@@ -99,10 +99,7 @@ export function createApp({
   });
   if (platform) app.route('/api', computerRoutes(platform.computers));
   if (platform)
-    app.route(
-      '/api',
-      connectionRoutes(platform.workspace, platform.connections),
-    );
+    app.route('/api', connectorRoutes(platform.workspace, platform.connectors));
   const voice = platform ? new VoiceService(platform) : undefined;
   if (platform && voice) app.route('/api', workspaceRoutes(platform, voice));
   app.get('/api/state', async (c) =>

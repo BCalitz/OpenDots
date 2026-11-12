@@ -23,7 +23,6 @@ const TABLES = [
   'page_threads',
   'computer_permissions',
   'computer_audit',
-  'mcp_connections',
   'mcp_approvals',
   'mcp_actions',
   'usage_ledger',
@@ -47,8 +46,24 @@ const OWNED = [
   'conv_threads',
   'pages',
   'inbox_sources',
-  'mcp_connections',
+  'accounts',
 ];
+/**
+ * Tables that were renamed since the SQLite releases, and the columns that
+ * were renamed with them. mcp_connections is not here: it becomes accounts
+ * and grants, see importConnections.
+ */
+const RENAMED: Record<string, { to: string; columns: Record<string, string> }> =
+  {
+    mcp_approvals: {
+      to: 'connector_approvals',
+      columns: { connectionId: 'account_id' },
+    },
+    mcp_actions: {
+      to: 'connector_actions',
+      columns: { connectionId: 'account_id' },
+    },
+  };
 
 const snake = (column: string) =>
   column.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
@@ -69,6 +84,8 @@ export interface ImportReport {
 export async function importSqlite(
   db: Db,
   path: string,
+  /** Who the imported accounts belong to: the install's OWNER_ID. */
+  userId = 'opendots-owner',
 ): Promise<ImportReport[]> {
   if (!existsSync(path)) throw new Error(`No SQLite file at ${path}.`);
   const source = new DatabaseSync(path, { readOnly: true });
@@ -107,6 +124,8 @@ export async function importSqlite(
         }
         reports.push(await copyTable(db, source, table));
       }
+      if (present.has('mcp_connections'))
+        reports.push(await importConnections(db, source, userId));
       // Later task events continue after the imported ids.
       await db.exec(
         "SELECT setval(pg_get_serial_sequence('events', 'id'), GREATEST((SELECT MAX(id) FROM events), 1))",
@@ -121,8 +140,10 @@ export async function importSqlite(
 async function copyTable(
   db: Db,
   source: DatabaseSync,
-  table: string,
+  from: string,
 ): Promise<ImportReport> {
+  const table = RENAMED[from]?.to ?? from;
+  const renamed = RENAMED[from]?.columns ?? {};
   const target = new Map(
     (
       await db.rows<{
@@ -135,20 +156,25 @@ async function copyTable(
     ).map((column) => [column.columnName, column]),
   );
   const sourceColumns = source
-    .prepare(`PRAGMA table_info(${table})`)
+    .prepare(`PRAGMA table_info(${from})`)
     .all()
     .map((column) => String(column.name));
   const columns: { from: string; to: string; type: string }[] = [];
   const skipped: string[] = [];
-  for (const from of sourceColumns) {
-    const column = target.get(snake(from));
+  for (const name of sourceColumns) {
+    const column = target.get(renamed[name] ?? snake(name));
     // seq columns are generated in insertion order; rows are read in rowid order.
-    if (!column || column.columnName === 'seq') skipped.push(from);
-    else columns.push({ from, to: column.columnName, type: column.dataType });
+    if (!column || column.columnName === 'seq') skipped.push(name);
+    else
+      columns.push({
+        from: name,
+        to: column.columnName,
+        type: column.dataType,
+      });
   }
   const rows = source
     .prepare(
-      `SELECT ${columns.map((c) => `"${c.from}"`).join(', ')} FROM ${table} ORDER BY rowid`,
+      `SELECT ${columns.map((c) => `"${c.from}"`).join(', ')} FROM ${from} ORDER BY rowid`,
     )
     .all();
   const convert = (value: unknown, type: string) => {
@@ -171,5 +197,70 @@ async function copyTable(
       sql`INSERT INTO ${sql.raw(table)} (${list}) VALUES ${sql.join(values, ', ')} ON CONFLICT DO NOTHING`,
     );
   }
-  return { table, rows: rows.length, skipped };
+  return { table: from, rows: rows.length, skipped };
+}
+
+/**
+ * Turns the SQLite releases' per-Dot connections into accounts and grants,
+ * as migration 9 does for a Postgres database: connections to the same
+ * endpoint with the same token are one account, shared by the Dots that had
+ * it, and each tool's enabled and approval flags become a policy.
+ */
+async function importConnections(
+  db: Db,
+  source: DatabaseSync,
+  userId: string,
+): Promise<ImportReport> {
+  const rows = source
+    .prepare(
+      'SELECT id, dotId, name, url, token, tools, error, createdAt, updatedAt FROM mcp_connections ORDER BY rowid',
+    )
+    .all();
+  const text = (value: unknown) =>
+    value === null || value === undefined ? null : String(value);
+  const accounts = new Map<string, string>();
+  const granted = new Set<string>();
+  for (const row of rows) {
+    const id = String(row.id);
+    const dotId = String(row.dotId);
+    const key = `${String(row.url)}\u0000${String(row.token ?? '')}`;
+    const tools = JSON.parse(String(row.tools)) as Record<string, unknown>[];
+    let accountId = accounts.get(key);
+    if (!accountId) {
+      accountId = id;
+      accounts.set(key, id);
+      // The catalog keeps what the service said; permissions become policies.
+      const catalog = tools.map((tool) =>
+        Object.fromEntries(
+          Object.entries(tool).filter(
+            ([key]) => key !== 'enabled' && key !== 'requiresApproval',
+          ),
+        ),
+      );
+      await db.run(
+        sql`INSERT INTO accounts (id, user_id, connector, name, config, secret, tools, error, created_at, updated_at) VALUES (${id}, ${userId}, 'mcp', ${String(row.name)}, ${JSON.stringify({ url: String(row.url) })}, ${text(row.token)}, ${JSON.stringify(catalog)}, ${text(row.error)}, ${Number(row.createdAt)}, ${Number(row.updatedAt)})`,
+      );
+    }
+    if (!granted.has(`${accountId}\u0000${dotId}`)) {
+      granted.add(`${accountId}\u0000${dotId}`);
+      await db.run(
+        sql`INSERT INTO grants (id, account_id, dot_id, created_at, updated_at) VALUES (${id}, ${accountId}, ${dotId}, ${Number(row.createdAt)}, ${Number(row.updatedAt)})`,
+      );
+      for (const tool of tools)
+        await db.run(
+          sql`INSERT INTO grant_policies (grant_id, tool, policy) VALUES (${id}, ${String(tool.name)}, ${tool.enabled === false ? 'block' : tool.requiresApproval === false ? 'allow' : 'ask'}) ON CONFLICT DO NOTHING`,
+        );
+    }
+    // Whatever referred to the connection now refers to its account.
+    await db.run(
+      sql`UPDATE connector_approvals SET account_id=${accountId} WHERE account_id=${id}`,
+    );
+    await db.run(
+      sql`UPDATE connector_actions SET account_id=${accountId}, dot_id=${dotId} WHERE account_id=${id}`,
+    );
+    await db.run(
+      sql`UPDATE inbox_sources SET config=jsonb_set(config::jsonb - 'connectionId', '{accountId}', to_jsonb(${accountId}::text))::text WHERE type='mcp' AND config::jsonb->>'connectionId'=${id}`,
+    );
+  }
+  return { table: 'mcp_connections', rows: rows.length, skipped: [] };
 }

@@ -6,8 +6,9 @@ export type InboxEventState = 'new' | 'seen' | 'dismissed';
 export type InboxNotify = 'off' | 'urgent' | 'high' | 'all';
 export interface McpSourceConfig {
   dotId: string;
-  connectionId: string;
-  /** The real MCP tool name on that connection. */
+  /** The connected account, which this Dot must have a grant for. */
+  accountId: string;
+  /** The real tool name on that account. */
   tool: string;
   /** Tool arguments. The string "{{since}}" becomes the last poll time. */
   arguments: Record<string, unknown>;
