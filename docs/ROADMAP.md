@@ -16,6 +16,7 @@ OpenDots runs on its own code, Postgres and a model provider. No CopilotKit pack
 | Proposals: prepare, handle, not now         | `src/server/discovery/proposals.ts`, `proposal-store.ts`        |
 | Routing, delivery and the morning brief     | `src/server/discovery/delivery.ts`                              |
 | Replies drafted in chat, sent on approval   | `src/server/platform.ts` (`proposeReply`)                       |
+| Mail, messages and calendar actions         | Connections (Composio, MCP); writes wait for chat approval      |
 | Slack                                       | `src/server/channels/`                                          |
 | Pages, Dots, schedules, MCP, push           | `store.ts`, `workspace.ts`, `push.ts`, ...                      |
 | Postgres (pgvector, pg_trgm), SQLite import | `src/server/db/`, `npm run import-sqlite`                       |
@@ -33,7 +34,6 @@ OpenDots runs on its own code, Postgres and a model provider. No CopilotKit pack
 - **Tune thresholds on real items.** The Jev thresholds are starting values. Testing them sends mail text to TypeSafe with `TYPESAFE_API_KEY`, so ask the owner first.
 - **Quiet by category or keyword**, not only by sender. Personal attention's mutes replace this (below).
 - **Triage rules before Jev**, so a quieted sender costs no Jev call. Today the rule runs after, so the item can still update earlier ones.
-- **Drafts in the mailbox's drafts folder** through Composio. Today drafts stay in the OpenDots conversation.
 - **Backfill older mail.** A new source looks back 24 hours, and each source keeps its newest 2,000 items.
 - The smaller gaps listed at the end of [DISCOVERY.md](DISCOVERY.md).
 
@@ -76,28 +76,6 @@ Only typed kinds steer discovery. Each active focus or mute adds one yes/no ques
 
 **Rough effort:** step 1 about 1–2 weeks, step 2 about 2 weeks, step 3 about 1 week.
 
-## Mail and messages: what's left
-
-Reading, triage, a morning brief, replies drafted in chat and sending after you approve are built for Gmail, Outlook and Teams. Still to do:
-
-1. **"Who's waiting on me?"** A list of threads where someone is waiting on your reply, across accounts.
-2. **Drafts in the mailbox** (see above), so you can send from your own mail app.
-3. **Rules you write:** "Always handle meeting-confirmation emails from X", promoted to a higher autonomy level for that rule only.
-4. **More message apps**, such as WhatsApp, through the channel adapter interface (`src/server/channels/`).
-
-**Rough effort:** 1–2 weeks.
-
-## Scheduling
-
-1. **Read:** "what's my day", conflicts, meeting prep pages generated 30 minutes before each meeting from related mail, tickets and pages.
-2. **Find time:** propose slots that respect working hours and focus blocks.
-3. **Book with approval:** create, move or decline events behind an approval card.
-4. **Protect time:** when you choose "Prepare it for me" on a big item, offer to block focus time for it.
-
-Sources: Google Calendar or Microsoft 365 through Composio or MCP.
-
-**Rough effort:** 2 weeks.
-
 ## Learning (later)
 
 A nightly job groups finished threads by Dot and task type, asks a model to draft a skill (`SKILL.md`), and puts it in a review queue. Approved skills are loaded through the `load_skill` tool. Proposal decisions (prepare, handle, dismiss) and the labelled items in `discovery_findings` are the best training signal; the same data can train a small classifier (SetFit or ModernBERT) to take load off Jev.
@@ -126,14 +104,12 @@ Sending mail, accepting meetings on your behalf and closing tickets never go abo
 
 ## Build order
 
-| Next | Ships                                                   | Rough effort |
-| ---- | ------------------------------------------------------- | ------------ |
-| 1    | Personal attention step 1: focus, mute, away, notes     | 1–2 weeks    |
-| 2    | Personal attention step 2: learned importance           | 2 weeks      |
-| 3    | Mail and messages: waiting on me, mailbox drafts, rules | 1–2 weeks    |
-| 4    | Scheduling                                              | 2 weeks      |
-| 5    | Personal attention step 3: about you                    | 1 week       |
-| 6    | Learning                                                | 3–6 weeks    |
+| Next | Ships                                               | Rough effort |
+| ---- | --------------------------------------------------- | ------------ |
+| 1    | Personal attention step 1: focus, mute, away, notes | 1–2 weeks    |
+| 2    | Personal attention step 2: learned importance       | 2 weeks      |
+| 3    | Personal attention step 3: about you                | 1 week       |
+| 4    | Learning                                            | 3–6 weeks    |
 
 Tuning discovery's thresholds on real items can happen at any point, once the owner agrees to send mail text to TypeSafe.
 
@@ -142,5 +118,4 @@ Estimates assume one TypeScript developer working in this repo and exclude multi
 ## Open questions
 
 - Which ticket system comes first as a discovery source, and does it have an MCP server or API token we can use?
-- Which messaging app matters most after Teams: WhatsApp, Slack, or something else?
 - One "Chief of staff" Dot that triages everything, or route each event to the specialist Dot that owns that area?
