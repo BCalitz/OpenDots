@@ -100,6 +100,16 @@ CREATE INDEX event_tags_key ON event_tags(kind, normalized);
 CREATE INDEX event_tags_trgm ON event_tags USING gin (normalized public.gin_trgm_ops);
 `,
   },
+  {
+    version: 3,
+    name: 'retag for names, projects and places',
+    sql: `
+-- Tags gained names, projects and places. Items still in the inbox lose
+-- their tags here and are tagged again by the startup backfill; tags of
+-- pruned items stay as they were.
+DELETE FROM event_tags WHERE event_id IN (SELECT id FROM inbox_events);
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

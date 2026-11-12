@@ -108,7 +108,9 @@ Items are untrusted data: Jev and the investigating Dot are both told never to f
 
 ### Links between items
 
-Each new inbox item is scanned for invoice and order numbers, ticket keys, amounts, email addresses, company domains and sender names. Spellings of one identifier share a key (`INV-2041`, `inv 2041` and `Invoice #2041`), and tags are kept after the item itself is pruned. The Inbox **Links** tab shows items on a timeline, one lane per source; pick a tag to join the items that carry it, and tags spelled alike (`INV-2041` and `INV-2014`) join with a dashed line, since they may be the same thing or a typo. This is code only: no model call. To try it with made-up items, run `npm run seed-demo`; `npm run seed-demo -- --remove` takes them out again.
+Each new inbox item is scanned for invoice and order numbers, ticket keys, amounts, email addresses, company domains and sender names. Spellings of one identifier share a key (`INV-2041`, `inv 2041` and `Invoice #2041`), and tags are kept after the item itself is pruned. The Inbox **Links** tab shows items on a timeline, one lane per source; pick a tag to join the items that carry it, and tags spelled alike (`INV-2041` and `INV-2014`) join with a dashed line, since they may be the same thing or a typo.
+
+Names need no list of types. Any run of capitalised words is a name tag (`Acme Supplies`, `Initech`), and so is a `#hashtag`; a cue word types it: `Project Falcon` or `the Falcon project` is a project, `the Cape Town office` or `in Durban` is a place. A name links on the name alone, so `Project Falcon`, `#falcon` and `the Falcon review` are one tag, shown under its most specific kind. Single names are noisy, so only names found in two or more items appear. A lone capital at the start of a sentence, codes in capitals, weekdays, months, greetings and common words are skipped. Upgrading retags the items still in the inbox once, at startup. This is code only: no model call. To try it with made-up items, run `npm run seed-demo`; `npm run seed-demo -- --remove` takes them out again.
 
 ## Persistent Dot computers
 

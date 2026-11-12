@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { extractTags } from '../src/server/inbox/tags.js';
+import { extractNames, extractTags } from '../src/server/inbox/tags.js';
 import { InboxStore } from '../src/server/inbox/store.js';
 import { testDb } from './fixtures/db.js';
 
@@ -102,4 +102,87 @@ it('tags items on ingest, links them, finds similar keys and drops tags with the
   expect(await store.backfillTags()).toBe(0);
   await store.remove(source.id);
   expect((await store.links()).items).toEqual([]);
+});
+
+const names = (text: string) =>
+  extractNames(text).map((tag) => `${tag.kind}:${tag.normalized}`);
+
+it('finds projects and places by their cue words, and other names', () => {
+  expect(
+    names(
+      'Project Falcon kickoff\nWe met the Initech team at the Cape Town office about the Orion project.',
+    ).sort(),
+  ).toEqual(
+    [
+      'project:falcon',
+      'project:orion',
+      'place:cape town',
+      'name:initech',
+    ].sort(),
+  );
+  expect(names('The building in Durban is closed; ping #falcon-team.')).toEqual(
+    ['place:durban', 'name:falcon team'],
+  );
+  expect(names('Pieter van Wyk asked about Acme Supplies')).toEqual([
+    'name:pieter van wyk',
+    'name:acme supplies',
+  ]);
+});
+
+it('skips capitals that say nothing', () => {
+  // Sentence starts, codes, weekdays, months, greetings and common words.
+  expect(
+    names(
+      'Payment reminder: Invoice #2041 for March. Finance paid on Friday.\nHi, see OPS-311 and pay by EFT. Our team meets on Monday.',
+    ),
+  ).toEqual([]);
+  // An app after "in" is a name, not a place.
+  expect(names('We talked in Teams.')).toEqual(['name:teams']);
+  // A name at the start of a sentence still counts when it has two words.
+  expect(names('Umbrella Logistics: delivery scheduled')).toEqual([
+    'name:umbrella logistics',
+  ]);
+});
+
+it('keeps names out of the sender and gives one name one key', () => {
+  const tags = keys({
+    title: "Thandi Nkosi's note about Acme's order",
+    from: 'Thandi Nkosi <thandi@acme-supplies.co.za>',
+  });
+  expect(tags).toContain('person:thandi nkosi');
+  expect(tags).not.toContain('name:thandi nkosi');
+  expect(tags).toContain('name:acme');
+});
+
+it('links a name only once two items carry it, under its most specific kind', async () => {
+  const store = new InboxStore(await testDb());
+  const { source } = await store.create({
+    name: 'Mail',
+    kind: 'mail',
+    type: 'webhook',
+    config: {},
+    notify: 'off',
+    intervalSeconds: 0,
+  });
+  const item = (externalId: string, title: string) => ({
+    sourceId: source.id,
+    externalId,
+    kind: 'email',
+    summary: '',
+    raw: null,
+    title,
+    occurredAt: Date.now() - Number(externalId),
+  });
+  await store.ingest([
+    item('3', 'Project Falcon kickoff'),
+    item('2', 'Notes on the #falcon designs'),
+    item('1', 'Lunch with the Globex people'),
+  ]);
+  const { tags } = await store.links();
+  const falcon = tags.filter((tag) => tag.normalized === 'falcon');
+  expect(falcon).toEqual([
+    expect.objectContaining({ kind: 'project', value: 'Falcon' }),
+  ]);
+  expect(falcon[0].itemIds).toHaveLength(2);
+  expect(tags.some((tag) => tag.normalized === 'globex')).toBe(false);
 });

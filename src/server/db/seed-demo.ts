@@ -174,6 +174,41 @@ const items: Item[] = [
     summary: 'Hi, writing from my personal account. Any news on the 40 seats?',
     from: 'Sam Carter <scarter@gmail.com>',
   },
+  // A project and an office, named in passing: free-form tags.
+  {
+    source: 'mail',
+    daysAgo: 12,
+    kind: 'email',
+    title: 'Project Falcon kickoff notes',
+    summary:
+      'We met the Initech team at the Cape Town office to scope the new client portal.',
+    from: 'Jo Daniels <jo@brightlane.co.za>',
+  },
+  {
+    source: 'teams',
+    daysAgo: 6,
+    kind: 'chat',
+    title: 'Login mockups are up',
+    summary: 'The #falcon designs are in the shared folder, comments welcome.',
+    from: lerato,
+  },
+  {
+    source: 'tickets',
+    daysAgo: 3,
+    kind: 'issue',
+    title: 'WEB-41 Falcon portal login fails on Safari',
+    summary: 'Reported by the Cape Town office during testing.',
+    from: 'Jo Daniels <jo@brightlane.co.za>',
+  },
+  {
+    source: 'mail',
+    daysAgo: 1,
+    kind: 'email',
+    title: 'Power maintenance on Monday',
+    summary:
+      'The building in Cape Town is closed on Monday, so the Falcon review moves to Tuesday.',
+    from: 'Facilities <facilities@brightlane.co.za>',
+  },
   // Things that link to nothing.
   {
     source: 'mail',

@@ -17,11 +17,21 @@ const KINDS: { kind: TagKind; label: string }[] = [
   { kind: 'email', label: 'Email' },
   { kind: 'domain', label: 'Company domain' },
   { kind: 'person', label: 'Person' },
+  { kind: 'project', label: 'Project' },
+  { kind: 'place', label: 'Place' },
+  { kind: 'name', label: 'Name' },
 ];
+// Free-form names share one colour; the group labels tell them apart.
+const NAMES: TagKind[] = ['project', 'place', 'name'];
+const isName = (kind: TagKind) => NAMES.includes(kind);
 const kindLabel = (kind: TagKind) =>
   KINDS.find((entry) => entry.kind === kind)?.label ?? kind;
 const color = (kind: TagKind) =>
-  `var(--tag-${KINDS.findIndex((entry) => entry.kind === kind) + 1})`;
+  isName(kind)
+    ? 'var(--tag-8)'
+    : `var(--tag-${KINDS.findIndex((entry) => entry.kind === kind) + 1})`;
+/** Names read better as written; identifiers in their one spelling. */
+const label = (tag: LinkTag) => (isName(tag.kind) ? tag.value : tag.normalized);
 const key = (tag: { kind: TagKind; normalized: string }) =>
   `${tag.kind}:${tag.normalized}`;
 const day = (ms: number) =>
@@ -142,9 +152,9 @@ export function InboxLinks() {
         <Link2 size={32} />
         <h2>No tagged items yet.</h2>
         <p>
-          Invoice numbers, tickets, amounts, addresses and names are picked out
-          of new items as they arrive. Try <code>npm run seed-demo</code> for
-          made-up examples.
+          Invoice numbers, tickets, amounts, addresses, people, projects, places
+          and other names are picked out of new items as they arrive. Try{' '}
+          <code>npm run seed-demo</code> for made-up examples.
         </p>
       </div>
     );
@@ -235,7 +245,7 @@ export function InboxLinks() {
           role="img"
           aria-label={
             active
-              ? `Timeline of ${state.items.length} items by source; ${active.itemIds.length} carry ${kindLabel(active.kind)} ${active.value}.`
+              ? `Timeline of ${state.items.length} items by source; ${active.itemIds.length} carry ${kindLabel(active.kind)} ${label(active)}.`
               : `Timeline of ${state.items.length} items by source.`
           }
           onMouseLeave={() => setHover(undefined)}
@@ -370,12 +380,20 @@ export function InboxLinks() {
       </div>
 
       <div className="links-legend" aria-label="Tag kinds">
-        {kindsShown.map((entry) => (
-          <span key={entry.kind}>
-            <i style={{ background: color(entry.kind) }} aria-hidden />
-            {entry.label}
+        {kindsShown
+          .filter((entry) => !isName(entry.kind))
+          .map((entry) => (
+            <span key={entry.kind}>
+              <i style={{ background: color(entry.kind) }} aria-hidden />
+              {entry.label}
+            </span>
+          ))}
+        {kindsShown.some((entry) => isName(entry.kind)) && (
+          <span>
+            <i style={{ background: color('name') }} aria-hidden />
+            Project, place or name
           </span>
-        ))}
+        )}
       </div>
 
       <div className="links-panels">
@@ -395,7 +413,7 @@ export function InboxLinks() {
                       onClick={() => setSelected(key(tag))}
                     >
                       <i style={{ background: color(tag.kind) }} aria-hidden />
-                      {tag.normalized}
+                      {label(tag)}
                       <span>{tag.itemIds.length}</span>
                     </button>
                   ))}
@@ -409,7 +427,7 @@ export function InboxLinks() {
         <div>
           <h2 className="insight-subhead">
             {active
-              ? `${kindLabel(active.kind)} ${active.normalized}`
+              ? `${kindLabel(active.kind)} ${label(active)}`
               : 'Pick a tag'}
           </h2>
           {alike.length > 0 && (
@@ -421,7 +439,7 @@ export function InboxLinks() {
                   className="links-chip small"
                   onClick={() => setSelected(key(entry.tag))}
                 >
-                  {entry.tag.normalized}
+                  {label(entry.tag)}
                   <span>{Math.round(entry.similarity * 100)}%</span>
                 </button>
               ))}

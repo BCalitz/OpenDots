@@ -322,16 +322,22 @@ export class InboxStore {
     );
     const ids = items.map((item) => item.id);
     if (!ids.length) return { items: [], tags: [], similar: [] };
+    // Projects, places and plain names link on the name alone and take the
+    // most specific kind any item gave it. They are noisy one at a time, so
+    // only names found in two or more items are kept.
+    const merged = sql`SELECT CASE WHEN family='name' THEN (array_agg(kind ORDER BY array_position(ARRAY['project','place','name']::text[], kind)))[1] ELSE family END AS kind,
+        normalized, (array_agg(value ORDER BY occurred_at))[1] AS value, array_agg(DISTINCT event_id) AS item_ids, count(DISTINCT event_id) AS n
+      FROM (SELECT event_id, kind, normalized, value, occurred_at, CASE WHEN kind IN ('project','place','name') THEN 'name' ELSE kind END AS family
+        FROM event_tags WHERE event_id = ANY(${ids})) t
+      GROUP BY family, normalized HAVING family<>'name' OR count(DISTINCT event_id)>=2`;
     const tags = await this.db.rows<LinksState['tags'][number]>(
-      sql`SELECT kind, normalized, (array_agg(value ORDER BY occurred_at))[1] AS value, array_agg(DISTINCT event_id) AS item_ids
-        FROM event_tags WHERE event_id = ANY(${ids}) GROUP BY kind, normalized
-        ORDER BY count(DISTINCT event_id) DESC, kind, normalized`,
+      sql`SELECT kind, normalized, value, item_ids FROM (${merged}) m ORDER BY n DESC, kind, normalized`,
     );
     const similar = await this.db.rows<LinksState['similar'][number]>(
-      sql`WITH keys AS (SELECT DISTINCT kind, normalized FROM event_tags WHERE event_id = ANY(${ids}))
+      sql`WITH keys AS (${merged})
         SELECT a.kind, a.normalized AS a, b.normalized AS b, round(public.similarity(a.normalized, b.normalized)::numeric, 2) AS similarity
         FROM keys a JOIN keys b ON a.kind=b.kind AND a.normalized<b.normalized
-        WHERE a.kind IN ('invoice', 'order', 'person') AND public.similarity(a.normalized, b.normalized)>=0.4
+        WHERE a.kind IN ('invoice', 'order', 'person', 'project', 'place', 'name') AND public.similarity(a.normalized, b.normalized)>=0.4
         ORDER BY similarity DESC LIMIT 100`,
     );
     return { items, tags, similar };

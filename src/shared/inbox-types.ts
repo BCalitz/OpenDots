@@ -103,9 +103,23 @@ export interface InboxState {
   events: InboxEventView[];
 }
 
-/** What a tag identifies. */
+/**
+ * What a tag identifies. project, place and name are free-form: any
+ * recurring name, typed by a cue word ("Project Falcon", "Cape Town
+ * office") or left as a plain name. They link on the name alone, and only
+ * names found in two or more items are shown.
+ */
 export type TagKind =
-  'invoice' | 'order' | 'ticket' | 'amount' | 'email' | 'domain' | 'person';
+  | 'invoice'
+  | 'order'
+  | 'ticket'
+  | 'amount'
+  | 'email'
+  | 'domain'
+  | 'person'
+  | 'project'
+  | 'place'
+  | 'name';
 /** An item on the links view. Pruned items keep their tags, not their text. */
 export interface LinkItem {
   id: string;
