@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import type { WorkspaceStore } from '../workspace.js';
+import type { OAuthFlow } from './oauth.js';
 import type { ConnectorService } from './service.js';
 
 const policy = z.enum(['allow', 'ask', 'block']);
@@ -18,6 +19,7 @@ const create = z
 export function connectorRoutes(
   workspace: WorkspaceStore,
   connectors: ConnectorService,
+  flow: OAuthFlow,
   userOf: (c: Context) => string = () => workspace.ownerId,
 ) {
   const app = new Hono();
@@ -37,6 +39,18 @@ export function connectorRoutes(
     return id;
   };
   app.get('/accounts', async (c) => c.json(await connectors.list(userOf(c))));
+  // Services the user signs in to, and whether this server is set up for each.
+  app.get('/accounts/providers', (c) => c.json(flow.providers()));
+  app.post('/accounts/sign-in/:kind', async (c) => {
+    const body = z
+      .object({ dotId: z.string().optional() })
+      .strict()
+      .parse(await c.req.json());
+    const dotId = body.dotId && (await requireDot(body.dotId));
+    return c.json({
+      url: await flow.start(userOf(c), c.req.param('kind'), dotId),
+    });
+  });
   app.post('/accounts', async (c) => {
     const { connector, ...input } = create.parse(await c.req.json());
     return c.json(await connectors.add(userOf(c), connector, input), 201);
@@ -86,6 +100,32 @@ export function connectorRoutes(
         body.policy,
       ),
     );
+  });
+  return app;
+}
+
+/**
+ * Where a service sends the browser back after sign-in. It carries no owner
+ * token (the browser is arriving from another site), so it is answered before
+ * the token checks and trusts only the one-time state it issued.
+ */
+export function oauthCallbackRoute(flow: OAuthFlow) {
+  const app = new Hono();
+  app.get('/oauth/callback', async (c) => {
+    const { state, code, error } = c.req.query();
+    const back = (params: Record<string, string>) =>
+      c.redirect(`${flow.publicUrl}/?${new URLSearchParams(params)}`);
+    if (error || !state || !code)
+      return back({ connect_error: 'The sign-in was cancelled.' });
+    try {
+      const account = await flow.finish(state, code);
+      return back({ connected: account.connector });
+    } catch (failure) {
+      return back({
+        connect_error:
+          failure instanceof Error ? failure.message : 'Sign-in failed.',
+      });
+    }
   });
   return app;
 }

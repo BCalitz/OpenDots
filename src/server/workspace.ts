@@ -1,5 +1,6 @@
 import { ComputerStore } from './computer-store.js';
 import { AccountStore } from './connectors/accounts.js';
+import { Sealer } from './connectors/secrets.js';
 import { ActionStore } from './connectors/actions.js';
 import { Pages } from './pages.js';
 import { UsageStore } from './usage-store.js';
@@ -51,17 +52,19 @@ export class WorkspaceStore {
   readonly usage: UsageStore;
   readonly inbox: InboxStore;
   /** A workspace with at least one Space and Dot. */
-  static async open(db: Db, ownerId: string) {
-    const workspace = new WorkspaceStore(db, ownerId);
+  static async open(db: Db, ownerId: string, secretsKey?: string) {
+    const workspace = new WorkspaceStore(db, ownerId, secretsKey);
+    await workspace.accounts.sealStored();
     await workspace.seed();
     return workspace;
   }
   constructor(
     readonly db: Db,
     readonly ownerId: string,
+    secretsKey?: string,
   ) {
     this.computers = new ComputerStore(db);
-    this.accounts = new AccountStore(db);
+    this.accounts = new AccountStore(db, new Sealer(secretsKey));
     this.actions = new ActionStore(db);
     this.usage = new UsageStore(db);
     this.inbox = new InboxStore(db);

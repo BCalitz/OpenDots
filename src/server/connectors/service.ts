@@ -9,6 +9,7 @@ import type { AccountRecord, AccountStore, Access } from './accounts.js';
 import type { ActionStore } from './actions.js';
 import type { Connector } from './connector.js';
 import { McpConnector } from './mcp.js';
+import { isOAuth, type OAuthConnector } from './oauth.js';
 
 // Model-facing names must match ^[a-zA-Z0-9_-]{1,64}$ and stay unique across
 // every account a Dot has, so they are derived here, deterministically.
@@ -78,14 +79,30 @@ export class ConnectorService {
   }
   async add(userId: string, kind: string, input: unknown) {
     const connector = this.connector(kind);
-    const value = connector.parse(input);
-    const tools = await connector.discover({
+    return this.addVerified(userId, kind, connector.parse(input));
+  }
+  /** Saves an account whose details are already checked, after listing what it offers. */
+  async addVerified(
+    userId: string,
+    kind: string,
+    value: { name: string; config: Record<string, unknown>; secret?: string },
+  ) {
+    const tools = await this.connector(kind).discover({
       config: value.config,
       secret: value.secret,
     });
     return this.view(
       await this.accounts.create(userId, { connector: kind, ...value }, tools),
     );
+  }
+  oauthConnectors(): OAuthConnector[] {
+    return [...this.connectors.values()].filter(isOAuth);
+  }
+  oauthConnector(kind: string) {
+    const found = this.connectors.get(kind);
+    if (!found || !isOAuth(found))
+      throw new Error('This kind of account does not use sign-in.');
+    return found;
   }
   async refresh(userId: string, id: string) {
     const account = await this.accounts.get(userId, id);

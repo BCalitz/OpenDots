@@ -155,6 +155,18 @@ export function App() {
     setNotices((current) =>
       current.action === action ? current : { ...current, action },
     );
+  // A sign-in to Gmail, Outlook or Teams returns here; say why if it failed.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const failed = params.get('connect_error');
+    if (!failed && !params.has('connected')) return;
+    window.history.replaceState(
+      null,
+      '',
+      window.location.pathname + window.location.hash,
+    );
+    if (failed) setError(failed);
+  }, []);
   const [auth, setAuth] = useState('');
   const [needsAuth, setNeedsAuth] = useState(false);
   const [dialog, setDialog] = useState<Dialog>();

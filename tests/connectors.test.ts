@@ -19,6 +19,7 @@ import {
 import { detachedContext } from '../src/server/engine/tools.js';
 import type { ApprovalStatus } from '../src/shared/approvals.js';
 import { connectorRoutes } from '../src/server/connectors/routes.js';
+import { OAuthFlow } from '../src/server/connectors/oauth.js';
 import {
   ActionStore,
   INTERRUPTED_ACTION_THRESHOLD_MS,
@@ -110,7 +111,12 @@ async function fixture({ twin = false } = {}) {
     [new McpConnector(transport)],
   );
   const routesFor = (user: string) =>
-    connectorRoutes(workspace, connectors, () => user);
+    connectorRoutes(
+      workspace,
+      connectors,
+      new OAuthFlow(workspace.db, connectors, 'http://localhost:4310'),
+      () => user,
+    );
   const call = (
     routes: ReturnType<typeof routesFor>,
     path: string,

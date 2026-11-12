@@ -1,5 +1,5 @@
 import { computerRoutes } from './computer-routes.js';
-import { connectorRoutes } from './connectors/routes.js';
+import { connectorRoutes, oauthCallbackRoute } from './connectors/routes.js';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { timingSafeEqual } from 'node:crypto';
@@ -42,6 +42,7 @@ export function createApp({
   // Webhook deliveries authenticate with their source's own secret, so they
   // are answered before the owner-token checks below.
   if (platform) app.route('/api', inboxHookRoute(platform));
+  if (platform) app.route('/api', oauthCallbackRoute(platform.oauth));
   app.use('/api/*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
@@ -99,7 +100,10 @@ export function createApp({
   });
   if (platform) app.route('/api', computerRoutes(platform.computers));
   if (platform)
-    app.route('/api', connectorRoutes(platform.workspace, platform.connectors));
+    app.route(
+      '/api',
+      connectorRoutes(platform.workspace, platform.connectors, platform.oauth),
+    );
   const voice = platform ? new VoiceService(platform) : undefined;
   if (platform && voice) app.route('/api', workspaceRoutes(platform, voice));
   app.get('/api/state', async (c) =>

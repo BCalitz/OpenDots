@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { ComputerService } from './computer-service.js';
 import { ConnectorService } from './connectors/service.js';
+import { McpConnector } from './connectors/mcp.js';
+import type { Connector } from './connectors/connector.js';
+import { OAuthFlow } from './connectors/oauth.js';
 import { PageService } from './page-service.js';
 import { Store } from './store.js';
 import { WorkspaceStore } from './workspace.js';
@@ -47,12 +50,18 @@ export interface PlatformOptions {
   fetch?: typeof fetch;
   /** Mobile push; discovery delivery is off without it. */
   push?: PushService;
+  /** Services the user signs in to, next to MCP servers. */
+  signIn?: Connector[];
+  /** Where the browser reaches OpenDots; sign-in redirects come back here. */
+  publicUrl?: string;
 }
 export class Platform {
   readonly setupTelemetry: SetupTelemetry;
   readonly pages: PageService;
   readonly computers: ComputerService;
   readonly connectors: ConnectorService;
+  /** Sign-ins to services such as Gmail, from the redirect to the saved account. */
+  readonly oauth: OAuthFlow;
   /** Event engine: sources, the event log and the poller. */
   readonly inbox: InboxEngine;
   /** Flags inbox items that need the owner and investigates them read-only. */
@@ -127,6 +136,12 @@ export class Platform {
     this.connectors = new ConnectorService(
       workspace.accounts,
       workspace.actions,
+      [new McpConnector(), ...(options.signIn ?? [])],
+    );
+    this.oauth = new OAuthFlow(
+      workspace.db,
+      this.connectors,
+      options.publicUrl ?? 'http://127.0.0.1:4310',
     );
     let reader: ReturnType<typeof composioReader> | undefined;
     let readerKey: string | undefined;

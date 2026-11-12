@@ -1,6 +1,12 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { PlugZap, RefreshCw, Trash2 } from 'lucide-react';
 import type { Account, Grant, ToolPolicy } from '../shared/connection-types';
+
+interface SignInProvider {
+  kind: string;
+  label: string;
+  configured: boolean;
+}
 import { api } from './api';
 // Lives inside the Dot form, so it saves immediately through its own
 // requests and keeps Enter from submitting the surrounding form.
@@ -16,6 +22,7 @@ const dotPath = (dotId: string, accountId: string) =>
   `/dots/${encodeURIComponent(dotId)}/grants/${encodeURIComponent(accountId)}`;
 export function ConnectionsSection({ dotId }: { dotId: string }) {
   const [accounts, setAccounts] = useState<Account[]>();
+  const [providers, setProviders] = useState<SignInProvider[]>([]);
   const [grants, setGrants] = useState<Grant[]>([]);
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
@@ -27,9 +34,11 @@ export function ConnectionsSection({ dotId }: { dotId: string }) {
     void Promise.all([
       api<Account[]>('/accounts'),
       api<Grant[]>(`/dots/${encodeURIComponent(dotId)}/grants`),
+      api<SignInProvider[]>('/accounts/providers'),
     ])
-      .then(([list, granted]) => {
+      .then(([list, granted, signIn]) => {
         if (!active) return;
+        setProviders(signIn);
         setAccounts(list);
         setGrants(granted);
       })
@@ -86,6 +95,13 @@ export function ConnectionsSection({ dotId }: { dotId: string }) {
     setName('');
     setUrl('');
     setToken('');
+  };
+  // Signing in happens on the service's own page; it returns here afterwards.
+  const signIn = async (kind: string) => {
+    const started = await run(kind, () =>
+      api<{ url: string }>(`/accounts/sign-in/${kind}`, 'POST', { dotId }),
+    );
+    if (started) window.location.assign(started.url);
   };
   return (
     <fieldset className="space-access-fields connections-fields">
@@ -241,6 +257,29 @@ export function ConnectionsSection({ dotId }: { dotId: string }) {
           </div>
         );
       })}
+      {providers.length > 0 && (
+        <div className="connection-add">
+          <span className="field-label">Sign in to a service</span>
+          {providers.map((provider) => (
+            <button
+              key={provider.kind}
+              type="button"
+              className="connection-connect"
+              disabled={!!busy || !provider.configured}
+              title={
+                provider.configured
+                  ? undefined
+                  : 'Not set up on this server. See docs/CONNECTIONS.md.'
+              }
+              onClick={() => void signIn(provider.kind)}
+            >
+              {busy === provider.kind
+                ? 'Opening…'
+                : `Connect ${provider.label}`}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="connection-add">
         <label className="field-label" htmlFor="connection-name">
           Add an MCP server

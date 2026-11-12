@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { sql, type Db } from '../db/index.js';
+import { Sealer } from './secrets.js';
 import type {
   Account,
   ConnectorTool,
@@ -52,7 +53,20 @@ const defaultPolicy = (tool: ConnectorTool): ToolPolicy =>
  * store's job and not something callers remember to filter.
  */
 export class AccountStore {
-  constructor(private db: Db) {}
+  constructor(
+    private db: Db,
+    private sealer = new Sealer(),
+  ) {}
+  /** Encrypts secrets saved before a key was set. Safe to run on every start. */
+  async sealStored() {
+    if (!this.sealer.enabled) return;
+    for (const row of await this.db.rows<{ id: string; secret: string }>(
+      sql`SELECT id, secret FROM accounts WHERE secret IS NOT NULL AND secret NOT LIKE 'enc:v1:%'`,
+    ))
+      await this.db.run(
+        sql`UPDATE accounts SET secret=${this.sealer.seal(row.secret)} WHERE id=${row.id}`,
+      );
+  }
   async list(userId: string): Promise<AccountRecord[]> {
     return (
       await this.db.rows<AccountRow>(
@@ -79,7 +93,7 @@ export class AccountStore {
     return {
       connector: row.connector,
       config: JSON.parse(row.config) as Record<string, unknown>,
-      secret: row.secret ?? undefined,
+      secret: row.secret ? this.sealer.open(row.secret) : undefined,
     };
   }
   async create(
@@ -95,7 +109,7 @@ export class AccountStore {
     const id = randomUUID();
     const now = Date.now();
     await this.db.run(
-      sql`INSERT INTO accounts (id, user_id, connector, name, config, secret, tools, error, created_at, updated_at) VALUES (${id}, ${userId}, ${value.connector}, ${value.name}, ${JSON.stringify(value.config)}, ${value.secret || null}, ${JSON.stringify(tools)}, NULL, ${now}, ${now})`,
+      sql`INSERT INTO accounts (id, user_id, connector, name, config, secret, tools, error, created_at, updated_at) VALUES (${id}, ${userId}, ${value.connector}, ${value.name}, ${JSON.stringify(value.config)}, ${value.secret ? this.sealer.seal(value.secret) : null}, ${JSON.stringify(tools)}, NULL, ${now}, ${now})`,
     );
     return (await this.get(userId, id))!;
   }

@@ -10,6 +10,7 @@ import { createApp } from './app.js';
 import { resolveAppOrigins } from './app-origin.js';
 import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
+import { signInConnectors } from './connectors/sign-in.js';
 import { PushService, scheduledResultMessage } from './push.js';
 import { pushNotifier } from './inbox/notify.js';
 import {
@@ -41,6 +42,7 @@ const push = new PushService(db, {
 const workspace = await WorkspaceStore.open(
   db,
   process.env.OWNER_ID ?? 'opendots-owner',
+  process.env.SECRETS_KEY || undefined,
 );
 const config: PlatformConfig = {
   apiKey: process.env.OPENAI_API_KEY,
@@ -74,7 +76,14 @@ const config: PlatformConfig = {
   slackDotId: process.env.SLACK_DOT_ID || undefined,
   ownerToken,
 };
-const platform = await Platform.create(store, workspace, config, { push });
+const platform = await Platform.create(store, workspace, config, {
+  push,
+  signIn: signInConnectors(process.env),
+  publicUrl: (process.env.PUBLIC_URL || `http://127.0.0.1:${port}`).replace(
+    /\/+$/,
+    '',
+  ),
+});
 console.log('Conversations are stored in Postgres.');
 const legacy = legacySettingsNotice(process.env);
 if (legacy) console.warn(legacy);

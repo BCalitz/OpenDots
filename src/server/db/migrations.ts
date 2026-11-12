@@ -269,6 +269,16 @@ FROM connection_map m WHERE s.type='mcp' AND s.config::jsonb->>'connectionId'=m.
 DROP TABLE mcp_connections;
 `,
   },
+  {
+    version: 10,
+    name: 'oauth sign-ins',
+    sql: `
+-- One row per sign-in in progress, from the redirect to the service until it
+-- comes back. state is the one-time secret in the redirect; it is deleted when
+-- used, and expires after ten minutes.
+CREATE TABLE oauth_states(state TEXT PRIMARY KEY, user_id TEXT NOT NULL, connector TEXT NOT NULL, verifier TEXT NOT NULL, dot_id TEXT, expires_at BIGINT NOT NULL);
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.
