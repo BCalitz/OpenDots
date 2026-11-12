@@ -6,7 +6,11 @@ import type { AssistantMessage, Message } from '@ag-ui/core';
 import type { CallReceipt } from '../shared/types';
 import { voiceReceiptMessagePrefix } from '../shared/voice-receipt';
 import { isScheduledTaskMessage } from '../shared/scheduled-message';
-import { isDiscoveryMessage } from '../shared/discovery-message';
+import {
+  isDiscoveryMessage,
+  parseDiscoveryMessage,
+} from '../shared/discovery-message';
+import { DiscoveryCard } from './DiscoveryCard';
 // These markers only control rendering; they do not confer trust or permissions.
 export function isInternalVoiceReceipt(message: Message): boolean {
   const metadata = message.metadata;
@@ -62,11 +66,26 @@ export function ChatTranscript({
         .map((call) => (
           <Receipt key={call.id} call={call} />
         ))}
-      {messages.map((message) => (
-        <Fragment key={message.id}>
-          {renderMessage?.(message) !== undefined
-            ? renderMessage(message)
-            : typeof message.content === 'string' &&
+      {messages.map((message) => {
+        const discovery =
+          isDiscoveryMessage(message) && typeof message.content === 'string'
+            ? parseDiscoveryMessage(message.content)
+            : null;
+        return (
+          <Fragment key={message.id}>
+            {renderMessage?.(message) !== undefined ? (
+              renderMessage(message)
+            ) : discovery ? (
+              <div className="chat-message discovery">
+                <DiscoveryCard
+                  parsed={discovery}
+                  onOpenInbox={() => {
+                    location.hash = '#/inbox';
+                  }}
+                />
+              </div>
+            ) : (
+              typeof message.content === 'string' &&
               message.content.trim() && (
                 <div className={`chat-message ${message.role}`}>
                   <div
@@ -107,16 +126,18 @@ export function ChatTranscript({
                   </div>
                   {renderActions?.(message)}
                 </div>
-              )}
-          {message.role === 'assistant' && renderTools?.(message)}
-          {calls
-            .filter((call) => call.anchorMessageId === message.id)
-            .map((call) => (
-              <Receipt key={call.id} call={call} />
-            ))}
-          {renderAfter?.(message)}
-        </Fragment>
-      ))}
+              )
+            )}
+            {message.role === 'assistant' && renderTools?.(message)}
+            {calls
+              .filter((call) => call.anchorMessageId === message.id)
+              .map((call) => (
+                <Receipt key={call.id} call={call} />
+              ))}
+            {renderAfter?.(message)}
+          </Fragment>
+        );
+      })}
     </>
   );
 }

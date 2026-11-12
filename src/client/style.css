@@ -5397,3 +5397,218 @@ h3 {
 .dot-notice strong {
   font-weight: 600;
 }
+
+/* Discovery: the item that started an investigation, shown as a card. */
+.chat-message.discovery {
+  display: flex;
+  flex-direction: column;
+}
+.discovery-card {
+  align-self: stretch;
+  border: 1px solid #8ab8b2;
+  border-radius: 14px;
+  background: #f7fbfa;
+  color: #3d4250;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-wrap: anywhere;
+}
+.discovery-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.discovery-card-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #35766f;
+  color: #fff;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.discovery-card-app,
+.discovery-card-fact {
+  border: 1px solid #d5e5e2;
+  background: #fff;
+  color: #35766f;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 10px;
+}
+.discovery-card-reason {
+  margin: 0;
+  color: #3d4250;
+}
+.discovery-card-warning {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  border-radius: 8px;
+  background: #fff4e5;
+  color: #8a4b00;
+  padding: 6px 9px;
+}
+.discovery-card-item {
+  background: #fff;
+  border: 1px solid #e3ecea;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.discovery-card-from {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+.discovery-card-from strong {
+  color: #242424;
+  font-weight: 600;
+}
+.discovery-card-address,
+.discovery-card-when,
+.discovery-card-muted {
+  color: #8c8d97;
+}
+.discovery-card-when {
+  margin-left: auto;
+}
+.discovery-card-title {
+  margin: 4px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #242424;
+  line-height: 1.4;
+}
+.discovery-card-text {
+  margin: 0;
+  white-space: pre-wrap;
+  color: #4a4f5c;
+}
+.discovery-card-more {
+  margin-top: 4px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: #35766f;
+  font-size: 11px;
+  cursor: pointer;
+}
+.discovery-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+.discovery-card-tags span {
+  background: #f1f1f1;
+  border-radius: 6px;
+  padding: 0 6px;
+  font-size: 10px;
+  color: #555;
+}
+.discovery-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+.discovery-card-actions:empty {
+  display: none;
+}
+.discovery-card-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: #35766f;
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.discovery-card-related h5 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #35766f;
+}
+.discovery-card-related ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.discovery-related {
+  background: #fff;
+  border: 1px solid #e3ecea;
+  border-radius: 8px;
+  padding: 5px 9px;
+}
+.discovery-related-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  color: #242424;
+  font-size: 12px;
+}
+.discovery-related-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.discovery-related.open .discovery-related-title {
+  white-space: normal;
+}
+.discovery-related-meta {
+  flex-shrink: 0;
+  color: #8c8d97;
+  font-size: 10px;
+}
+.discovery-related-why {
+  margin-left: 19px;
+  color: #707070;
+  font-size: 10px;
+}
+.discovery-related-body {
+  margin: 6px 0 2px 19px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.discovery-card-ask {
+  color: #707070;
+  font-size: 11px;
+}
+.discovery-card-ask span {
+  font-weight: 600;
+}
+@media (max-width: 600px) {
+  .discovery-related-meta {
+    display: none;
+  }
+}

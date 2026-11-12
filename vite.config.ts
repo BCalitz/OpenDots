@@ -30,6 +30,7 @@ export default defineConfig({
   server: {
     strictPort: true,
     host: '127.0.0.1',
-    proxy: { '/api': 'http://127.0.0.1:4310' },
+    // PORT in the shell lets a second checkout run beside the first.
+    proxy: { '/api': `http://127.0.0.1:${process.env.PORT ?? 4310}` },
   },
 });

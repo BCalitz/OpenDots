@@ -93,6 +93,14 @@ export function discoveryRoutes(
         : null,
     });
   });
+  /** One item with its finding and links, for showing it from a chat. */
+  app.get('/inbox/events/:id', async (c) => {
+    const id = c.req.param('id');
+    const event = await store.event(id);
+    if (!event)
+      return c.json({ error: 'That item is no longer in the inbox.' }, 404);
+    return c.json({ event, links: await store.discovery.links(id) });
+  });
   app.get('/inbox/events/:id/links', async (c) =>
     c.json(await store.discovery.links(c.req.param('id'))),
   );

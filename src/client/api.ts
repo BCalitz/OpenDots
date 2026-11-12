@@ -1,8 +1,20 @@
-let token = sessionStorage.getItem('opendots-token') ?? '';
+// Storage can be missing (tests, server rendering) or blocked by the browser.
+function stored() {
+  try {
+    return sessionStorage.getItem('opendots-token') ?? '';
+  } catch {
+    return '';
+  }
+}
+let token = stored();
 export function setToken(value: string) {
   token = value;
-  if (value) sessionStorage.setItem('opendots-token', value);
-  else sessionStorage.removeItem('opendots-token');
+  try {
+    if (value) sessionStorage.setItem('opendots-token', value);
+    else sessionStorage.removeItem('opendots-token');
+  } catch {
+    // Kept for this page only.
+  }
 }
 export class ApiError extends Error {
   constructor(

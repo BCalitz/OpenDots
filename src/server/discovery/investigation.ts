@@ -40,7 +40,10 @@ export function investigationMessage(input: {
   raw?: unknown;
 }) {
   const { app, event, finding, referencedEvent, continuing } = input;
+  // The id lets the Dot read the item again with read_inbox_item, and the
+  // chat show it.
   const toItem = (e: InboxEventView, max = MAX_ITEM_TEXT) => ({
+    id: e.id,
     from: e.from,
     title: e.title,
     received: new Date(e.occurredAt).toISOString(),

@@ -41,6 +41,7 @@ const people = {
   pieter: 'Pieter van Wyk <pieter@globex.com>',
   digest: 'Tech Weekly <news@techweekly.example>',
   ayesha: 'Ayesha Patel <ayesha@talentbridge.co.za>',
+  sarah: 'Sarah Jacobs <sarah@harbourlogistics.co.za>',
 };
 interface Item {
   key: string;
@@ -405,6 +406,74 @@ const scenarios: Scenario[] = [
         why: 'only the owner can make the offer',
       },
       { linked: ['hire-4', 'hire-1'], why: 'the same candidate' },
+    ],
+  },
+  {
+    name: 'A quote request with history in mail and Teams',
+    items: [
+      {
+        key: 'quote-1',
+        source: 'mail',
+        ago: 12 * DAY,
+        title: 'Great to meet you at the Cape Town tech meetup',
+        summary:
+          "Hi, thanks for the chat at the meetup on Thursday. As I mentioned, Harbour Logistics' customer portal is showing its age: customers can't track shipments properly and invoices are emailed by hand. I'd love to talk about rebuilding it early next year. Sarah Jacobs, Operations Manager, Harbour Logistics",
+        from: people.sarah,
+      },
+      {
+        key: 'quote-2',
+        source: 'teams',
+        ago: 11 * DAY,
+        title: 'Harbour Logistics portal lead',
+        summary:
+          'Met Sarah Jacobs from Harbour Logistics at the meetup. They want to rebuild their customer portal (shipment tracking, invoices). Sipho, can you have a look at their current portal and give a rough size?',
+        from: people.lerato,
+      },
+      {
+        key: 'quote-3',
+        source: 'teams',
+        ago: 10 * DAY,
+        title: 'Re: Harbour Logistics portal lead',
+        summary:
+          'Had a look at the Harbour Logistics portal. Old PHP site; shipment tracking reads from their TMS, which has a REST API. A rebuild with tracking, invoices and a booking form is roughly 10 weeks, about R320,000. The TMS integration is the main risk.',
+        from: people.sipho,
+      },
+      {
+        key: 'quote-4',
+        source: 'mail',
+        ago: 3 * DAY,
+        title: 'Requirements for the Harbour Logistics portal (HL-PORTAL-2026)',
+        summary:
+          'As promised, our wish list for the new portal, reference HL-PORTAL-2026: live shipment tracking from our TMS, invoices and statements customers can download, and an online booking form. Around 400 customer accounts. Sarah Jacobs, Harbour Logistics',
+        from: people.sarah,
+      },
+      {
+        key: 'quote-5',
+        source: 'mail',
+        ago: 2 * HOUR,
+        title: 'Quote for our website rebuild, needed by Friday',
+        summary:
+          'Hi, could you send a rough quote and timeline for the portal rebuild (HL-PORTAL-2026) by Friday? Our board meets on Monday and I need to present options. Budget is roughly R250k to R400k. Happy to jump on a call Thursday morning if that helps. Thanks, Sarah Jacobs, Operations Manager, Harbour Logistics',
+        from: people.sarah,
+      },
+    ],
+    checks: [
+      {
+        key: 'quote-5',
+        attention: true,
+        asked: ['reply', 'action'],
+        urgencyAtLeast: 'tomorrow',
+        why: 'a client wants a quote by Friday',
+      },
+      {
+        linked: ['quote-5', 'quote-4'],
+        why: 'the same portal, HL-PORTAL-2026',
+      },
+      {
+        key: 'quote-2',
+        attention: false,
+        why: 'Lerato asks Sipho, not the owner',
+      },
     ],
   },
 ];

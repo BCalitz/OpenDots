@@ -27,6 +27,7 @@ import { DEFAULT_DISCOVERY_SETTINGS } from '../src/server/discovery/store.js';
 import type { PushMessage } from '../src/server/push.js';
 import { testDb } from './fixtures/db.js';
 import { investigationMessage } from '../src/server/discovery/investigation.js';
+import { parseDiscoveryMessage } from '../src/shared/discovery-message.js';
 
 describe('routing and delivery tables', () => {
   it('routes by what is asked and what the Dot may do', () => {
@@ -687,5 +688,22 @@ describe('handing an item to the Dot', () => {
     expect(message).toContain('"matched_by"');
     expect(message).toContain('"mentions"');
     expect(message).toContain('search_inbox');
+    // The chat shows this message as a card, read back from the text.
+    const card = parseDiscoveryMessage(message);
+    expect(card).toMatchObject({
+      item: { id: input.event.id, title: 'Question about INV-2041' },
+      history: [
+        {
+          id: input.history![0].event.id,
+          title: 'Invoice INV-2041 for March',
+          why: 'holds facts useful for answering',
+        },
+      ],
+      injection: false,
+    });
+    expect(card!.headline).toMatch(/^Discovery flagged this/);
+    expect(card!.ask).toMatch(/read-only/);
+    expect(card!.ask).not.toMatch(/search_inbox/);
+    expect(parseDiscoveryMessage('Just text, no quoted item.')).toBeNull();
   });
 });
