@@ -76,6 +76,24 @@ Only typed kinds steer discovery. Each active focus or mute adds one yes/no ques
 
 **Rough effort:** step 1 about 1–2 weeks, step 2 about 2 weeks, step 3 about 1 week.
 
+## Smoother to use
+
+Ideas taken from OpenAI Dots, Grok Bot and Claude Duet (all launched September to November 2026), and from where reviewers found them weak. OpenDots already beats them in places: discovery runs as items arrive (Duet checks every few hours), every flag has a reason (Grok's triggers are opaque), each item has one thread with a full run inspector (Duet's two halves lose context and keep no transcript), token caps stop runaway cost, and you can watch and take over the Dot's browser.
+
+1. **Fewer approvals.** Every review of these products complains about approval fatigue.
+   - "Always allow this" on an approval card saves a rule for that action (and optionally that recipient or app), so the next one runs without asking.
+   - One **Rules** page that lists every action as allow, ask first or block, merging today's MCP "Ask first" settings and discovery's per-app allowed list. Sending mail, payments and deletes cannot be set to allow without a typed confirmation.
+   - Approve several waiting items at once from the morning brief.
+2. **Honest when stuck.** When a task is blocked (a bot check, a login, the same tool failing twice), the Dot says what blocked it instead of presenting partial results as final, offers a way past it (take over the browser, use another account, ask you), and stops instead of looping. The turn ends with a "blocked" status the Activity view and push can show. Today the only guard is the iteration limit in `src/server/engine/index.ts`.
+3. **Activity view.** Per Dot: **In progress**, **Scheduled** and **Done**, in plain language ("Drafting a reply to Thandi about the invoice"), each with Watch, Pause and Stop, and blocked items at the top. Insights stays as the technical view behind it.
+4. **Waiting on others.** Discovery already reads each thread; it also records who owes the next step. "You owe a reply" stays in **For you**; "they owe you" goes to a **Waiting on others** list with how long it's been, and after a set time the Dot offers a polite follow-up draft. The Dot never nags you about something that is waiting on someone else, which is where Duet trips up.
+5. **Suggestions beyond the inbox** (with Personal attention step 2): deadlines in pages and tickets, stalled threads, unpaid invoices and meeting prep, offered as proposals with the same prepare, handle and not now choices. Each says why it was suggested.
+6. **Chief of staff Dot.** One Dot owns discovery and the morning brief, and hands each item to the specialist Dot for that area through delegation, which already exists. You talk to one Dot; specialists keep their own permissions.
+7. **Voice that can approve.** Voice reads drafts aloud and takes "yes, send it" as an approval after reading back exactly what will be sent. Only for items already waiting for approval; voice still cannot start a send on its own.
+8. **Onboarding** (with Personal attention step 3): the first-run question "What do you do, and what matters to you right now?", connecting your mail and calendar, and a first morning brief straight away, so the first five minutes show something useful.
+
+**Rough effort:** 1 about 1 week, 2 a few days, 3 about 1 week, 4 about 1 week, 5 inside step 2, 6 about 1–2 weeks, 7 about 1 week, 8 inside step 3.
+
 ## Learning (later)
 
 A nightly job groups finished threads by Dot and task type, asks a model to draft a skill (`SKILL.md`), and puts it in a review queue. Approved skills are loaded through the `load_skill` tool. Proposal decisions (prepare, handle, dismiss) and the labelled items in `discovery_findings` are the best training signal; the same data can train a small classifier (SetFit or ModernBERT) to take load off Jev.
@@ -104,12 +122,17 @@ Sending mail, accepting meetings on your behalf and closing tickets never go abo
 
 ## Build order
 
-| Next | Ships                                               | Rough effort |
-| ---- | --------------------------------------------------- | ------------ |
-| 1    | Personal attention step 1: focus, mute, away, notes | 1–2 weeks    |
-| 2    | Personal attention step 2: learned importance       | 2 weeks      |
-| 3    | Personal attention step 3: about you                | 1 week       |
-| 4    | Learning                                            | 3–6 weeks    |
+| Next | Ships                                                        | Why now                                            | Rough effort |
+| ---- | ------------------------------------------------------------ | -------------------------------------------------- | ------------ |
+| 1    | Fewer approvals and honest when stuck                        | Small, and felt every day                          | 1–2 weeks    |
+| 2    | Personal attention step 1: focus, mute, away, notes          | Makes discovery fit you                            | 1–2 weeks    |
+| 3    | Activity view                                                | Shows the blocked status from step 1               | 1 week       |
+| 4    | Waiting on others                                            | Uses discovery's threads; cuts noise               | 1 week       |
+| 5    | Personal attention step 2, with suggestions beyond the inbox | Needs the decisions recorded from steps 1–4        | 2–3 weeks    |
+| 6    | Chief of staff Dot                                           | Routing is easier once triage is personal          | 1–2 weeks    |
+| 7    | Voice that can approve                                       | Builds on the Rules page and approvals from step 1 | 1 week       |
+| 8    | Personal attention step 3, with onboarding                   | Best last: it shows off everything above           | 1–2 weeks    |
+| 9    | Learning                                                     | Needs months of decisions to learn from            | 3–6 weeks    |
 
 Tuning discovery's thresholds on real items can happen at any point, once the owner agrees to send mail text to TypeSafe.
 
@@ -118,4 +141,3 @@ Estimates assume one TypeScript developer working in this repo and exclude multi
 ## Open questions
 
 - Which ticket system comes first as a discovery source, and does it have an MCP server or API token we can use?
-- One "Chief of staff" Dot that triages everything, or route each event to the specialist Dot that owns that area?
