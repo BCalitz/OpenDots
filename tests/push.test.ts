@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { testDb } from './fixtures/db.js';
 import { createApp } from '../src/server/app.js';
 import { Store } from '../src/server/store.js';
 import { Runner } from '../src/server/runner.js';
@@ -10,8 +11,6 @@ import {
 } from '../src/server/push.js';
 
 const config: Config = { mode: 'sample', baseUrl: 'https://api.openai.com/v1' };
-const closers: { close(): void }[] = [];
-afterEach(() => closers.splice(0).forEach((item) => item.close()));
 const token = 'ExponentPushToken[abcdefghijklmnop]';
 const other = 'ExponentPushToken[qrstuvwxyz012345]';
 
@@ -33,18 +32,16 @@ function tickets(...statuses: ('ok' | 'gone')[]) {
       ),
   );
 }
-function service(fetchImpl: typeof fetch, previews = false) {
-  const push = new PushService(':memory:', { fetch: fetchImpl, previews });
-  closers.push(push);
-  return push;
+async function service(fetchImpl: typeof fetch, previews = false) {
+  return new PushService(await testDb(), { fetch: fetchImpl, previews });
 }
 
 describe('PushService', () => {
   it('sends one message per device to the Expo push service', async () => {
     const fetchImpl = tickets('ok', 'ok');
-    const push = service(fetchImpl as unknown as typeof fetch);
-    push.register({ token, platform: 'ios' });
-    push.register({ token: other, platform: 'android' });
+    const push = await service(fetchImpl as unknown as typeof fetch);
+    await push.register({ token, platform: 'ios' });
+    await push.register({ token: other, platform: 'android' });
 
     expect(
       await push.send({ title: 'T', body: 'B', data: { threadId: 'th' } }),
@@ -61,22 +58,26 @@ describe('PushService', () => {
   });
 
   it('forgets devices the push service reports as unregistered', async () => {
-    const push = service(tickets('gone', 'ok') as unknown as typeof fetch);
-    push.register({ token, platform: 'ios' });
-    push.register({ token: other, platform: 'android' });
+    const push = await service(
+      tickets('gone', 'ok') as unknown as typeof fetch,
+    );
+    await push.register({ token, platform: 'ios' });
+    await push.register({ token: other, platform: 'android' });
 
     expect(await push.send({ title: 'T', body: 'B', data: {} })).toEqual({
       sent: 1,
       failed: 1,
     });
-    expect(push.devices().map((device) => device.token)).toEqual([other]);
+    expect((await push.devices()).map((device) => device.token)).toEqual([
+      other,
+    ]);
   });
 
   it('does not throw when the push service is unreachable', async () => {
-    const push = service((async () => {
+    const push = await service((async () => {
       throw new Error('offline');
     }) as unknown as typeof fetch);
-    push.register({ token, platform: 'ios' });
+    await push.register({ token, platform: 'ios' });
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     expect(await push.send({ title: 'T', body: 'B', data: {} })).toEqual({
@@ -87,7 +88,7 @@ describe('PushService', () => {
 
   it('skips the network when no devices are registered', async () => {
     const fetchImpl = tickets();
-    const push = service(fetchImpl as unknown as typeof fetch);
+    const push = await service(fetchImpl as unknown as typeof fetch);
     expect(await push.send({ title: 'T', body: 'B', data: {} })).toEqual({
       sent: 0,
       failed: 0,
@@ -95,9 +96,9 @@ describe('PushService', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('hides result text unless previews are enabled', () => {
-    const quiet = service(tickets() as unknown as typeof fetch);
-    const loud = service(tickets() as unknown as typeof fetch, true);
+  it('hides result text unless previews are enabled', async () => {
+    const quiet = await service(tickets() as unknown as typeof fetch);
+    const loud = await service(tickets() as unknown as typeof fetch, true);
     const outcome = { text: 'GS-142 is overdue and assigned to you.' };
 
     expect(scheduledResultMessage(quiet, 'Scout', 'th', outcome)).toEqual({
@@ -118,10 +119,12 @@ describe('PushService', () => {
 });
 
 describe('push device routes', () => {
-  function fixture() {
-    const store = new Store(':memory:');
-    const push = service(tickets('ok') as unknown as typeof fetch);
-    closers.push(store);
+  async function fixture() {
+    const db = await testDb();
+    const store = new Store(db);
+    const push = new PushService(db, {
+      fetch: tickets('ok') as unknown as typeof fetch,
+    });
     const app = createApp({
       store,
       runner: new Runner(store, config),
@@ -142,7 +145,7 @@ describe('push device routes', () => {
   }
 
   it('requires the owner token', async () => {
-    const { app } = fixture();
+    const { app } = await fixture();
     const response = await app.request('/api/push/devices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -152,21 +155,21 @@ describe('push device routes', () => {
   });
 
   it('registers, tests and removes a device', async () => {
-    const { push, request } = fixture();
+    const { push, request } = await fixture();
     expect(
       (await request('/api/push/devices', 'POST', { token, platform: 'ios' }))
         .status,
     ).toBe(201);
-    expect(push.devices()).toHaveLength(1);
+    expect(await push.devices()).toHaveLength(1);
     expect((await request('/api/push/test', 'POST', {})).status).toBe(200);
     expect(
       (await request('/api/push/devices', 'DELETE', { token })).status,
     ).toBe(200);
-    expect(push.devices()).toHaveLength(0);
+    expect(await push.devices()).toHaveLength(0);
   });
 
   it('rejects malformed tokens', async () => {
-    const { request } = fixture();
+    const { request } = await fixture();
     expect(
       (
         await request('/api/push/devices', 'POST', {

@@ -1,14 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { testDb } from './fixtures/db.js';
 import { createApp } from '../src/server/app.js';
 import { Store } from '../src/server/store.js';
 import { Runner } from '../src/server/runner.js';
 import type { Config } from '../src/server/research.js';
 import { resolveAppOrigins } from '../src/server/app-origin.js';
-const stores: Store[] = [];
 const config: Config = { mode: 'sample', baseUrl: 'https://api.openai.com/v1' };
-function fixture(token?: string, origin?: string | string[]) {
-  const store = new Store(':memory:');
-  stores.push(store);
+async function fixture(token?: string, origin?: string | string[]) {
+  const store = new Store(await testDb());
   const runner = new Runner(store, config);
   return {
     store,
@@ -21,10 +20,9 @@ const json = (body: unknown) => ({
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
-afterEach(() => stores.splice(0).forEach((store) => store.close()));
 describe('API boundaries', () => {
   it('requires owner token for state and mutations when configured', async () => {
-    const { app } = fixture('private-token');
+    const { app } = await fixture('private-token');
     expect((await app.request('/api/state')).status).toBe(401);
     expect(
       (
@@ -35,7 +33,7 @@ describe('API boundaries', () => {
     ).toBe(200);
   });
   it('blocks browser cross-origin requests and form posts', async () => {
-    const { app } = fixture();
+    const { app } = await fixture();
     expect(
       (
         await app.request('/api/tasks', {
@@ -59,7 +57,7 @@ describe('API boundaries', () => {
   it.each(['http://localhost:5173', 'http://127.0.0.1:5173'])(
     'allows a same-origin Vite proxy mutation from %s',
     async (origin) => {
-      const { app } = fixture(
+      const { app } = await fixture(
         undefined,
         resolveAppOrigins(undefined, 'development'),
       );
@@ -81,7 +79,7 @@ describe('API boundaries', () => {
   ])(
     'rejects an unlisted origin %s with multiple origins configured',
     async (origin) => {
-      const { app } = fixture(
+      const { app } = await fixture(
         undefined,
         resolveAppOrigins(undefined, 'development'),
       );
@@ -100,7 +98,7 @@ describe('API boundaries', () => {
     },
   );
   it('rejects cross-site requests even from a configured origin', async () => {
-    const { app } = fixture(
+    const { app } = await fixture(
       undefined,
       resolveAppOrigins(undefined, 'development'),
     );
@@ -118,7 +116,7 @@ describe('API boundaries', () => {
     });
   });
   it('preserves exact matching for a single configured origin', async () => {
-    const { app } = fixture(undefined, 'http://localhost:5173');
+    const { app } = await fixture(undefined, 'http://localhost:5173');
     for (const [origin, status] of [
       ['http://localhost:5173', 201],
       ['http://127.0.0.1:5173', 403],
@@ -137,7 +135,7 @@ describe('API boundaries', () => {
   it.each(['http://localhost:5173', 'http://127.0.0.1:5173'])(
     'requires owner authentication for an allowed origin %s',
     async (origin) => {
-      const { app } = fixture(
+      const { app } = await fixture(
         'private-token',
         resolveAppOrigins(undefined, 'development'),
       );
@@ -160,7 +158,7 @@ describe('API boundaries', () => {
     },
   );
   it('rejects unrecognized hosts even when the origin is explicitly allowed', async () => {
-    const { app } = fixture(
+    const { app } = await fixture(
       undefined,
       resolveAppOrigins(undefined, 'development'),
     );
@@ -176,7 +174,10 @@ describe('API boundaries', () => {
     expect(await response.json()).toEqual({ error: 'Unrecognized host.' });
   });
   it('does not widen access when an explicit origin list contains only blank entries', async () => {
-    const { app } = fixture(undefined, resolveAppOrigins(' , ', 'development'));
+    const { app } = await fixture(
+      undefined,
+      resolveAppOrigins(' , ', 'development'),
+    );
     const response = await app.request('http://localhost:5173/api/tasks', {
       ...json({ prompt: 'test' }),
       headers: {
@@ -188,7 +189,7 @@ describe('API boundaries', () => {
     expect(response.status).toBe(403);
   });
   it('requires the request URL origin by default in production', async () => {
-    const { app } = fixture(
+    const { app } = await fixture(
       undefined,
       resolveAppOrigins(undefined, 'production'),
     );
@@ -208,7 +209,7 @@ describe('API boundaries', () => {
     }
   });
   it('validates inputs and enforces research permissions on the server', async () => {
-    const { app, store } = fixture();
+    const { app, store } = await fixture();
     expect(
       (await app.request('/api/tasks', json({ prompt: 'x' }))).status,
     ).toBe(400);
@@ -220,43 +221,43 @@ describe('API boundaries', () => {
         )
       ).status,
     ).toBe(400);
-    store.updateSettings({ researchAllowed: false });
+    await store.updateSettings({ researchAllowed: false });
     expect(
       (await app.request('/api/tasks', json({ prompt: 'Research' }))).status,
     ).toBe(403);
-    expect(store.claim()).toBeNull();
+    expect(await store.claim()).toBeNull();
   });
   it('runs a sample job from the durable queue and retains its result', async () => {
-    const { app, store, runner } = fixture();
+    const { app, store, runner } = await fixture();
     const response = await app.request(
       '/api/tasks',
       json({ prompt: 'Plan a quiet weekend' }),
     );
     expect(response.status).toBe(201);
     await runner.tick();
-    const task = store.tasks()[0];
+    const task = (await store.tasks())[0];
     expect(task.status).toBe('completed');
-    expect(store.detail(task.id)?.runs[0].result?.sample).toBe(true);
+    expect((await store.detail(task.id))?.runs[0].result?.sample).toBe(true);
   });
   it('persists memory edits and deletes', async () => {
-    const { app, store } = fixture();
+    const { app, store } = await fixture();
     await app.request('/api/memories', json({ text: 'Prefer short briefs' }));
-    const memory = store.memories()[0];
+    const memory = (await store.memories())[0];
     const updated = await app.request(`/api/memories/${memory.id}`, {
       ...json({ text: 'Prefer deep briefs' }),
       method: 'PUT',
     });
     expect(updated.status).toBe(200);
-    expect(store.memories()[0].text).toBe('Prefer deep briefs');
+    expect((await store.memories())[0].text).toBe('Prefer deep briefs');
     await app.request(`/api/memories/${memory.id}`, {
       ...json({}),
       method: 'DELETE',
     });
-    expect(store.memories()).toHaveLength(0);
+    expect(await store.memories()).toHaveLength(0);
   });
 });
 it('rejects DNS-rebinding Host even with a matching hostile Origin', async () => {
-  const { app } = fixture();
+  const { app } = await fixture();
   const response = await app.request('http://attacker.example/api/tasks', {
     ...json({ prompt: 'Sneaky task' }),
     headers: {

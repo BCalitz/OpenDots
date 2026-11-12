@@ -2,10 +2,14 @@ import { expect, it, vi } from 'vitest';
 import { WorkspaceStore } from '../src/server/workspace.js';
 import { PageService } from '../src/server/page-service.js';
 import { pageAccess } from '../src/server/page-tools.js';
+import { testDb } from './fixtures/db.js';
+
+const workspace = async () => WorkspaceStore.open(await testDb(), 'owner');
+
 it('reuses one actual Intelligence thread per page and Dot under concurrent requests', async () => {
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  const dot = ws.dots()[0];
-  const page = ws.pages.create(dot.spaceId, { title: 'Design' });
+  const ws = await workspace();
+  const dot = (await ws.dots())[0];
+  const page = await ws.pages.create(dot.spaceId, { title: 'Design' });
   const getOrCreateThread = vi.fn(async () => {});
   const sdk = {
     getOrCreateThread,
@@ -21,13 +25,12 @@ it('reuses one actual Intelligence thread per page and Dot under concurrent requ
   expect((await service.conversation(dot.spaceId, page.id, dot.id)).id).toBe(
     a.id,
   );
-  expect(ws.pages.forThread(a.id, dot.spaceId)?.id).toBe(page.id);
-  ws.close();
+  expect((await ws.pages.forThread(a.id, dot.spaceId))?.id).toBe(page.id);
 });
 it('exports canonical user/assistant text and rejects failed or oversized history without creating a page', async () => {
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  const dot = ws.dots()[0];
-  ws.bindThread('thread', dot.id, 'Thread');
+  const ws = await workspace();
+  const dot = (await ws.dots())[0];
+  await ws.bindThread('thread', dot.id, 'Thread');
   const getThreadMessages = vi.fn(async () => ({
     messages: [
       { role: 'user', content: [{ type: 'text', text: 'Question' }] },
@@ -52,38 +55,36 @@ it('exports canonical user/assistant text and rejects failed or oversized histor
   await expect(
     service.saveConversation('thread', 'Too long', null),
   ).rejects.toThrow(/exceeds/);
-  expect(ws.pages.list(dot.spaceId)).toHaveLength(1);
-  ws.close();
+  expect(await ws.pages.list(dot.spaceId)).toHaveLength(1);
 });
-it('scopes agent tools to the Dot Space and re-reads current context with CAS and pause enforcement', () => {
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  const dot = ws.dots()[0];
-  const other = ws.createSpace('Other', '');
-  const foreign = ws.pages.create(other.id, { title: 'Private' });
-  const page = ws.pages.create(dot.spaceId, { title: 'Here' });
-  ws.bindThread('thread', dot.id, 'Page');
-  ws.pages.reserveThread(page.id, dot.id, 'thread');
-  ws.pages.finishThread(page.id, dot.id);
+it('scopes agent tools to the Dot Space and re-reads current context with CAS and pause enforcement', async () => {
+  const ws = await workspace();
+  const dot = (await ws.dots())[0];
+  const other = await ws.createSpace('Other', '');
+  const foreign = await ws.pages.create(other.id, { title: 'Private' });
+  const page = await ws.pages.create(dot.spaceId, { title: 'Here' });
+  await ws.bindThread('thread', dot.id, 'Page');
+  await ws.pages.reserveThread(page.id, dot.id, 'thread');
+  await ws.pages.finishThread(page.id, dot.id);
   let paused = false;
-  const access = pageAccess(ws, dot.spaceId, 'thread', () => {
+  const access = await pageAccess(ws, dot.spaceId, 'thread', async () => {
     if (paused) throw new Error('Paused');
   });
-  expect(() => access.read(foreign.id)).toThrow();
-  access.edit(page.id, { expectedRevision: 1, content: 'Fresh' });
-  expect(access.context()?.content).toBe('Fresh');
-  expect(() =>
+  await expect(access.read(foreign.id)).rejects.toThrow();
+  await access.edit(page.id, { expectedRevision: 1, content: 'Fresh' });
+  expect((await access.context())?.content).toBe('Fresh');
+  await expect(
     access.edit(page.id, { expectedRevision: 1, content: 'Stale' }),
-  ).toThrow();
+  ).rejects.toThrow();
   paused = true;
-  expect(() => access.create({ title: 'No write' })).toThrow('Paused');
-  expect(ws.pages.list(dot.spaceId)).toHaveLength(1);
-  ws.close();
+  await expect(access.create({ title: 'No write' })).rejects.toThrow('Paused');
+  expect(await ws.pages.list(dot.spaceId)).toHaveLength(1);
 });
 it('recovers the same reserved thread after a restart lease and a remote-success retry', async () => {
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  const dot = ws.dots()[0];
-  const page = ws.pages.create(dot.spaceId, { title: 'Recover' });
-  ws.pages.reserveThread(page.id, dot.id, 'stable-thread');
+  const ws = await workspace();
+  const dot = (await ws.dots())[0];
+  const page = await ws.pages.create(dot.spaceId, { title: 'Recover' });
+  await ws.pages.reserveThread(page.id, dot.id, 'stable-thread');
   const sdk = {
     getOrCreateThread: vi.fn(async () => {}),
     getThreadMessages: async () => ({ messages: [] }),
@@ -103,13 +104,12 @@ it('recovers the same reserved thread after a restart lease and a remote-success
     }),
   );
   vi.restoreAllMocks();
-  ws.close();
 });
 it('rejects a specialist in another Space before Intelligence is accessed', async () => {
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  const dot = ws.dots()[0];
-  const space = ws.createSpace('Other', '');
-  const page = ws.pages.create(space.id, { title: 'Other' });
+  const ws = await workspace();
+  const dot = (await ws.dots())[0];
+  const space = await ws.createSpace('Other', '');
+  const page = await ws.pages.create(space.id, { title: 'Other' });
   const getSdk = vi.fn(() => {
     throw new Error('Should not contact provider');
   });
@@ -118,12 +118,11 @@ it('rejects a specialist in another Space before Intelligence is accessed', asyn
     /specialist in this Space/,
   );
   expect(getSdk).not.toHaveBeenCalled();
-  ws.close();
 });
 it('retries a failed provider creation with the same canonical reserved ID', async () => {
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  const dot = ws.dots()[0];
-  const page = ws.pages.create(dot.spaceId, { title: 'Retry' });
+  const ws = await workspace();
+  const dot = (await ws.dots())[0];
+  const page = await ws.pages.create(dot.spaceId, { title: 'Retry' });
   const getOrCreateThread = vi
     .fn(async () => {})
     .mockRejectedValueOnce(new Error('Remote response lost'));
@@ -134,19 +133,18 @@ it('retries a failed provider creation with the same canonical reserved ID', asy
   await expect(
     service.conversation(dot.spaceId, page.id, dot.id),
   ).rejects.toThrow('Remote response lost');
-  const reserved = ws.pages.thread(page.id, dot.id)!.threadId;
+  const reserved = (await ws.pages.thread(page.id, dot.id))!.threadId;
   const thread = await service.conversation(dot.spaceId, page.id, dot.id);
   expect(thread.id).toBe(reserved);
   expect(getOrCreateThread).toHaveBeenCalledTimes(2);
-  ws.close();
 });
 
 it('grants multiple Spaces without changing thread identity and enforces revocation on existing tools', async () => {
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  const dot = ws.dots()[0];
-  const other = ws.createSpace('Launch', '');
-  const page = ws.pages.create(other.id, { title: 'Brief' });
-  ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId, other.id] });
+  const ws = await workspace();
+  const dot = (await ws.dots())[0];
+  const other = await ws.createSpace('Launch', '');
+  const page = await ws.pages.create(other.id, { title: 'Brief' });
+  await ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId, other.id] });
   const service = new PageService(ws, () => ({
     getOrCreateThread: async () => {},
     getThreadMessages: async () => ({
@@ -154,27 +152,26 @@ it('grants multiple Spaces without changing thread identity and enforces revocat
     }),
   }));
   const thread = await service.conversation(other.id, page.id, dot.id);
-  const access = pageAccess(ws, dot.spaceId, thread.id, () => {});
-  expect(access.context()?.id).toBe(page.id);
-  expect(access.read(page.id).title).toBe('Brief');
-  expect(access.spaces()).toHaveLength(2);
+  const access = await pageAccess(ws, dot.spaceId, thread.id, async () => {});
+  expect((await access.context())?.id).toBe(page.id);
+  expect((await access.read(page.id)).title).toBe('Brief');
+  expect(await access.spaces()).toHaveLength(2);
   expect(
     (await service.saveConversation(thread.id, 'Copy', null)).spaceId,
   ).toBe(other.id);
-  ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId] });
-  expect(() => access.read(page.id, other.id)).toThrow(/access/);
-  expect(() =>
+  await ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId] });
+  await expect(access.read(page.id, other.id)).rejects.toThrow(/access/);
+  await expect(
     access.edit(page.id, { expectedRevision: 1, content: 'No' }, other.id),
-  ).toThrow(/access/);
+  ).rejects.toThrow(/access/);
   await expect(
     service.conversation(other.id, page.id, dot.id),
   ).rejects.toThrow();
   await expect(service.saveConversation(thread.id, 'No', null)).rejects.toThrow(
     /revoked/,
   );
-  ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId, other.id] });
+  await ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId, other.id] });
   expect((await service.conversation(other.id, page.id, dot.id)).id).toBe(
     thread.id,
   );
-  ws.close();
 });

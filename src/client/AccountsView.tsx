@@ -235,9 +235,9 @@ export function AccountsView({
           <Sparkles size={14} aria-hidden />{' '}
           {discovery.model.configured ? (
             <>
-              Discovery decides what needs you with <strong>Jev</strong>. A
-              Dot then looks into what it flags with read-only access and
-              suggests what to do. Nothing changes until you reply.
+              Discovery decides what needs you with <strong>Jev</strong>. A Dot
+              then looks into what it flags with read-only access and suggests
+              what to do. Nothing changes until you reply.
             </>
           ) : (
             <>

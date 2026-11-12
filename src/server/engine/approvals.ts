@@ -96,22 +96,22 @@ export class Approvals {
       if (onAbort) context.signal.removeEventListener('abort', onAbort);
       this.waiting.delete(view.id);
       // On shutdown the database is gone; the next start expires the row.
-      if (!this.closed)
-        await this.finish(view.id, status, announce).catch(() => undefined);
+      if (!this.closed) {
+        // Announce at once: a stopped turn closes its run right after this,
+        // and later events are dropped.
+        const final = status === 'pending' ? 'expired' : status;
+        const decidedAt = Date.now();
+        announce({ ...view, status: final, decidedAt });
+        await this.finish(view.id, final, decidedAt).catch(() => undefined);
+      }
     }
   }
 
-  private async finish(
-    id: string,
-    status: ApprovalStatus,
-    announce: (view: ApprovalView) => void,
-  ) {
+  private async finish(id: string, status: ApprovalStatus, decidedAt: number) {
     // A decision already wrote its own status; anything else expired.
     await this.db.run(
-      sql`UPDATE chat_approvals SET status=${status === 'pending' ? 'expired' : status}, decided_at=${Date.now()} WHERE id=${id} AND status='pending'`,
+      sql`UPDATE chat_approvals SET status=${status}, decided_at=${decidedAt} WHERE id=${id} AND status='pending'`,
     );
-    const final = await this.get(id);
-    if (final) announce(final);
   }
 
   /** Records the owner's decision and lets the waiting tool continue. */

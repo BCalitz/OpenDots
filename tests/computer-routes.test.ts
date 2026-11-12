@@ -1,17 +1,12 @@
-import { afterEach, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { WorkspaceStore } from '../src/server/workspace.js';
 import { ComputerService } from '../src/server/computer-service.js';
 import { computerRoutes } from '../src/server/computer-routes.js';
+import { testDb } from './fixtures/db.js';
 
-const stores: WorkspaceStore[] = [];
-afterEach(() => {
-  for (const store of stores.splice(0)) store.close();
-});
-
-function fixture() {
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  stores.push(workspace);
-  const id = workspace.dots()[0].id;
+async function fixture() {
+  const workspace = await WorkspaceStore.open(await testDb(), 'owner');
+  const id = (await workspace.dots())[0].id;
   const config = {
     baseUrl: 'https://example.com',
     voiceName: 'voice',
@@ -20,7 +15,7 @@ function fixture() {
   // No computer supervisor configured: `configured` is false, so any
   // action that reaches `allowed()` fails with a plain domain error
   // rather than attempting a network call.
-  const service = new ComputerService(workspace, config, () => false);
+  const service = new ComputerService(workspace, config, async () => false);
   const app = computerRoutes(service);
   return { workspace, id, app };
 }
@@ -28,10 +23,9 @@ function fixture() {
 // `configured: true`, so `allowed()` reaches its permission check instead of
 // failing earlier with "Computer service is not configured."; `transport` is
 // never called because `allowed()` throws before any network request.
-function configuredFixture() {
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  stores.push(workspace);
-  const id = workspace.dots()[0].id;
+async function configuredFixture() {
+  const workspace = await WorkspaceStore.open(await testDb(), 'owner');
+  const id = (await workspace.dots())[0].id;
   const config = {
     baseUrl: 'https://example.com',
     voiceName: 'voice',
@@ -46,7 +40,7 @@ function configuredFixture() {
   const service = new ComputerService(
     workspace,
     config,
-    () => false,
+    async () => false,
     transport,
   );
   const app = computerRoutes(service);
@@ -54,7 +48,7 @@ function configuredFixture() {
 }
 
 it('answers malformed JSON on the actions route with 400, not a service error', async () => {
-  const { app, id } = fixture();
+  const { app, id } = await fixture();
   const response = await app.request(`/dots/${id}/computer/actions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -65,7 +59,7 @@ it('answers malformed JSON on the actions route with 400, not a service error', 
 });
 
 it('answers an invalid action shape with 400 from the Zod schema', async () => {
-  const { app, id } = fixture();
+  const { app, id } = await fixture();
   const response = await app.request(`/dots/${id}/computer/actions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -76,7 +70,7 @@ it('answers an invalid action shape with 400 from the Zod schema', async () => {
 });
 
 it('answers an unconfigured computer service with 503, not 400', async () => {
-  const { app, id } = fixture();
+  const { app, id } = await fixture();
   const response = await app.request(`/dots/${id}/computer/start`, {
     method: 'POST',
   });
@@ -87,7 +81,7 @@ it('answers an unconfigured computer service with 503, not 400', async () => {
 });
 
 it('answers an unknown Dot id with 404, not a service error', async () => {
-  const { app } = fixture();
+  const { app } = await fixture();
   const response = await app.request('/dots/missing/computer/start', {
     method: 'POST',
   });
@@ -96,7 +90,7 @@ it('answers an unknown Dot id with 404, not a service error', async () => {
 });
 
 it('answers an unknown computer action with 400, not a service error', async () => {
-  const { app, id } = fixture();
+  const { app, id } = await fixture();
   const response = await app.request(`/dots/${id}/computer/actions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -107,8 +101,8 @@ it('answers an unknown computer action with 400, not a service error', async () 
 });
 
 it('answers a disabled computer permission with 403, not a service error', async () => {
-  const { app, id, workspace } = configuredFixture();
-  workspace.computers.patch(id, { enabled: false });
+  const { app, id, workspace } = await configuredFixture();
+  await workspace.computers.patch(id, { enabled: false });
   const response = await app.request(`/dots/${id}/computer/take`, {
     method: 'POST',
   });
@@ -121,11 +115,10 @@ it('answers a disabled computer permission with 403, not a service error', async
 // `stateSchema`/`controlSchema` also validate the supervisor's own response,
 // so a malformed upstream body must not be mistaken for the caller's fault:
 // it is a service failure (503), not an invalid request (400).
-function upstreamFixture(responses: Record<string, unknown>) {
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  stores.push(workspace);
-  const id = workspace.dots()[0].id;
-  workspace.computers.patch(id, { enabled: true, browser: true });
+async function upstreamFixture(responses: Record<string, unknown>) {
+  const workspace = await WorkspaceStore.open(await testDb(), 'owner');
+  const id = (await workspace.dots())[0].id;
+  await workspace.computers.patch(id, { enabled: true, browser: true });
   const config = {
     baseUrl: 'https://example.com',
     voiceName: 'voice',
@@ -143,7 +136,7 @@ function upstreamFixture(responses: Record<string, unknown>) {
   const service = new ComputerService(
     workspace,
     config,
-    () => false,
+    async () => false,
     transport,
   );
   const app = computerRoutes(service);
@@ -151,7 +144,7 @@ function upstreamFixture(responses: Record<string, unknown>) {
 }
 
 it('answers a malformed supervisor ensure response with 503, not a caller validation error', async () => {
-  const { app, id } = upstreamFixture({ '/ensure': {} });
+  const { app, id } = await upstreamFixture({ '/ensure': {} });
   const response = await app.request(`/dots/${id}/computer/start`, {
     method: 'POST',
   });
@@ -162,7 +155,7 @@ it('answers a malformed supervisor ensure response with 503, not a caller valida
 });
 
 it('answers a malformed supervisor listing response with 503, not a caller validation error', async () => {
-  const { app, id } = upstreamFixture({
+  const { app, id } = await upstreamFixture({
     '/computers': { computers: [{ botId: 'placeholder' }] },
   });
   const response = await app.request(`/dots/${id}/computer/actions`, {

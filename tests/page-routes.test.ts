@@ -4,17 +4,14 @@ import { WorkspaceStore } from '../src/server/workspace.js';
 import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
-const cleanup: (() => void)[] = [];
-afterEach(() => cleanup.splice(0).forEach((fn) => fn()));
-function fixture(ownerToken?: string) {
-  const store = new Store(':memory:');
-  const ws = new WorkspaceStore(':memory:', 'owner');
-  cleanup.push(() => {
-    store.close();
-    ws.close();
-  });
+import { testDb } from './fixtures/db.js';
+afterEach(() => vi.restoreAllMocks());
+async function fixture(ownerToken?: string) {
+  const db = await testDb();
+  const store = new Store(db);
+  const ws = await WorkspaceStore.open(db, 'owner');
   const config = { mode: 'live' as const, baseUrl: 'https://example.com' };
-  const platform = new Platform(store, ws, {
+  const platform = await Platform.create(store, ws, {
     baseUrl: config.baseUrl,
     voiceName: 'marin',
     slackUsers: [],
@@ -38,8 +35,8 @@ const request = (body: unknown, method = 'POST') => ({
 });
 
 it('supports manual pages without credentials and returns validation, scope and conflict statuses', async () => {
-  const { ws, app } = fixture();
-  const space = ws.spaces()[0].id;
+  const { ws, app } = await fixture();
+  const space = (await ws.spaces())[0].id;
   const path = `/api/spaces/${space}/pages`;
   expect((await app.request(path, request({ title: '' }))).status).toBe(400);
   expect((await app.request('/api/spaces/missing/pages')).status).toBe(404);
@@ -66,11 +63,11 @@ it('supports manual pages without credentials and returns validation, scope and 
     (
       await app.request(
         `${path}/${page.id}/conversation`,
-        request({ dotId: ws.dots()[0].id }),
+        request({ dotId: (await ws.dots())[0].id }),
       )
     ).status,
   ).toBe(503);
-  expect(ws.pages.get(space, page.id).content).toBe('First');
+  expect((await ws.pages.get(space, page.id)).content).toBe('First');
   expect(
     (
       await app.request(path, {
@@ -82,8 +79,8 @@ it('supports manual pages without credentials and returns validation, scope and 
   ).toBe(400);
 });
 it('keeps page routes behind owner authentication and browser origin checks', async () => {
-  const { ws, app } = fixture('owner-secret');
-  const path = `/api/spaces/${ws.spaces()[0].id}/pages`;
+  const { ws, app } = await fixture('owner-secret');
+  const path = `/api/spaces/${(await ws.spaces())[0].id}/pages`;
   expect((await app.request(path)).status).toBe(401);
   expect(
     (
@@ -107,8 +104,8 @@ it('keeps page routes behind owner authentication and browser origin checks', as
 });
 
 it('answers malformed JSON and invalid Space access with 400 on workspace routes', async () => {
-  const { ws, app } = fixture();
-  const dot = ws.dots()[0];
+  const { ws, app } = await fixture();
+  const dot = (await ws.dots())[0];
   for (const path of ['/api/spaces', '/api/dots', '/api/conversations']) {
     const response = await app.request(path, {
       method: 'POST',
@@ -142,7 +139,7 @@ it('answers malformed JSON and invalid Space access with 400 on workspace routes
 });
 
 it('keeps upstream JSON parsing failures on workspace routes as 503', async () => {
-  const { ws, app } = fixture();
+  const { ws, app } = await fixture();
   vi.spyOn(ws, 'createSpace').mockImplementation(() => {
     throw new SyntaxError('Unexpected token in upstream response');
   });
@@ -154,15 +151,15 @@ it('keeps upstream JSON parsing failures on workspace routes as 503', async () =
 });
 
 it('deletes pages through the API and returns 404 for missing pages or spaces', async () => {
-  const { ws, app } = fixture();
-  const space = ws.spaces()[0].id;
-  const page = ws.pages.create(space, { title: 'To Delete' });
+  const { ws, app } = await fixture();
+  const space = (await ws.spaces())[0].id;
+  const page = await ws.pages.create(space, { title: 'To Delete' });
   const path = `/api/spaces/${space}/pages/${page.id}`;
 
   const res = await app.request(path, request(undefined, 'DELETE'));
   expect(res.status).toBe(200);
   expect(await res.json()).toEqual({ ok: true });
-  expect(ws.pages.list(space)).toHaveLength(0);
+  expect(await ws.pages.list(space)).toHaveLength(0);
 
   const missing = await app.request(path, request(undefined, 'DELETE'));
   expect(missing.status).toBe(404);
@@ -184,7 +181,7 @@ it.each([
 ])(
   'returns 404 for an unknown conversation on %s %s',
   async (method, suffix) => {
-    const { app } = fixture();
+    const { app } = await fixture();
     const body = { title: 'Draft' };
     const response = await app.request(
       `/api/conversations/missing${suffix}`,
@@ -203,8 +200,12 @@ it.each([
 ])(
   'keeps real conversation store failures as 503 without exposing details: %s',
   async (error) => {
-    const { ws, app, platform } = fixture();
-    ws.bindThread('valid-thread', ws.dots()[0].id, 'Conversation');
+    const { ws, app, platform } = await fixture();
+    await ws.bindThread(
+      'valid-thread',
+      (await ws.dots())[0].id,
+      'Conversation',
+    );
     vi.spyOn(platform.pages, 'saveConversation').mockRejectedValueOnce(error);
     const response = await app.request(
       '/api/conversations/valid-thread/page',
@@ -219,9 +220,9 @@ it.each([
 );
 
 it('keeps page conversation response parsing failures as 503', async () => {
-  const { ws, app, platform } = fixture();
-  const dot = ws.dots()[0];
-  const page = ws.pages.create(dot.spaceId, { title: 'Document' });
+  const { ws, app, platform } = await fixture();
+  const dot = (await ws.dots())[0];
+  const page = await ws.pages.create(dot.spaceId, { title: 'Document' });
   vi.spyOn(platform.pages, 'conversation').mockRejectedValueOnce(
     new SyntaxError('Unexpected token in provider secret'),
   );
@@ -244,7 +245,7 @@ it.each([
 ])(
   'rejects malformed request JSON before any page operation on %s %s',
   async (method, path) => {
-    const { app, platform, ws } = fixture();
+    const { app, platform, ws } = await fixture();
     const conversation = vi.spyOn(platform.pages, 'conversation');
     const save = vi.spyOn(platform.pages, 'saveConversation');
     const create = vi.spyOn(ws.pages, 'create');
@@ -262,7 +263,7 @@ it.each([
 );
 
 it('answers 404, not 503, for a conversation or call that does not exist', async () => {
-  const { app } = fixture();
+  const { app } = await fixture();
   for (const path of [
     '/api/conversations/missing/capture',
     '/api/voice/calls/missing',

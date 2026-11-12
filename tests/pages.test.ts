@@ -1,179 +1,169 @@
 import { expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { WorkspaceStore } from '../src/server/workspace.js';
-it('persists nested page content and revision across restart', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dots-pages-'));
-  let store = new WorkspaceStore(join(dir, 'db'), 'owner');
-  const space = store.spaces()[0].id;
-  const parent = store.pages.create(space, {
+import { sql } from '../src/server/db/index.js';
+import { testDb } from './fixtures/db.js';
+
+it('persists nested page content and revision across restart', async () => {
+  const db = await testDb();
+  let store = await WorkspaceStore.open(db, 'owner');
+  const space = (await store.spaces())[0].id;
+  const parent = await store.pages.create(space, {
     title: 'Plan',
     content: 'A plan',
   });
-  const child = store.pages.create(space, {
+  const child = await store.pages.create(space, {
     title: 'Detail',
     parentId: parent.id,
   });
-  store.pages.update(space, child.id, {
+  await store.pages.update(space, child.id, {
     expectedRevision: 1,
     title: 'New detail',
     content: 'Markdown **body**',
   });
-  store.close();
-  store = new WorkspaceStore(join(dir, 'db'), 'owner');
-  expect(store.pages.get(space, child.id)).toMatchObject({
+  store = await WorkspaceStore.open(db, 'owner');
+  expect(await store.pages.get(space, child.id)).toMatchObject({
     title: 'New detail',
     content: 'Markdown **body**',
     revision: 2,
     parentId: parent.id,
   });
-  store.close();
-  rmSync(dir, { recursive: true });
 });
-it('rejects cross-space parents, cycles and stale writes without losing content', () => {
-  const store = new WorkspaceStore(':memory:', 'owner');
-  const a = store.spaces()[0].id;
-  const b = store.createSpace('Other', '').id;
-  const root = store.pages.create(a, { title: 'Root' });
-  const child = store.pages.create(a, { title: 'Child', parentId: root.id });
-  expect(() =>
+it('rejects cross-space parents, cycles and stale writes without losing content', async () => {
+  const store = await WorkspaceStore.open(await testDb(), 'owner');
+  const a = (await store.spaces())[0].id;
+  const b = (await store.createSpace('Other', '')).id;
+  const root = await store.pages.create(a, { title: 'Root' });
+  const child = await store.pages.create(a, {
+    title: 'Child',
+    parentId: root.id,
+  });
+  await expect(
     store.pages.create(b, { title: 'Wrong', parentId: root.id }),
-  ).toThrow();
-  expect(() =>
+  ).rejects.toThrow();
+  await expect(
     store.pages.update(a, root.id, { expectedRevision: 1, parentId: child.id }),
-  ).toThrow();
-  store.pages.update(a, root.id, { expectedRevision: 1, content: 'New' });
-  expect(() =>
+  ).rejects.toThrow();
+  await store.pages.update(a, root.id, { expectedRevision: 1, content: 'New' });
+  await expect(
     store.pages.update(a, root.id, { expectedRevision: 1, content: 'Stale' }),
-  ).toThrow(/changed/);
-  expect(store.pages.get(a, root.id).content).toBe('New');
-  expect(() => store.pages.get(b, root.id)).toThrow();
-  store.close();
+  ).rejects.toThrow(/changed/);
+  expect((await store.pages.get(a, root.id)).content).toBe('New');
+  await expect(store.pages.get(b, root.id)).rejects.toThrow();
 });
-it('migrates review receipts and retains their original draft after restart', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dots-reviews-'));
-  const path = join(dir, 'db');
-  const legacy = new DatabaseSync(path);
-  legacy.exec(
-    'CREATE TABLE page_reviews(threadId TEXT NOT NULL, toolCallId TEXT NOT NULL, pageId TEXT NOT NULL, spaceId TEXT NOT NULL, PRIMARY KEY(threadId,toolCallId))',
-  );
-  legacy.close();
-  let store = new WorkspaceStore(path, 'owner');
-  const space = store.spaces()[0].id;
-  store.pages.createReviewed(
+it('retains review receipts and their original draft after restart', async () => {
+  const db = await testDb();
+  let store = await WorkspaceStore.open(db, 'owner');
+  const space = (await store.spaces())[0].id;
+  await store.pages.createReviewed(
     space,
     { title: 'Original', content: 'Reviewed content' },
     'thread',
     'call',
   );
-  const olderPage = store.pages.create(space, {
+  const olderPage = await store.pages.create(space, {
     title: 'Earlier approval',
     content: 'Earlier draft',
   });
-  store.close();
-  const oldReceipt = new DatabaseSync(path);
-  oldReceipt
-    .prepare(
-      'INSERT INTO page_reviews (threadId,toolCallId,pageId,spaceId) VALUES (?,?,?,?)',
-    )
-    .run('earlier-thread', 'earlier-call', olderPage.id, space);
-  oldReceipt.close();
-  store = new WorkspaceStore(path, 'owner');
-  expect(store.pages.reviewReceipt('thread', 'call')?.draft).toMatchObject({
+  // A receipt from before drafts were stored has no draft.
+  await db.run(
+    sql`INSERT INTO page_reviews (thread_id, tool_call_id, page_id, space_id) VALUES ('earlier-thread', 'earlier-call', ${olderPage.id}, ${space})`,
+  );
+  store = await WorkspaceStore.open(db, 'owner');
+  expect(
+    (await store.pages.reviewReceipt('thread', 'call'))?.draft,
+  ).toMatchObject({
     title: 'Original',
     content: 'Reviewed content',
     spaceId: space,
   });
-  expect(() =>
+  await expect(
     store.pages.createReviewed(
       space,
       { title: 'Changed', content: 'Reviewed content' },
       'thread',
       'call',
     ),
-  ).toThrow('different draft');
+  ).rejects.toThrow('different draft');
   expect(
-    store.pages.reviewReceipt('earlier-thread', 'earlier-call')?.draft,
+    (await store.pages.reviewReceipt('earlier-thread', 'earlier-call'))?.draft,
   ).toBeNull();
   expect(
-    store.pages.createReviewed(
-      space,
-      { title: 'Earlier approval', content: 'Earlier draft' },
-      'earlier-thread',
-      'earlier-call',
+    (
+      await store.pages.createReviewed(
+        space,
+        { title: 'Earlier approval', content: 'Earlier draft' },
+        'earlier-thread',
+        'earlier-call',
+      )
     ).id,
   ).toBe(olderPage.id);
-  store.close();
-  rmSync(dir, { recursive: true });
 });
 
-it('deletes a page and reparents descendants safely', () => {
-  const store = new WorkspaceStore(':memory:', 'owner');
-  const space = store.spaces()[0].id;
-  const root = store.pages.create(space, { title: 'Root' });
-  const child = store.pages.create(space, {
+it('deletes a page and reparents descendants safely', async () => {
+  const store = await WorkspaceStore.open(await testDb(), 'owner');
+  const space = (await store.spaces())[0].id;
+  const root = await store.pages.create(space, { title: 'Root' });
+  const child = await store.pages.create(space, {
     title: 'Child',
     parentId: root.id,
   });
-  const grandChild = store.pages.create(space, {
+  const grandChild = await store.pages.create(space, {
     title: 'Grandchild',
     parentId: child.id,
   });
 
   // Verify deletion of child: grandChild should be reparented to root
-  expect(store.pages.delete(space, child.id)).toBe(true);
-  expect(store.pages.delete(space, child.id)).toBe(false);
-  expect(() => store.pages.get(space, child.id)).toThrow();
-  expect(store.pages.get(space, grandChild.id).parentId).toBe(root.id);
+  expect(await store.pages.delete(space, child.id)).toBe(true);
+  expect(await store.pages.delete(space, child.id)).toBe(false);
+  await expect(store.pages.get(space, child.id)).rejects.toThrow();
+  expect((await store.pages.get(space, grandChild.id)).parentId).toBe(root.id);
   // Reparenting bumps the revision so clients holding the old parent resync.
-  expect(store.pages.get(space, grandChild.id).revision).toBe(
+  expect((await store.pages.get(space, grandChild.id)).revision).toBe(
     grandChild.revision + 1,
   );
 
   // Verify deletion of root: grandChild should be reparented to null (root level)
-  expect(store.pages.delete(space, root.id)).toBe(true);
-  expect(store.pages.get(space, grandChild.id).parentId).toBeNull();
-  expect(store.pages.list(space)).toHaveLength(1);
-  expect(store.pages.list(space)[0].id).toBe(grandChild.id);
+  expect(await store.pages.delete(space, root.id)).toBe(true);
+  expect((await store.pages.get(space, grandChild.id)).parentId).toBeNull();
+  expect(await store.pages.list(space)).toHaveLength(1);
+  expect((await store.pages.list(space))[0].id).toBe(grandChild.id);
 
   // Missing space throws
-  expect(() => store.pages.delete('non-existent-space', grandChild.id)).toThrow(
-    /Space not found/,
-  );
-  store.close();
+  await expect(
+    store.pages.delete('non-existent-space', grandChild.id),
+  ).rejects.toThrow(/Space not found/);
 });
 
-it('drops page thread bindings on delete and never recreates a page from a retried review', () => {
-  const store = new WorkspaceStore(':memory:', 'owner');
-  const space = store.spaces()[0].id;
-  const page = store.pages.create(space, { title: 'Draft' });
-  store.pages.reserveThread(page.id, 'dot', 'thread-1');
-  store.pages.finishThread(page.id, 'dot');
-  expect(store.pages.thread(page.id, 'dot')).toBeDefined();
-  expect(store.pages.delete(space, page.id)).toBe(true);
-  expect(store.pages.thread(page.id, 'dot')).toBeUndefined();
+it('drops page thread bindings on delete and never recreates a page from a retried review', async () => {
+  const store = await WorkspaceStore.open(await testDb(), 'owner');
+  const space = (await store.spaces())[0].id;
+  const page = await store.pages.create(space, { title: 'Draft' });
+  await store.pages.reserveThread(page.id, 'dot', 'thread-1');
+  await store.pages.finishThread(page.id, 'dot');
+  expect(await store.pages.thread(page.id, 'dot')).toBeDefined();
+  expect(await store.pages.delete(space, page.id)).toBe(true);
+  expect(await store.pages.thread(page.id, 'dot')).toBeUndefined();
 
-  const reviewed = store.pages.createReviewed(
+  const reviewed = await store.pages.createReviewed(
     space,
     { title: 'Reviewed', content: 'Reviewed content' },
     'review-thread',
     'call-1',
   );
-  expect(store.pages.delete(space, reviewed.id)).toBe(true);
-  expect(store.pages.reviewReceipt('review-thread', 'call-1')).toMatchObject({
+  expect(await store.pages.delete(space, reviewed.id)).toBe(true);
+  expect(
+    await store.pages.reviewReceipt('review-thread', 'call-1'),
+  ).toMatchObject({
     pageId: reviewed.id,
     spaceId: space,
   });
-  expect(() =>
+  await expect(
     store.pages.createReviewed(
       space,
       { title: 'Reviewed', content: 'Reviewed content' },
       'review-thread',
       'call-1',
     ),
-  ).toThrow(/Page not found/);
-  expect(store.pages.list(space)).toHaveLength(0);
-  store.close();
+  ).rejects.toThrow(/Page not found/);
+  expect(await store.pages.list(space)).toHaveLength(0);
 });

@@ -2,8 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { Store } from '../src/server/store.js';
-import { WorkspaceStore } from '../src/server/workspace.js';
+import { testWorkspace } from './fixtures/db.js';
 import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
@@ -61,9 +60,8 @@ function ticketServer(tickets: Ticket[]) {
 }
 
 async function engineFixture(tickets: Ticket[], paused = false) {
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  resources.push(() => workspace.close());
-  const dot = workspace.dots()[0];
+  const { workspace } = await testWorkspace();
+  const dot = (await workspace.dots())[0];
   const server = ticketServer(tickets);
   const connections = new ConnectionService(
     workspace.connections,
@@ -75,12 +73,12 @@ async function engineFixture(tickets: Ticket[], paused = false) {
   });
   const state = { paused };
   const engine = new InboxEngine(workspace.inbox, connections, {
-    paused: () => state.paused,
+    paused: async () => state.paused,
   });
   resources.push(() => engine.stop());
   const batches: NewEvents[] = [];
   engine.onEvents((batch) => void batches.push(batch));
-  const { source } = workspace.inbox.create({
+  const { source } = await workspace.inbox.create({
     name: 'My tickets',
     kind: 'ticket',
     type: 'mcp',
@@ -128,7 +126,7 @@ it('polls a read-only MCP list tool, dedupes, and resumes from its cursor', asyn
   expect(server.calls).toHaveLength(1);
 
   tickets.push({ id: 'T-3', title: 'Client X escalation', priority: 'High' });
-  workspace.inbox.pollNow(source.id);
+  await workspace.inbox.pollNow(source.id);
   await engine.tick();
   expect(server.calls).toHaveLength(2);
   expect(Date.parse(String(server.calls[1].since))).toBeGreaterThan(
@@ -138,15 +136,13 @@ it('polls a read-only MCP list tool, dedupes, and resumes from its cursor', asyn
   expect(batches[1]).toMatchObject({ initial: false });
   expect(batches[1].events.map((event) => event.externalId)).toEqual(['T-3']);
 
-  const [view] = workspace.inbox.sources();
+  const [view] = await workspace.inbox.sources();
   expect(view).toMatchObject({ eventCount: 3, newCount: 3, lastError: null });
   // Sorted by importance, then newest.
-  expect(workspace.inbox.events().map((event) => event.externalId)).toEqual([
-    'T-1',
-    'T-3',
-    'T-2',
-  ]);
-  expect(workspace.inbox.payload(batches[1].events[0].id)).toMatchObject({
+  expect(
+    (await workspace.inbox.events()).map((event) => event.externalId),
+  ).toEqual(['T-1', 'T-3', 'T-2']);
+  expect(await workspace.inbox.payload(batches[1].events[0].id)).toMatchObject({
     id: 'T-3',
   });
 });
@@ -155,7 +151,7 @@ it('records an error instead of running a tool that needs approval', async () =>
   const { workspace, engine, connection, dot, batches } = await engineFixture(
     [],
   );
-  const { source } = workspace.inbox.create({
+  const { source } = await workspace.inbox.create({
     name: 'Bad',
     kind: 'ticket',
     type: 'mcp',
@@ -169,11 +165,13 @@ it('records an error instead of running a tool that needs approval', async () =>
     },
   });
   // Disable the good source so the bad one is due first.
-  for (const other of workspace.inbox.sources())
+  for (const other of await workspace.inbox.sources())
     if (other.id !== source.id)
-      workspace.inbox.update(other.id, { enabled: false });
+      await workspace.inbox.update(other.id, { enabled: false });
   await engine.tick();
-  expect(workspace.inbox.source(source.id)?.lastError).toMatch(/approval/);
+  expect((await workspace.inbox.source(source.id))?.lastError).toMatch(
+    /approval/,
+  );
   expect(batches).toHaveLength(0);
 });
 
@@ -181,16 +179,18 @@ it('leases a source to one poller and waits while Dots are paused', async () => 
   const { workspace, engine, state, server } = await engineFixture([
     { id: 'T-1', title: 'One', priority: 'normal' },
   ]);
-  const claim = workspace.inbox.claimDue();
+  const claim = await workspace.inbox.claimDue();
   expect(claim).toBeDefined();
-  expect(workspace.inbox.claimDue()).toBeUndefined();
+  expect(await workspace.inbox.claimDue()).toBeUndefined();
   // An expired lease can be claimed again.
-  expect(workspace.inbox.claimDue(Date.now() + 10 * 60_000)).toBeDefined();
-  expect(workspace.inbox.finishPoll(claim!, {})).toBe(false);
+  expect(
+    await workspace.inbox.claimDue(Date.now() + 10 * 60_000),
+  ).toBeDefined();
+  expect(await workspace.inbox.finishPoll(claim!, {})).toBe(false);
 
   state.paused = true;
-  for (const source of workspace.inbox.sources())
-    workspace.inbox.pollNow(source.id);
+  for (const source of await workspace.inbox.sources())
+    await workspace.inbox.pollNow(source.id);
   await engine.tick();
   expect(server.calls).toHaveLength(0);
 });
@@ -289,20 +289,15 @@ it('pushes only for events above the threshold and never for the backfill', asyn
 
 it('accepts webhook deliveries with the source secret, not the owner token', async () => {
   const ownerToken = 'owner-token-that-is-long-enough';
-  const store = new Store(':memory:');
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  const platform = new Platform(store, workspace, {
+  const { store, workspace } = await testWorkspace();
+  const platform = await Platform.create(store, workspace, {
     apiKey: 'fixture',
     model: 'custom-model',
     baseUrl: 'https://unused.invalid/v1',
     voiceName: 'marin',
     slackUsers: [],
   });
-  resources.push(async () => {
-    await platform.stop();
-    store.close();
-    workspace.close();
-  });
+  resources.push(() => platform.stop());
   const config = {
     mode: 'live' as const,
     baseUrl: 'https://unused.invalid/v1',
@@ -399,20 +394,15 @@ it('accepts webhook deliveries with the source secret, not the owner token', asy
 });
 
 it('only accepts MCP sources whose tool can run without asking', async () => {
-  const store = new Store(':memory:');
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  const platform = new Platform(store, workspace, {
+  const { store, workspace } = await testWorkspace();
+  const platform = await Platform.create(store, workspace, {
     apiKey: 'fixture',
     model: 'custom-model',
     baseUrl: 'https://unused.invalid/v1',
     voiceName: 'marin',
     slackUsers: [],
   });
-  resources.push(async () => {
-    await platform.stop();
-    store.close();
-    workspace.close();
-  });
+  resources.push(() => platform.stop());
   const config = {
     mode: 'live' as const,
     baseUrl: 'https://unused.invalid/v1',
@@ -423,7 +413,7 @@ it('only accepts MCP sources whose tool can run without asking', async () => {
     config,
     platform,
   });
-  const dot = workspace.dots()[0];
+  const dot = (await workspace.dots())[0];
   const tool = (name: string, requiresApproval: boolean) => ({
     name,
     title: name,
@@ -433,7 +423,7 @@ it('only accepts MCP sources whose tool can run without asking', async () => {
     enabled: true,
     requiresApproval,
   });
-  const connection = workspace.connections.create(
+  const connection = await workspace.connections.create(
     dot.id,
     { name: 'Tickets', url: 'https://tickets.invalid/mcp' },
     [tool('list_my_tickets', false), tool('close_ticket', true)],

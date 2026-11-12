@@ -1,7 +1,4 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { DotEngine } from '../src/server/engine/index.js';
 import { ThreadRunner } from '../src/server/engine/thread-runner.js';
 import {
@@ -10,29 +7,33 @@ import {
 } from '../src/server/platform-config.js';
 import { Runner } from '../src/server/runner.js';
 import { Store } from '../src/server/store.js';
-import { WorkspaceStore } from '../src/server/workspace.js';
+import { testDb, testWorkspace } from './fixtures/db.js';
 
 const composio = vi.hoisted(() => ({ session: vi.fn() }));
 vi.mock('../src/server/composio.js', () => ({
   composioSession: composio.session,
 }));
 
-const resources: Array<{ close(): void }> = [];
-function sharedStores() {
-  const dir = mkdtempSync(join(tmpdir(), 'opendots-timeout-'));
-  const path = join(dir, 'test.sqlite');
-  const first = new Store(path);
-  const second = new Store(path);
-  resources.push(first, second, {
-    close: () => rmSync(dir, { recursive: true, force: true }),
-  });
-  return { first, second };
+/** Two workers' stores on one database. */
+async function sharedStores() {
+  const db = await testDb();
+  return { first: new Store(db), second: new Store(db) };
 }
+// Database I/O needs real immediates and ticks; only fake the clocks.
+const fakeTimers = () =>
+  vi.useFakeTimers({
+    toFake: [
+      'setTimeout',
+      'clearTimeout',
+      'setInterval',
+      'clearInterval',
+      'Date',
+    ],
+  });
 afterEach(() => {
   vi.restoreAllMocks();
   composio.session.mockReset();
   vi.useRealTimers();
-  resources.splice(0).forEach((resource) => resource.close());
 });
 
 it('uses 90 seconds by default and accepts a positive integer override', () => {
@@ -49,15 +50,13 @@ it('rejects invalid timeout overrides at startup', () => {
     ).toThrow(/AGENT_RUN_TIMEOUT_MS/);
 });
 
-function composioEngine(timeout?: number) {
-  const store = new Store(':memory:');
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  const runner = new ThreadRunner(':memory:', 'owner');
-  resources.push(runner, store, workspace);
-  const dot = workspace.dots()[0];
-  store.updateSettings({ appsAllowed: true });
-  workspace.updateDot(dot.id, { ...dot, appsAllowed: true });
-  workspace.bindThread('thread', dot.id, 'Timeout test');
+async function composioEngine(timeout?: number) {
+  const { db, store, workspace } = await testWorkspace();
+  const runner = new ThreadRunner(db, 'owner');
+  const dot = (await workspace.dots())[0];
+  await store.updateSettings({ appsAllowed: true });
+  await workspace.updateDot(dot.id, { ...dot, appsAllowed: true });
+  await workspace.bindThread('thread', dot.id, 'Timeout test');
   const engine = new DotEngine({
     store,
     workspace,
@@ -76,13 +75,14 @@ function composioEngine(timeout?: number) {
 }
 
 it('finishes an interactive turn when Composio startup stalls', async () => {
-  vi.useFakeTimers();
-  const { engine } = composioEngine(1_250);
+  const { engine } = await composioEngine(1_250);
+  fakeTimers();
   composio.session.mockReturnValue(new Promise(() => {}));
-  const { done } = engine.start({
+  const { done } = await engine.start({
     threadId: 'thread',
     message: { content: 'Keep working.' },
   });
+  await vi.waitFor(() => expect(composio.session).toHaveBeenCalled());
   await vi.advanceTimersByTimeAsync(1_251);
   const run = await done;
   expect(run.status).toBe('error');
@@ -92,7 +92,7 @@ it('finishes an interactive turn when Composio startup stalls', async () => {
 });
 
 it('does not call the model after Composio startup is cancelled', async () => {
-  const { engine, runner } = composioEngine();
+  const { engine, runner } = await composioEngine();
   let resolveSession!: (session: unknown) => void;
   composio.session.mockReturnValue(
     new Promise((resolve) => {
@@ -100,7 +100,7 @@ it('does not call the model after Composio startup is cancelled', async () => {
     }),
   );
   const network = vi.spyOn(globalThis, 'fetch');
-  const { done } = engine.start({
+  const { done } = await engine.start({
     threadId: 'thread',
     message: { content: 'Keep working.' },
   });
@@ -114,9 +114,8 @@ it('does not call the model after Composio startup is cancelled', async () => {
 });
 
 it('uses the configured timeout for scheduled/background runs', async () => {
-  vi.useFakeTimers();
-  const store = new Store(':memory:');
-  resources.push(store);
+  const store = new Store(await testDb());
+  fakeTimers();
   let signal: AbortSignal | undefined;
   const runner = new Runner(
     store,
@@ -130,17 +129,18 @@ it('uses the configured timeout for scheduled/background runs', async () => {
       }),
     1_250,
   );
-  store.createTask('Long-running task');
+  await store.createTask('Long-running task');
   const pending = runner.tick();
+  await vi.waitFor(() => expect(signal).toBeDefined());
   await vi.advanceTimersByTimeAsync(1_251);
   await pending;
   expect(signal?.aborted).toBe(true);
-  expect(store.tasks()[0].status).toBe('failed');
+  expect((await store.tasks())[0].status).toBe('failed');
 });
 
 it('completes a longer background run after another worker checks the old lease deadline', async () => {
-  vi.useFakeTimers();
-  const { first, second } = sharedStores();
+  const { first, second } = await sharedStores();
+  fakeTimers();
   const result = {
     text: 'Finished after 200 seconds',
     sources: [],
@@ -171,33 +171,34 @@ it('completes a longer background run after another worker checks the old lease 
     { mode: 'sample', baseUrl: '' },
     competingExecute,
   );
-  const task = first.createTask('Long-running task');
+  const task = await first.createTask('Long-running task');
   const pending = runner.tick();
-  const lease = first.task(task.id)?.lease;
+  await vi.waitFor(() => expect(signal).toBeDefined());
+  const lease = (await first.task(task.id))?.lease;
   try {
     await vi.advanceTimersByTimeAsync(180_001);
     await competing.tick();
-    expect(second.task(task.id)?.status).toBe('running');
-    expect(second.task(task.id)?.lease).toBe(lease);
+    expect((await second.task(task.id))?.status).toBe('running');
+    expect((await second.task(task.id))?.lease).toBe(lease);
     expect(signal?.aborted).toBe(false);
     expect(competingExecute).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(20_000);
     await pending;
-    expect(second.task(task.id)?.status).toBe('completed');
-    expect(second.detail(task.id)?.runs).toEqual([
+    expect((await second.task(task.id))?.status).toBe('completed');
+    expect((await second.detail(task.id))?.runs).toEqual([
       expect.objectContaining({ status: 'completed', result }),
     ]);
   } finally {
-    runner.stop();
-    competing.stop();
+    await runner.stop();
+    await competing.stop();
     await pending;
   }
 });
 
 it('still times out a longer background run after another worker checks its lease', async () => {
-  vi.useFakeTimers();
-  const { first, second } = sharedStores();
+  const { first, second } = await sharedStores();
+  fakeTimers();
   let signal: AbortSignal | undefined;
   const runner = new Runner(
     first,
@@ -212,27 +213,28 @@ it('still times out a longer background run after another worker checks its leas
     240_000,
   );
   const competing = new Runner(second, { mode: 'sample', baseUrl: '' });
-  const task = first.createTask('Long-running task');
+  const task = await first.createTask('Long-running task');
   const pending = runner.tick();
+  await vi.waitFor(() => expect(signal).toBeDefined());
   try {
     await vi.advanceTimersByTimeAsync(180_001);
     await competing.tick();
-    expect(second.task(task.id)?.status).toBe('running');
+    expect((await second.task(task.id))?.status).toBe('running');
     expect(signal?.aborted).toBe(false);
 
     await vi.advanceTimersByTimeAsync(60_000);
     await pending;
     expect(signal?.aborted).toBe(true);
-    expect(second.task(task.id)?.status).toBe('failed');
-    expect(second.detail(task.id)?.runs).toEqual([
+    expect((await second.task(task.id))?.status).toBe('failed');
+    expect((await second.detail(task.id))?.runs).toEqual([
       expect.objectContaining({
         status: 'failed',
         error: 'Research exceeded the 240 second time limit.',
       }),
     ]);
   } finally {
-    runner.stop();
-    competing.stop();
+    await runner.stop();
+    await competing.stop();
     await pending;
   }
 });

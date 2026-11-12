@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { WorkspaceStore } from '../src/server/workspace.js';
+import { testWorkspace } from './fixtures/db.js';
 import type { PlatformConfig } from '../src/server/platform-config.js';
 
 const sdk = vi.hoisted(() => ({
@@ -22,18 +22,15 @@ const config: PlatformConfig = {
   voiceName: 'marin',
   slackUsers: [],
 };
-const stores: WorkspaceStore[] = [];
 afterEach(() => {
-  stores.splice(0).forEach((store) => store.close());
   vi.clearAllMocks();
 });
 
 it('creates a non-Instant session and reuses it while the policy is unchanged', async () => {
   const { composioSession } = await import('../src/server/composio.js');
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  stores.push(workspace);
-  const original = workspace.dots()[0];
-  workspace.updateDot(original.id, {
+  const { workspace } = await testWorkspace();
+  const original = (await workspace.dots())[0];
+  await workspace.updateDot(original.id, {
     ...original,
     appsAllowed: true,
     composioToolkits: ['gmail'],
@@ -47,7 +44,7 @@ it('creates a non-Instant session and reuses it while the policy is unchanged', 
     composioSession(
       config,
       workspace,
-      workspace.dot(original.id)!,
+      (await workspace.dot(original.id))!,
       'owner',
       signal,
     ),
@@ -65,7 +62,7 @@ it('creates a non-Instant session and reuses it while the policy is unchanged', 
   await composioSession(
     config,
     workspace,
-    workspace.dot(original.id)!,
+    (await workspace.dot(original.id))!,
     'owner',
     signal,
   );
@@ -75,23 +72,27 @@ it('creates a non-Instant session and reuses it while the policy is unchanged', 
 
 it('creates a new session when the toolkit policy changes', async () => {
   const { composioSession } = await import('../src/server/composio.js');
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  stores.push(workspace);
-  const dot = workspace.dots()[0];
+  const { workspace } = await testWorkspace();
+  const dot = (await workspace.dots())[0];
   sdk.create
     .mockResolvedValueOnce({ sessionId: 'session-one' })
     .mockResolvedValueOnce({ sessionId: 'session-two' });
 
   await composioSession(config, workspace, dot, 'owner');
-  workspace.updateDot(dot.id, {
-    ...workspace.dot(dot.id)!,
+  await workspace.updateDot(dot.id, {
+    ...(await workspace.dot(dot.id))!,
     composioToolkits: ['gmail'],
   });
-  await composioSession(config, workspace, workspace.dot(dot.id)!, 'owner');
+  await composioSession(
+    config,
+    workspace,
+    (await workspace.dot(dot.id))!,
+    'owner',
+  );
 
   expect(sdk.create).toHaveBeenCalledTimes(2);
   expect(sdk.use).not.toHaveBeenCalled();
-  expect(workspace.dot(dot.id)?.composioSessionId).toBe('session-two');
+  expect((await workspace.dot(dot.id))?.composioSessionId).toBe('session-two');
 });
 
 it('keeps Composio optional in setup status', async () => {

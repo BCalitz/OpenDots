@@ -1,10 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { EventType, type BaseEvent } from '@ag-ui/core';
-import { Store } from '../src/server/store.js';
-import { WorkspaceStore } from '../src/server/workspace.js';
 import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
@@ -12,6 +7,7 @@ import { inspectRun } from '../src/server/conversations/inspect.js';
 import { monthStart } from '../src/server/usage-store.js';
 import { runTokens } from '../src/server/engine/thread-runner.js';
 import { chatTurn } from './fixtures/chat.js';
+import { testWorkspace } from './fixtures/db.js';
 import type {
   AuditEntry,
   RunDetail,
@@ -24,23 +20,15 @@ afterEach(async () => {
   vi.restoreAllMocks();
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
-function start() {
-  const dir = mkdtempSync(join(tmpdir(), 'opendots-insights-'));
-  const database = join(dir, 'opendots.sqlite');
-  const store = new Store(database);
-  const workspace = new WorkspaceStore(database, 'owner');
-  const platform = new Platform(
-    store,
-    workspace,
-    {
-      apiKey: 'fixture',
-      model: 'custom-model',
-      baseUrl: 'https://unused.invalid/v1',
-      voiceName: 'marin',
-      slackUsers: [],
-    },
-    { databasePath: database },
-  );
+async function start() {
+  const { store, workspace } = await testWorkspace();
+  const platform = await Platform.create(store, workspace, {
+    apiKey: 'fixture',
+    model: 'custom-model',
+    baseUrl: 'https://unused.invalid/v1',
+    voiceName: 'marin',
+    slackUsers: [],
+  });
   const config = {
     mode: 'live' as const,
     baseUrl: 'https://unused.invalid/v1',
@@ -51,12 +39,7 @@ function start() {
     config,
     platform,
   });
-  cleanup.push(async () => {
-    await platform.stop();
-    store.close();
-    workspace.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
+  cleanup.push(() => platform.stop());
   return { app, platform, workspace };
 }
 const json = (body: unknown, method = 'POST') => ({
@@ -114,9 +97,9 @@ function fakeModel(reply: string, prompt = 1200, completion = 300) {
 }
 
 it('inspects runs, meters tokens per Dot and stops a Dot at its monthly cap', async () => {
-  const { app, workspace, platform } = start();
+  const { app, workspace, platform } = await start();
   fakeModel('Hello there');
-  const dot = workspace.dots()[0];
+  const dot = (await workspace.dots())[0];
   const created = await app.request(
     '/api/conversations',
     json({ dotId: dot.id, title: 'Thread' }),
@@ -207,8 +190,8 @@ it('inspects runs, meters tokens per Dot and stops a Dot at its monthly cap', as
 });
 
 it('rejects caps below a thousand tokens', async () => {
-  const { app, workspace } = start();
-  const dot = workspace.dots()[0];
+  const { app, workspace } = await start();
+  const dot = (await workspace.dots())[0];
   const response = await app.request(
     `/api/dots/${dot.id}`,
     json(
@@ -225,12 +208,11 @@ it('rejects caps below a thousand tokens', async () => {
   expect(response.status).toBe(400);
 });
 
-it('counts usage per UTC calendar month', () => {
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  cleanup.push(() => workspace.close());
-  const dot = workspace.dots()[0];
+it('counts usage per UTC calendar month', async () => {
+  const { workspace } = await testWorkspace();
+  const dot = (await workspace.dots())[0];
   const now = Date.UTC(2026, 10, 10, 12);
-  workspace.usage.record({
+  await workspace.usage.record({
     runId: 'old',
     threadId: 't',
     dotId: dot.id,
@@ -238,7 +220,7 @@ it('counts usage per UTC calendar month', () => {
     outputTokens: 100,
     at: Date.UTC(2026, 9, 31, 23, 59),
   });
-  workspace.usage.record({
+  await workspace.usage.record({
     runId: 'new',
     threadId: 't',
     dotId: dot.id,
@@ -247,7 +229,7 @@ it('counts usage per UTC calendar month', () => {
     at: monthStart(now),
   });
   // A resumed run adds to its own row.
-  workspace.usage.record({
+  await workspace.usage.record({
     runId: 'new',
     threadId: 't',
     dotId: dot.id,
@@ -255,32 +237,32 @@ it('counts usage per UTC calendar month', () => {
     outputTokens: 0,
     at: now,
   });
-  expect(workspace.usage.monthTokens(dot.id, now)).toBe(52);
-  expect(workspace.usage.report(workspace.dots(), 30, now).month).toBe(
-    '2026-11',
-  );
+  expect(await workspace.usage.monthTokens(dot.id, now)).toBe(52);
+  expect(
+    (await workspace.usage.report(await workspace.dots(), 30, now)).month,
+  ).toBe('2026-11');
 });
 
 it('lists every outside action in one audit trail', async () => {
-  const { app, workspace } = start();
-  const dot = workspace.dots()[0];
-  const connection = workspace.connections.create(
+  const { app, workspace } = await start();
+  const dot = (await workspace.dots())[0];
+  const connection = await workspace.connections.create(
     dot.id,
     { name: 'Tickets', url: 'https://tickets.invalid/mcp' },
     [],
   );
-  workspace.connections.claimAction(
+  await workspace.connections.claimAction(
     'thread',
     'call-1',
     'approval',
     connection.id,
     'close_ticket',
   );
-  workspace.connections.finishAction('thread', 'call-1', {
+  await workspace.connections.finishAction('thread', 'call-1', {
     isError: false,
     text: 'ok',
   });
-  const read = workspace.usage.beginAction({
+  const read = await workspace.usage.beginAction({
     dotId: dot.id,
     threadId: 'thread',
     kind: 'mcp',
@@ -288,16 +270,16 @@ it('lists every outside action in one audit trail', async () => {
     action: 'list_tickets',
     readOnly: true,
   });
-  workspace.usage.finishAction(read, 'succeeded');
-  const send = workspace.usage.beginAction({
+  await workspace.usage.finishAction(read, 'succeeded');
+  const send = await workspace.usage.beginAction({
     dotId: dot.id,
     kind: 'app',
     target: 'gmail',
     action: 'GMAIL_SEND_EMAIL',
   });
-  workspace.usage.finishAction(send, 'failed');
-  const computer = workspace.computers.begin(dot.id, 'shell', 'agent');
-  workspace.computers.finish(computer, 'succeeded');
+  await workspace.usage.finishAction(send, 'failed');
+  const computer = await workspace.computers.begin(dot.id, 'shell', 'agent');
+  await workspace.computers.finish(computer, 'succeeded');
 
   const all = (await (await app.request('/api/audit')).json()) as AuditEntry[];
   expect(all).toHaveLength(4);

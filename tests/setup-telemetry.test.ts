@@ -1,10 +1,6 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { EventType } from '@ag-ui/core';
 import { expect, it, vi } from 'vitest';
 import { Platform } from '../src/server/platform.js';
-import { WorkspaceStore } from '../src/server/workspace.js';
 import { createApp } from '../src/server/app.js';
 import { Runner } from '../src/server/runner.js';
 import { Store } from '../src/server/store.js';
@@ -13,29 +9,28 @@ import {
   setupInputSchema,
   answerObserver,
 } from '../src/server/setup-telemetry.js';
+import { testDb, testWorkspace } from './fixtures/db.js';
 
 it('persists bounded offline events with stable IDs and CLI identity across restart', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'opendots-telemetry-'));
-  const path = join(dir, 'store.sqlite');
-  let store = new Store(path);
+  const db = await testDb();
+  let store = new Store(db);
   const offline = vi.fn(async () => {
     throw new Error('secret transport error');
   });
   const diagnostics = vi.fn();
   const env = { CPK_TELEMETRY_ID: 'cli-identity' };
-  let telemetry = new SetupTelemetry(store, env, offline, diagnostics);
+  let telemetry = await SetupTelemetry.create(store, env, offline, diagnostics);
   for (let i = 0; i < 260; i++)
     telemetry.capture({ kind: 'step_viewed', step: 'ready' });
   await telemetry.flush();
-  const state = JSON.parse(store.setupTelemetryState()!);
+  const state = JSON.parse((await store.setupTelemetryState())!);
   expect(state.queue).toHaveLength(256);
   expect(diagnostics).toHaveBeenCalledWith('delivery_failed');
   const id = state.queue[1].id; // Recovery abandonment drops the oldest full-queue entry.
   const installationId = state.installationId;
-  store.close();
-  store = new Store(path);
+  store = new Store(db);
   const requests: { identity: string; body: unknown }[] = [];
-  telemetry = new SetupTelemetry(
+  telemetry = await SetupTelemetry.create(
     store,
     env,
     async (identity, body) => {
@@ -56,38 +51,37 @@ it('persists bounded offline events with stable IDs and CLI identity across rest
       installation_id: installationId,
     },
   });
-  expect(JSON.parse(store.setupTelemetryState()!).queue).toEqual([]);
+  expect(JSON.parse((await store.setupTelemetryState())!).queue).toEqual([]);
   expect(JSON.stringify(requests)).not.toContain('secret transport error');
-  store.close();
-  rmSync(dir, { recursive: true });
 });
 
 it.each(['DO_NOT_TRACK', 'COPILOTKIT_TELEMETRY_DISABLED'])(
   'purges pending telemetry for both true and 1 in %s',
   async (key) => {
     for (const value of ['true', '1']) {
-      const store = new Store(':memory:');
+      const store = new Store(await testDb());
       const env: Record<string, string> = {};
       const send = vi.fn(async () => {});
-      const telemetry = new SetupTelemetry(store, env, send);
+      const telemetry = await SetupTelemetry.create(store, env, send);
       telemetry.capture({ kind: 'step_viewed', step: 'setup_required' });
       env[key] = value;
       await telemetry.flush();
       telemetry.capture({ kind: 'activated' });
-      expect(store.setupTelemetryState()).toBeUndefined();
+      await telemetry.saved();
+      expect(await store.setupTelemetryState()).toBeUndefined();
       expect(send).not.toHaveBeenCalled();
-      store.close();
     }
   },
 );
 
-it('reuses fallback identity and recovers abandonment without treating ready as activated', () => {
-  const store = new Store(':memory:');
-  const first = new SetupTelemetry(store, {}, async () => {});
+it('reuses fallback identity and recovers abandonment without treating ready as activated', async () => {
+  const store = new Store(await testDb());
+  const first = await SetupTelemetry.create(store, {}, async () => {});
   first.capture({ kind: 'step_viewed', step: 'ready' });
-  const second = new SetupTelemetry(store, {}, async () => {});
+  await first.saved();
+  const second = await SetupTelemetry.create(store, {}, async () => {});
   expect(second.identity).toBe(first.identity);
-  const state = JSON.parse(store.setupTelemetryState()!);
+  const state = JSON.parse((await store.setupTelemetryState())!);
   expect(state.activated).toBe(false);
   expect(state.queue.at(-1).event).toEqual({
     kind: 'setup_abandoned',
@@ -95,12 +89,12 @@ it('reuses fallback identity and recovers abandonment without treating ready as 
   });
   second.capture({ kind: 'activated' });
   second.capture({ kind: 'activated' });
+  await second.saved();
   expect(
-    JSON.parse(store.setupTelemetryState()!).queue.filter(
+    JSON.parse((await store.setupTelemetryState())!).queue.filter(
       (q: { event: { kind: string } }) => q.event.kind === 'activated',
     ),
   ).toHaveLength(1);
-  store.close();
 });
 
 it('rejects forged activation and every unknown property or enum in client input', () => {
@@ -156,9 +150,8 @@ it('activates only after a successful assistant answer and records a bounded fai
 });
 
 it('protects the browser route with owner auth and origin guards and rejects forged readiness', async () => {
-  const store = new Store(':memory:');
-  const workspace = new WorkspaceStore(':memory:', 'fixture-owner');
-  const platform = new Platform(store, workspace, {
+  const { store, workspace } = await testWorkspace('fixture-owner');
+  const platform = await Platform.create(store, workspace, {
     baseUrl: '',
     voiceName: 'marin',
     slackUsers: [],
@@ -205,8 +198,6 @@ it('protects the browser route with owner auth and origin guards and rejects for
     (await request({ kind: 'step_viewed', step: 'setup_required' }, headers))
       .status,
   ).toBe(200);
-  store.close();
-  workspace.close();
 });
 
 it('does not activate from user text, partial answers or tool-only success', () => {
@@ -233,17 +224,17 @@ it('does not activate from user text, partial answers or tool-only success', () 
   expect(capture).not.toHaveBeenCalled();
 });
 
-it('uses installation fallback after a CLI identity is removed, and never loses CLI precedence', () => {
-  const store = new Store(':memory:');
-  const cli = new SetupTelemetry(
+it('uses installation fallback after a CLI identity is removed, and never loses CLI precedence', async () => {
+  const store = new Store(await testDb());
+  const cli = await SetupTelemetry.create(
     store,
     { CPK_TELEMETRY_ID: 'cli-one' },
     async () => {},
   );
   expect(cli.identity).toBe('cli-one');
-  const fallback = new SetupTelemetry(store, {}, async () => {});
+  const fallback = await SetupTelemetry.create(store, {}, async () => {});
   expect(fallback.identity).toBe(cli.metadata.installation_id);
-  const replacement = new SetupTelemetry(
+  const replacement = await SetupTelemetry.create(
     store,
     { CPK_TELEMETRY_ID: 'cli-two' },
     async () => {},
@@ -252,26 +243,26 @@ it('uses installation fallback after a CLI identity is removed, and never loses 
   expect(replacement.metadata.installation_id).toBe(
     cli.metadata.installation_id,
   );
-  store.close();
 });
 
 it('bounds a shutdown flush and retains events that did not fit its deadline', async () => {
+  const store = new Store(await testDb());
   vi.useFakeTimers();
-  const store = new Store(':memory:');
   try {
     const send = vi.fn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     });
-    const telemetry = new SetupTelemetry(store, {}, send);
+    const telemetry = await SetupTelemetry.create(store, {}, send);
     for (let i = 0; i < 10; i++)
       telemetry.capture({ kind: 'step_viewed', step: 'ready' });
     const stopped = telemetry.stop();
     await vi.advanceTimersByTimeAsync(3500);
     await stopped;
     expect(send).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(store.setupTelemetryState()!).queue).toHaveLength(9); // includes abandonment
+    expect(JSON.parse((await store.setupTelemetryState())!).queue).toHaveLength(
+      9,
+    ); // includes abandonment
   } finally {
     vi.useRealTimers();
-    store.close();
   }
 });

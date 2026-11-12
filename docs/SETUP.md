@@ -1,16 +1,19 @@
 # Running the template
 
-OpenDots runs a React app and a Node server. The server stores pages, Space and Dot configuration, and thread bindings in SQLite and stores conversations in the same SQLite database, and connects to your configured model and messaging services.
+OpenDots runs a React app, a Node server and a Postgres database. The server stores conversations, pages, Space and Dot configuration and background work in Postgres, and connects to your configured model and messaging services.
 
 ## Local development
 
-Use Node.js 24 and npm.
+Use Node.js 24, npm and Docker (for the database).
 
 ```sh
 npm ci
 cp .env.example .env
+npm run db    # Postgres in Docker, on 127.0.0.1:5432
 npm run dev
 ```
+
+`npm run db` starts only the `postgres` service from `compose.yml`, with the `pgvector/pgvector` image. To use a Postgres server of your own instead, point `DATABASE_URL` at an empty database; it needs the `vector` extension (pgvector) installed, and a role allowed to create the `vector` and `pg_trgm` extensions on first start. The server creates and upgrades its tables itself when it starts.
 
 Open http://127.0.0.1:5173. The API runs on port 4310. Without service credentials, the app shows its setup state; it does not generate simulated replies.
 
@@ -27,7 +30,7 @@ Open http://127.0.0.1:4310. Keep the server running for background work.
 
 ## Conversations
 
-OpenDots stores conversations itself, in the same SQLite file as pages and workspace metadata (`DATABASE_PATH`). You only need an OpenAI-compatible model key. History survives restarts, refreshing during an answer reconnects to it, and a turn started elsewhere (a schedule, a voice call, another device) appears live in an open chat. Back up `DATABASE_PATH` to back up conversations.
+OpenDots stores conversations itself, in the same Postgres database as pages and workspace metadata (`DATABASE_URL`). You only need an OpenAI-compatible model key. History survives restarts, refreshing during an answer reconnects to it, and a turn started elsewhere (a schedule, a voice call, another device) appears live in an open chat. Back up the database (for example with `pg_dump`) to back up conversations.
 
 Each Dot has one continuing chat. The model sees a recent window of it (about the last 80 messages, up to roughly 120,000 characters, starting at a user message) rather than all of it, so long-running chats keep working and their cost stays bounded.
 
@@ -43,7 +46,7 @@ Edit `.env` on the server and restart after changes:
 | `OPENAI_BASE_URL`                | Compatible model API endpoint                                      |
 | `AGENT_RUN_TIMEOUT_MS`           | Longest a turn may run, excluding time spent waiting for approvals |
 | `OWNER_ID`                       | Stable identity used for this deployment's conversations           |
-| `DATABASE_PATH`                  | SQLite file with conversations, pages, workspace and work metadata |
+| `DATABASE_URL`                   | Postgres database with conversations, pages, workspace and work    |
 | `OWNER_TOKEN`                    | Application access token; required for external bindings           |
 | `APP_ORIGIN`                     | Comma-separated exact browser origins for a proxy or custom domain |
 
@@ -63,7 +66,7 @@ Open a page's chat and choose a specialist with access to that Space. Grant acce
 
 Use the conversation's save-to-page action to create a document from its saved text history. This requires a working conversation service. Pages retain a link to the source conversation, and page links in chat open the document workspace.
 
-Back up `DATABASE_PATH`: it contains page content and conversation history. The template does not include multi-user page sharing, realtime collaboration, file uploads, or arbitrary interactive embeds.
+Back up the database: it contains page content and conversation history. The template does not include multi-user page sharing, realtime collaboration, file uploads, or arbitrary interactive embeds.
 
 ## Browser tool
 
@@ -184,7 +187,11 @@ Set `OWNER_TOKEN` and `BROWSER_SECRET` to different random secrets of at least 2
 docker compose up --build -d
 ```
 
-Open http://localhost:4310. The app port binds to loopback. The browser service is optional: set a 24+ character `BROWSER_SECRET` and run `docker compose --profile browser up --build` to enable it; it has no published port. Application metadata lives in the `opendots-data` volume.
+Open http://localhost:4310. The app port binds to loopback. The browser service is optional: set a 24+ character `BROWSER_SECRET` and run `docker compose --profile browser up --build` to enable it; it has no published port. Everything OpenDots stores lives in the `postgres` service and its `opendots-postgres` volume; the database port is published on loopback only. Set `POSTGRES_PASSWORD` in `.env` before the first start to change the default password (`opendots`); changing it later means changing it inside Postgres too. To back up:
+
+```sh
+docker compose exec postgres pg_dump -U opendots opendots > opendots.sql
+```
 
 ```sh
 # Stop services while retaining saved data.
@@ -192,6 +199,22 @@ docker compose down
 ```
 
 For remote hosting, configure an HTTPS reverse proxy and the matching `APP_ORIGIN`. See [Security](../SECURITY.md) for the template's deployment boundary.
+
+### Moving from SQLite
+
+Releases before Postgres kept everything in one SQLite file (`DATABASE_PATH`, by default `data/opendots.sqlite`, or `/data/opendots.sqlite` in the `opendots-data` volume). The server no longer reads it, and warns at startup while `DATABASE_PATH` is still set. Copy it into Postgres once:
+
+```sh
+# Running from source: start the database, then import.
+npm run db
+npm run import-sqlite -- data/opendots.sqlite
+
+# Running in Compose: the old file is still in the opendots-data volume.
+docker compose up -d postgres
+docker compose run --rm app node dist/server/server/db/import-cli.js /data/opendots.sqlite
+```
+
+The import copies every table, keeps rows in their original order and leaves the SQLite file unchanged. It refuses to run if the Postgres database already has conversations, tasks, pages, memories, inbox sources or connections, so it never merges two histories; the Space and Dot a fresh install creates on first start are replaced. Columns left from retired features (the Intelligence learning fields) are not copied, and the import lists them. Then remove `DATABASE_PATH` from `.env`.
 
 ### Cloudflare Tunnel
 
@@ -228,8 +251,9 @@ Automatic Learning was a CopilotKit Intelligence feature and is not available no
 npm run check-format
 npm run lint
 npm run typecheck
+npm run test:db   # once: a throwaway Postgres for tests on 127.0.0.1:54329
 npm test
 npm run build
 ```
 
-Automated tests use service fixtures. Live model, Slack, and voice verification requires your own configured services.
+Tests run against Postgres: each test gets its own schema, dropped when it ends. `npm run test:db` starts the `postgres-test` Compose service, which keeps its data in memory; set `TEST_DATABASE_URL` to use another server. Automated tests use service fixtures. Live model, Slack, and voice verification requires your own configured services.

@@ -1,9 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { Store } from '../src/server/store.js';
 import { WorkspaceStore } from '../src/server/workspace.js';
+import type { Db } from '../src/server/db/index.js';
+import { testDb } from './fixtures/db.js';
 import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
@@ -20,21 +19,17 @@ afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
-function start(database: string) {
-  const store = new Store(database);
-  const workspace = new WorkspaceStore(database, 'owner');
-  const platform = new Platform(
-    store,
-    workspace,
-    {
-      apiKey: 'fixture',
-      model: 'custom-model',
-      baseUrl: 'https://unused.invalid/v1',
-      voiceName: 'marin',
-      slackUsers: [],
-    },
-    { databasePath: database },
-  );
+/** A server on `db`; a second start on the same db is a restart. */
+async function start(db: Db) {
+  const store = new Store(db);
+  const workspace = await WorkspaceStore.open(db, 'owner');
+  const platform = await Platform.create(store, workspace, {
+    apiKey: 'fixture',
+    model: 'custom-model',
+    baseUrl: 'https://unused.invalid/v1',
+    voiceName: 'marin',
+    slackUsers: [],
+  });
   const config = {
     mode: 'live' as const,
     baseUrl: 'https://unused.invalid/v1',
@@ -47,8 +42,6 @@ function start(database: string) {
   });
   const stop = async () => {
     await platform.stop();
-    store.close();
-    workspace.close();
   };
   return { app, platform, workspace, store, stop };
 }
@@ -66,13 +59,11 @@ function fakeModel(reply: string) {
       });
     });
 }
-function tempDatabase() {
-  const dir = mkdtempSync(join(tmpdir(), 'opendots-local-'));
-  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-  return join(dir, 'opendots.sqlite');
-}
 /** The shared web/mobile client, talking to the app in-process. */
-function connect(app: ReturnType<typeof start>['app'], threadId: string) {
+function connect(
+  app: Awaited<ReturnType<typeof start>>['app'],
+  threadId: string,
+) {
   const states: ThreadState[] = [];
   const connection = new ThreadConnection({
     url: `http://localhost/api/chat/${threadId}/events`,
@@ -88,11 +79,11 @@ function connect(app: ReturnType<typeof start>['app'], threadId: string) {
 }
 
 it('chats over /api/chat, names the thread, survives a restart and replays', async () => {
-  const database = tempDatabase();
+  const database = await testDb();
   fakeModel('Hello there');
-  let server = start(database);
+  let server = await start(database);
   expect(server.platform.setup()).toMatchObject({ missing: [] });
-  const dot = server.workspace.dots()[0];
+  const dot = (await server.workspace.dots())[0];
   const created = await server.app.request(
     '/api/conversations',
     json({ dotId: dot.id, title: 'A new thought' }),
@@ -108,15 +99,19 @@ it('chats over /api/chat, names the thread, survives a restart and replays', asy
   );
   expect(turn.status).toBe(202);
   expect(turn.text).toBe('Hello there');
-  await vi.waitFor(() =>
-    expect(server.platform.runner?.thread(threadId)?.name).toBe(
+  await vi.waitFor(async () =>
+    expect((await server.platform.runner?.thread(threadId))?.name).toBe(
       'Greeting check',
     ),
   );
-  expect(server.workspace.requireThread(threadId).title).toBe('Greeting check');
+  await vi.waitFor(async () =>
+    expect((await server.workspace.requireThread(threadId)).title).toBe(
+      'Greeting check',
+    ),
+  );
   await server.stop();
 
-  server = start(database);
+  server = await start(database);
   const client = connect(server.app, threadId);
   await vi.waitFor(() => expect(client.latest()?.ready).toBe(true));
   expect(client.latest()?.messages.map((m) => m.content)).toEqual([
@@ -143,8 +138,7 @@ it('chats over /api/chat, names the thread, survives a restart and replays', asy
 });
 
 it('refuses a second message while answering, and stops on request', async () => {
-  const database = tempDatabase();
-  const server = start(database);
+  const server = await start(await testDb());
   cleanup.push(server.stop);
   const network = vi
     .spyOn(globalThis, 'fetch')
@@ -158,7 +152,7 @@ it('refuses a second message while answering, and stops on request', async () =>
           ),
         ),
     );
-  const dot = server.workspace.dots()[0];
+  const dot = (await server.workspace.dots())[0];
   const { conversation } = await server.platform.dotConversation(dot.id);
   const client = connect(server.app, conversation.id);
   await vi.waitFor(() => expect(client.latest()?.ready).toBe(true));
@@ -187,9 +181,9 @@ it('refuses a second message while answering, and stops on request', async () =>
 });
 
 it('validates messages and refuses to chat while paused', async () => {
-  const server = start(':memory:');
+  const server = await start(await testDb());
   cleanup.push(server.stop);
-  const dot = server.workspace.dots()[0];
+  const dot = (await server.workspace.dots())[0];
   const { conversation } = await server.platform.dotConversation(dot.id);
   const path = `/api/chat/${conversation.id}/messages`;
   expect((await server.app.request(path, json({ content: '' }))).status).toBe(
@@ -214,16 +208,17 @@ it('validates messages and refuses to chat while paused', async () => {
   expect((await server.app.request('/api/chat/missing/events')).status).toBe(
     404,
   );
-  server.store.updateSettings({ paused: true });
+  await server.store.updateSettings({ paused: true });
   const paused = await server.app.request(path, json({ content: 'Hi' }));
   expect(paused.status).toBe(409);
   expect(await paused.json()).toMatchObject({ code: 'paused' });
 });
 
 it('answers Slack through the engine in a background thread of its own', async () => {
-  const store = new Store(':memory:');
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  const platform = new Platform(store, workspace, {
+  const db = await testDb();
+  const store = new Store(db);
+  const workspace = await WorkspaceStore.open(db, 'owner');
+  const platform = await Platform.create(store, workspace, {
     apiKey: 'fixture',
     model: 'custom-model',
     baseUrl: 'https://unused.invalid/v1',
@@ -233,11 +228,7 @@ it('answers Slack through the engine in a background thread of its own', async (
     slackTeam: 'T1',
     slackUsers: ['U1'],
   });
-  cleanup.push(async () => {
-    await platform.stop();
-    store.close();
-    workspace.close();
-  });
+  cleanup.push(() => platform.stop());
   const posted: Record<string, unknown>[] = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     const body = JSON.parse(String(init?.body ?? '{}'));
@@ -264,9 +255,13 @@ it('answers Slack through the engine in a background thread of its own', async (
       text: 'Here is *today*.',
     }),
   ]);
-  const threadId = platform.channel!.threadFor('T1:C1:100.1')!;
-  expect(workspace.requireThread(threadId)).toMatchObject({ source: 'slack' });
+  const threadId = (await platform.channel!.threadFor('T1:C1:100.1'))!;
+  expect(await workspace.requireThread(threadId)).toMatchObject({
+    source: 'slack',
+  });
   // A Slack thread never becomes the Dot's main chat.
-  expect(workspace.mainConversation(workspace.dots()[0].id)).toBeUndefined();
-  expect(platform.runner.listRuns()[0]).toMatchObject({ threadId });
+  expect(
+    await workspace.mainConversation((await workspace.dots())[0].id),
+  ).toBeUndefined();
+  expect((await platform.runner.listRuns())[0]).toMatchObject({ threadId });
 });

@@ -14,6 +14,7 @@ import type {
   ChannelMessage,
   ChannelStatus,
 } from '../src/server/channels/adapter.js';
+import { testDb } from './fixtures/db.js';
 
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => {
@@ -291,11 +292,11 @@ it('answers allowlisted people, one OpenDots thread per channel thread', async (
   const created: string[] = [];
   const turns: [string, string][] = [];
   const service = new ChannelService(adapter, {
-    database: ':memory:',
+    db: await testDb(),
     tenantId: 'T1',
     userIds: ['U1'],
     dotId: 'dot',
-    paused: () => paused,
+    paused: async () => paused,
     createThread: async (_dotId, title) => {
       created.push(title);
       return `thread-${created.length}`;
@@ -340,11 +341,11 @@ it('runs turns in one channel thread in order', async () => {
   const { adapter, replies } = fakeAdapter();
   const order: string[] = [];
   const service = new ChannelService(adapter, {
-    database: ':memory:',
+    db: await testDb(),
     tenantId: 'T1',
     userIds: ['U1'],
     dotId: 'dot',
-    paused: () => false,
+    paused: async () => false,
     createThread: async () => 'thread',
     turn: async (_threadId, prompt) => {
       order.push(`start ${prompt}`);

@@ -30,7 +30,7 @@ Services that can send webhooks can post to a **Webhook** source instead. Its ad
 
 ## Security notes
 
-- Tokens are stored in the server's SQLite database and are never sent to the browser. Protect `DATABASE_PATH` the way you protect `.env`.
+- Tokens are stored in the server's Postgres database and are never sent to the browser. Protect the database and its backups the way you protect `.env`.
 - Tool results are passed to the model as untrusted data.
 - Endpoints must use `http` or `https` and cannot contain credentials in the URL. Local addresses are allowed, so you can run MCP servers on the same machine. Only add servers you trust.
 - OAuth-only servers are not supported yet. Use a server that accepts a bearer token, or put a token-authenticated proxy in front of it.

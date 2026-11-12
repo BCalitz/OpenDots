@@ -1,9 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { Store } from '../src/server/store.js';
 import { WorkspaceStore } from '../src/server/workspace.js';
+import type { Db } from '../src/server/db/index.js';
+import { testDb } from './fixtures/db.js';
 import { DotEngine, CHANNEL_ERROR } from '../src/server/engine/index.js';
 import {
   ThreadLockedError,
@@ -32,27 +31,26 @@ const config = {
   slackUsers: [],
 };
 
-function fixture(database = ':memory:', overrides = {}) {
+/** A Dot engine on `db`; a second fixture on the same db is a restart. */
+async function fixture(db?: Db, overrides = {}) {
+  const database = db ?? (await testDb());
   const store = new Store(database);
-  const workspace = new WorkspaceStore(database, 'owner');
+  const workspace = await WorkspaceStore.open(database, 'owner');
   const runner = new ThreadRunner(database, 'owner');
+  await runner.recoverInterruptedRuns();
   const engine = new DotEngine({
     store,
     workspace,
     config: { ...config, ...overrides },
     runner,
   });
-  cleanup.push(() => {
-    runner.close();
-    store.close();
-    workspace.close();
-  });
-  const dot = workspace.dots()[0];
+  cleanup.push(() => runner.close());
+  const dot = (await workspace.dots())[0];
   const thread =
-    workspace.conversations().find((item) => item.id === 'thread') ??
-    workspace.bindThread('thread', dot.id, 'Chat');
-  runner.createThread({ threadId: thread.id, agentId: dot.id });
-  return { store, workspace, runner, engine, dot, thread };
+    (await workspace.conversation('thread')) ??
+    (await workspace.bindThread('thread', dot.id, 'Chat'));
+  await runner.createThread({ threadId: thread.id, agentId: dot.id });
+  return { db: database, store, workspace, runner, engine, dot, thread };
 }
 
 function toolCall(id: string, name: string, args: Record<string, unknown>) {
@@ -89,7 +87,7 @@ const hangingModel = () =>
     );
 
 it('runs a tool, continues with its result and stores the turn', async () => {
-  const f = fixture();
+  const f = await fixture();
   const network = vi
     .spyOn(globalThis, 'fetch')
     .mockResolvedValueOnce(
@@ -100,15 +98,15 @@ it('runs a tool, continues with its result and stores the turn', async () => {
     )
     .mockResolvedValueOnce(say('Created Notes.'));
   const seen: BaseEvent[] = [];
-  f.engine.watch(f.thread.id, (event) => seen.push(event));
-  const { done } = f.engine.start({
+  await f.engine.watch(f.thread.id, (event) => seen.push(event));
+  const { done } = await f.engine.start({
     threadId: f.thread.id,
     message: { id: 'user-1', content: 'Create a page called Notes.' },
   });
   const run = await done;
 
   expect(run.status).toBe('finished');
-  expect(f.workspace.pages.list(f.dot.spaceId)).toEqual(
+  expect(await f.workspace.pages.list(f.dot.spaceId)).toEqual(
     expect.arrayContaining([expect.objectContaining({ title: 'Notes' })]),
   );
   expect(types(seen)[0]).toBe('RUN_STARTED');
@@ -126,7 +124,7 @@ it('runs a tool, continues with its result and stores the turn', async () => {
   expect(run.messages[3]).toMatchObject({ content: 'Created Notes.' });
   // Live events rebuild the same messages the server stored.
   expect(reduceEvents(seen)).toEqual(run.messages);
-  expect(f.runner.messages(f.thread.id)).toEqual(run.messages);
+  expect(await f.runner.messages(f.thread.id)).toEqual(run.messages);
 
   const request = JSON.parse(String(network.mock.calls[0][1]?.body));
   expect(request.model).toBe('custom-model');
@@ -144,16 +142,18 @@ it('runs a tool, continues with its result and stores the turn', async () => {
 });
 
 it('validates tool arguments before changing anything', async () => {
-  const f = fixture();
+  const f = await fixture();
   vi.spyOn(globalThis, 'fetch')
     .mockResolvedValueOnce(toolCall('bad', 'create_space_page', { title: '' }))
     .mockResolvedValueOnce(say('That did not work.'));
-  const run = await f.engine.start({
-    threadId: f.thread.id,
-    message: { content: 'Make a page.' },
-  }).done;
+  const run = await (
+    await f.engine.start({
+      threadId: f.thread.id,
+      message: { content: 'Make a page.' },
+    })
+  ).done;
   expect(run.status).toBe('finished');
-  expect(f.workspace.pages.list(f.dot.spaceId)).toHaveLength(0);
+  expect(await f.workspace.pages.list(f.dot.spaceId)).toHaveLength(0);
   const result = run.messages.find((message) => message.role === 'tool');
   expect(String(result?.content)).toMatch(/error|invalid|title/i);
 });
@@ -161,14 +161,16 @@ it('validates tool arguments before changing anything', async () => {
 it('tells the model the current time and keeps old history out of the prompt window', async () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-10-04T07:33:12.000Z'));
-  const f = fixture();
+  const f = await fixture();
   const network = vi
     .spyOn(globalThis, 'fetch')
     .mockResolvedValue(say('It is 07:33 UTC.'));
-  await f.engine.start({
-    threadId: f.thread.id,
-    message: { content: 'What time is it?' },
-  }).done;
+  await (
+    await f.engine.start({
+      threadId: f.thread.id,
+      message: { content: 'What time is it?' },
+    })
+  ).done;
   const request = JSON.parse(String(network.mock.calls[0][1]?.body));
   const system = request.messages.find(
     (message: { role: string }) => message.role === 'system',
@@ -215,23 +217,23 @@ it('sends a recent window of history that starts at a user message', () => {
 });
 
 it('allows one run per thread, stops it cleanly and keeps the stop in history', async () => {
-  const f = fixture();
+  const f = await fixture();
   hangingModel();
-  const { done } = f.engine.start({
+  const { done } = await f.engine.start({
     threadId: f.thread.id,
     message: { content: 'Think for a long time.' },
   });
-  expect(() =>
+  await expect(
     f.engine.start({ threadId: f.thread.id, message: { content: 'Again' } }),
-  ).toThrow(ThreadLockedError);
+  ).rejects.toThrow(ThreadLockedError);
   await vi.waitFor(() => expect(f.runner.isRunning(f.thread.id)).toBe(true));
-  expect(f.engine.stop(f.thread.id)).toBe(true);
+  expect(await f.engine.stop(f.thread.id)).toBe(true);
   const run = await done;
   expect(run.status).toBe('stopped');
   expect(f.runner.isRunning(f.thread.id)).toBe(false);
-  expect(f.runner.runs(f.thread.id).at(-1)?.status).toBe('stopped');
+  expect((await f.runner.runs(f.thread.id)).at(-1)?.status).toBe('stopped');
   // The user message stays; nothing invented an answer.
-  expect(f.runner.messages(f.thread.id)).toEqual([
+  expect(await f.runner.messages(f.thread.id)).toEqual([
     expect.objectContaining({
       role: 'user',
       content: 'Think for a long time.',
@@ -240,12 +242,14 @@ it('allows one run per thread, stops it cleanly and keeps the stop in history', 
 });
 
 it('stops a turn that hits the time limit with a visible error', async () => {
-  vi.useFakeTimers();
-  const f = fixture(':memory:', { agentRunTimeoutMs: 5_000 });
+  const f = await fixture(undefined, { agentRunTimeoutMs: 5_000 });
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+  });
   hangingModel();
   const seen: BaseEvent[] = [];
-  f.engine.watch(f.thread.id, (event) => seen.push(event));
-  const { done } = f.engine.start({
+  await f.engine.watch(f.thread.id, (event) => seen.push(event));
+  const { done } = await f.engine.start({
     threadId: f.thread.id,
     message: { content: 'Slow' },
   });
@@ -260,14 +264,14 @@ it('stops a turn that hits the time limit with a visible error', async () => {
 });
 
 it('stops when the owner pauses work and says why', async () => {
-  const f = fixture();
+  const f = await fixture();
   const network = hangingModel();
-  const { done } = f.engine.start({
+  const { done } = await f.engine.start({
     threadId: f.thread.id,
     message: { content: 'Work' },
   });
   await vi.waitFor(() => expect(network).toHaveBeenCalled());
-  f.store.updateSettings({ paused: true });
+  await f.store.updateSettings({ paused: true });
   const run = await done;
   expect(run.status).toBe('error');
   expect(run.error).toMatch(/paused/);
@@ -275,7 +279,7 @@ it('stops when the owner pauses work and says why', async () => {
 });
 
 it('runs headless turns in the same thread, waiting for a turn already running', async () => {
-  const f = fixture();
+  const f = await fixture();
   let release!: () => void;
   vi.spyOn(globalThis, 'fetch')
     .mockImplementationOnce(
@@ -285,7 +289,7 @@ it('runs headless turns in the same thread, waiting for a turn already running',
         }),
     )
     .mockResolvedValueOnce(say('Your summary'));
-  const chat = f.engine.start({
+  const chat = await f.engine.start({
     threadId: f.thread.id,
     message: { content: 'Hello' },
   });
@@ -299,7 +303,7 @@ it('runs headless turns in the same thread, waiting for a turn already running',
   release();
   await chat.done;
   expect(await scheduled).toBe('Your summary');
-  const messages = f.runner.messages(f.thread.id);
+  const messages = await f.runner.messages(f.thread.id);
   expect(messages.map((message) => message.content)).toEqual([
     'Hello',
     'Chat answer',
@@ -313,7 +317,7 @@ it('runs headless turns in the same thread, waiting for a turn already running',
 });
 
 it('stops a headless turn when its signal aborts', async () => {
-  const f = fixture();
+  const f = await fixture();
   hangingModel();
   const controller = new AbortController();
   const pending = f.engine.turn(f.thread.id, 'Long', controller.signal);
@@ -321,11 +325,11 @@ it('stops a headless turn when its signal aborts', async () => {
   controller.abort(new Error('caller left'));
   await expect(pending).rejects.toThrow('caller left');
   await vi.waitFor(() => expect(f.runner.isRunning(f.thread.id)).toBe(false));
-  expect(f.runner.runs(f.thread.id).at(-1)?.status).toBe('stopped');
+  expect((await f.runner.runs(f.thread.id)).at(-1)?.status).toBe('stopped');
 });
 
 it('meters tokens per run and refuses new turns at the monthly cap', async () => {
-  const f = fixture();
+  const f = await fixture();
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(
     new Response(
       [
@@ -356,55 +360,64 @@ it('meters tokens per run and refuses new turns at the monthly cap', async () =>
       { headers: { 'Content-Type': 'text/event-stream' } },
     ),
   );
-  const run = await f.engine.start({
-    threadId: f.thread.id,
-    message: { content: 'Hi' },
-  }).done;
+  const run = await (
+    await f.engine.start({
+      threadId: f.thread.id,
+      message: { content: 'Hi' },
+    })
+  ).done;
   expect(run.status).toBe('finished');
-  expect(f.workspace.usage.monthTokens(f.dot.id)).toBe(1100);
-  expect(f.runner.listRuns()[0]).toMatchObject({
+  await f.engine.metered();
+  expect(await f.workspace.usage.monthTokens(f.dot.id)).toBe(1100);
+  expect((await f.runner.listRuns())[0]).toMatchObject({
     inputTokens: 900,
     outputTokens: 200,
     prompt: 'Hi',
   });
 
-  f.workspace.setMonthlyTokenCap(f.dot.id, 1000);
-  const capped = await f.engine.start({
-    threadId: f.thread.id,
-    message: { content: 'More' },
-  }).done;
+  await f.workspace.setMonthlyTokenCap(f.dot.id, 1000);
+  const capped = await (
+    await f.engine.start({
+      threadId: f.thread.id,
+      message: { content: 'More' },
+    })
+  ).done;
   expect(capped.status).toBe('error');
   expect(capped.error).toMatch(/monthly limit of 1,000 tokens/);
 });
 
 it('never shows error details in Slack', async () => {
-  const f = fixture(':memory:', { model: undefined });
-  const run = await f.engine.start({
-    threadId: f.thread.id,
-    message: { content: 'Hi' },
-    source: 'slack',
-  }).done;
+  const f = await fixture(undefined, { model: undefined });
+  const run = await (
+    await f.engine.start({
+      threadId: f.thread.id,
+      message: { content: 'Hi' },
+      source: 'slack',
+    })
+  ).done;
   expect(run.error).toBe(CHANNEL_ERROR);
-  const web = await f.engine.start({
-    threadId: f.thread.id,
-    message: { content: 'Hi' },
-  }).done;
+  const web = await (
+    await f.engine.start({
+      threadId: f.thread.id,
+      message: { content: 'Hi' },
+    })
+  ).done;
   expect(web.error).toBe('Model configuration is required.');
 });
 
 it('keeps history across a restart, replays it and closes runs a crash left open', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'opendots-engine-'));
-  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-  const database = join(dir, 'opendots.sqlite');
-  let f = fixture(database);
+  let f = await fixture();
+  const database = f.db;
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(say('Hello there'));
-  await f.engine.start({
-    threadId: f.thread.id,
-    message: { content: 'Say hello' },
-  }).done;
+  await (
+    await f.engine.start({
+      threadId: f.thread.id,
+      message: { content: 'Say hello' },
+    })
+  ).done;
   // A run the process never finished, as after a crash.
   const crashed = new ThreadRunner(database, 'owner');
-  crashed.start({
+  const { runId } = await crashed.start({
     threadId: f.thread.id,
     agentId: f.dot.id,
     messages: [{ id: 'lost', role: 'user', content: 'Are you there?' }],
@@ -422,11 +435,15 @@ it('keeps history across a restart, replays it and closes runs a crash left open
       await new Promise(() => {});
     },
   });
+  // Both events reach the database before the "crash".
+  await vi.waitFor(async () =>
+    expect((await crashed.runDetail(runId))?.events).toHaveLength(3),
+  );
   crashed.close();
   cleanup.pop()!();
 
-  f = fixture(database);
-  const replay = f.engine.watch(f.thread.id, () => {});
+  f = await fixture(database);
+  const replay = await f.engine.watch(f.thread.id, () => {});
   replay.unsubscribe();
   expect(replay.running).toBe(false);
   const messages = reduceEvents(replay.events);
@@ -440,15 +457,15 @@ it('keeps history across a restart, replays it and closes runs a crash left open
     type: 'RUN_ERROR',
     message: expect.stringMatching(/stopped before this answer finished/),
   });
-  expect(f.runner.runs(f.thread.id).at(-1)?.status).toBe('interrupted');
+  expect((await f.runner.runs(f.thread.id)).at(-1)?.status).toBe('interrupted');
   // The partial answer is part of what the model sees next time.
-  expect(f.runner.messages(f.thread.id)).toHaveLength(4);
+  expect(await f.runner.messages(f.thread.id)).toHaveLength(4);
 });
 
 it('replays a running turn to a late watcher without gaps', async () => {
-  const f = fixture();
+  const f = await fixture();
   let release!: () => void;
-  f.runner.start({
+  await f.runner.start({
     threadId: f.thread.id,
     agentId: f.dot.id,
     messages: [{ id: 'u', role: 'user', content: 'Hi' }],
@@ -473,7 +490,7 @@ it('replays a running turn to a late watcher without gaps', async () => {
     },
   });
   const live: BaseEvent[] = [];
-  const view = f.runner.watch(f.thread.id, (event) => live.push(event));
+  const view = await f.runner.watch(f.thread.id, (event) => live.push(event));
   expect(view.running).toBe(true);
   release();
   await f.runner.done(f.thread.id);
@@ -481,30 +498,30 @@ it('replays a running turn to a late watcher without gaps', async () => {
   expect(messages.map((message) => message.content)).toEqual(['Hi', 'Hello']);
   expect(types(live).at(-1)).toBe('RUN_FINISHED');
   // Stored events are compacted once the run ends.
-  const stored = f.runner.watch(f.thread.id, () => {});
+  const stored = await f.runner.watch(f.thread.id, () => {});
   stored.unsubscribe();
   expect(
     stored.events.filter((event) => event.type === 'TEXT_MESSAGE_CONTENT'),
   ).toEqual([expect.objectContaining({ delta: 'Hello' })]);
 });
 
-it('renames, archives and deletes threads for the owner only', () => {
-  const runner = new ThreadRunner(':memory:', 'owner');
+it('renames, archives and deletes threads for the owner only', async () => {
+  const runner = new ThreadRunner(await testDb(), 'owner');
   cleanup.push(() => runner.close());
-  runner.createThread({ threadId: 't', agentId: 'dot' });
-  expect(runner.renameThread('t', 'Named')?.name).toBe('Named');
-  expect(runner.archiveThread('t')?.archived).toBe(true);
-  expect(() =>
+  await runner.createThread({ threadId: 't', agentId: 'dot' });
+  expect((await runner.renameThread('t', 'Named'))?.name).toBe('Named');
+  expect((await runner.archiveThread('t'))?.archived).toBe(true);
+  await expect(
     runner.createThread({ threadId: 't', agentId: 'other' }),
-  ).toThrow(/different Dot/);
-  expect(runner.deleteThread('t')).toBe(true);
-  expect(runner.thread('t')).toBeUndefined();
+  ).rejects.toThrow(/different Dot/);
+  expect(await runner.deleteThread('t')).toBe(true);
+  expect(await runner.thread('t')).toBeUndefined();
 });
 
 it('reports setup activation once an answer streams, and failures by class', async () => {
   const capture = vi.fn();
-  const make = (overrides = {}) => {
-    const f = fixture(':memory:', overrides);
+  const make = async (overrides = {}) => {
+    const f = await fixture(undefined, overrides);
     const engine = new DotEngine({
       store: f.store,
       workspace: f.workspace,
@@ -514,18 +531,24 @@ it('reports setup activation once an answer streams, and failures by class', asy
     });
     return { ...f, engine };
   };
-  const ok = make();
+  const ok = await make();
   vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(say('Hello'));
-  await ok.engine.start({ threadId: ok.thread.id, message: { content: 'Hi' } })
-    .done;
+  await (
+    await ok.engine.start({
+      threadId: ok.thread.id,
+      message: { content: 'Hi' },
+    })
+  ).done;
   expect(capture).toHaveBeenCalledWith({ kind: 'activated' });
 
   capture.mockClear();
-  const unconfigured = make({ model: undefined });
-  await unconfigured.engine.start({
-    threadId: unconfigured.thread.id,
-    message: { content: 'Hi' },
-  }).done;
+  const unconfigured = await make({ model: undefined });
+  await (
+    await unconfigured.engine.start({
+      threadId: unconfigured.thread.id,
+      message: { content: 'Hi' },
+    })
+  ).done;
   expect(capture.mock.calls).toEqual([
     [
       {
@@ -537,14 +560,16 @@ it('reports setup activation once an answer streams, and failures by class', asy
   ]);
 
   capture.mockClear();
-  const failing = make();
+  const failing = await make();
   vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
     new Response('nope', { status: 500 }),
   );
-  await failing.engine.start({
-    threadId: failing.thread.id,
-    message: { content: 'Hi' },
-  }).done;
+  await (
+    await failing.engine.start({
+      threadId: failing.thread.id,
+      message: { content: 'Hi' },
+    })
+  ).done;
   expect(capture).toHaveBeenCalledWith(
     expect.objectContaining({ error_class: 'assistant_run_failed' }),
   );

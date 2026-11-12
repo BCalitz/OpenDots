@@ -9,7 +9,7 @@ import { sql, type Db } from './index.js';
  * stores read and write it whole. `seq` columns keep insertion order where
  * SQLite's rowid used to.
  */
-export const migrations: { version: number; name: string; sql: string }[] = [
+const migrations: { version: number; name: string; sql: string }[] = [
   {
     version: 1,
     name: 'initial schema',

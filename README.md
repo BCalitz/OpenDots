@@ -15,7 +15,7 @@ Built with [AG-UI](https://docs.ag-ui.com/introduction) events and [TanStack AI]
 
 <a href="https://trendshift.io/repositories/275323" target="_blank"><img src="https://trendshift.io/api/badge/trendshift/repositories/275323/daily?language=TypeScript" alt="CopilotKit/OpenDots | Trendshift #2 TypeScript Repository Of The Day" width="250" height="55"/></a>
 
-Host OpenDots on your own infrastructure. Conversations, pages and approvals are stored in your own SQLite database, so a model key is all you need. Slack connects directly from your server. Clone this template and customize it however you want.
+Host OpenDots on your own infrastructure. Conversations, pages and approvals are stored in your own Postgres database, so a model key is all you need. Slack connects directly from your server. Clone this template and customize it however you want.
 
 **OpenDots is now available as a UX skin in [OpenBot](https://github.com/CopilotKit/OpenBot)**, a more robust version with sign-in, per-Bot permissions and an audit trail, maintained by CopilotKit. This repo stays a community-maintained starter for building your own project.
 
@@ -183,6 +183,7 @@ git clone https://github.com/CopilotKit/OpenDots.git
 cd OpenDots
 npm ci
 cp .env.example .env
+npm run db   # Postgres in Docker
 npm run dev
 ```
 
@@ -192,7 +193,7 @@ See [Setup](docs/SETUP.md) for configuration, Slack, calls, the browser service,
 
 ## Data and privacy
 
-Conversation messages, tool calls, run events and approvals are stored in your SQLite database (`DATABASE_PATH`), alongside pages and workspace metadata. Back up that file to back up everything.
+Conversation messages, tool calls, run events and approvals are stored in your Postgres database (`DATABASE_URL`), alongside pages and workspace metadata. Back up that database to back up everything. Upgrading from a release that used SQLite: see [moving from SQLite](docs/SETUP.md#moving-from-sqlite).
 
 The configured model provider receives conversation context, including authorized page content and tool results. Public-web research sends queries and selected URLs to Parallel by default; set `WEB_SEARCH_PROVIDER=disabled` to disable those tools. When connected apps are enabled, tool arguments and results pass through Composio and the app provider. Speech and Slack send data to their providers when used.
 

@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -21,14 +21,12 @@ import {
   INTERRUPTED_ACTION_THRESHOLD_MS,
 } from '../src/server/connection-store.js';
 import type { Connection } from '../src/shared/connection-types.js';
-import { DatabaseSync } from 'node:sqlite';
-const resources: (() => void)[] = [];
-afterEach(() => resources.splice(0).forEach((close) => close()));
-function fixture({ twin = false } = {}) {
-  const workspace = new WorkspaceStore(':memory:', 'owner');
-  resources.push(() => workspace.close());
-  const dot = workspace.dots()[0];
-  workspace.bindThread('thread', dot.id, 'A conversation');
+import { sql } from '../src/server/db/index.js';
+import { testDb } from './fixtures/db.js';
+async function fixture({ twin = false } = {}) {
+  const workspace = await WorkspaceStore.open(await testDb(), 'owner');
+  const dot = (await workspace.dots())[0];
+  await workspace.bindThread('thread', dot.id, 'A conversation');
   const sent = vi.fn();
   const sentTwin = vi.fn();
   const tokens: (string | undefined)[] = [];
@@ -103,7 +101,7 @@ function fixture({ twin = false } = {}) {
   };
 }
 it('discovers tools, gates anything not read-only, and never returns the token', async () => {
-  const { dot, request, tokens } = fixture();
+  const { dot, request, tokens } = await fixture();
   const response = await request(`/dots/${dot.id}/connections`, 'POST', {
     name: 'Work Mail',
     url: 'https://mail.example.com/mcp',
@@ -140,7 +138,7 @@ it('discovers tools, gates anything not read-only, and never returns the token',
   ]);
 });
 it('rejects endpoints with embedded credentials or non-http schemes', async () => {
-  const { dot, request } = fixture();
+  const { dot, request } = await fixture();
   for (const url of ['https://user:pw@example.com/mcp', 'file:///etc/passwd']) {
     const response = await request(`/dots/${dot.id}/connections`, 'POST', {
       name: 'Bad',
@@ -182,7 +180,7 @@ const tools = (
     connections,
     dotId,
     threadId,
-    () => {},
+    async () => {},
     new AbortController().signal,
     approve,
   );
@@ -197,26 +195,26 @@ const owner = (answer: ApprovalStatus) => {
   return { approve, asked };
 };
 it('runs read-only tools directly and holds write tools for owner approval', async () => {
-  const { dot, connections, sent } = fixture();
+  const { dot, connections, sent } = await fixture();
   await connections.add(dot.id, {
     name: 'Mail',
     url: 'https://mail.example.com/mcp',
   });
   const declining = owner('declined');
-  const find = (approve: Approve | undefined, name: string) =>
-    tools(connections, dot.id, approve).find((tool) => tool.name === name)!;
+  const find = async (approve: Approve | undefined, name: string) =>
+    (await tools(connections, dot.id, approve)).find(
+      (tool) => tool.name === name,
+    )!;
   expect(
-    await find(declining.approve, 'mail__search_mail').execute(
-      { query: 'invoices' },
-      toolCtx(),
-    ),
+    await (
+      await find(declining.approve, 'mail__search_mail')
+    ).execute({ query: 'invoices' }, toolCtx()),
   ).toEqual({ isError: false, text: '3 results for invoices' });
   expect(declining.asked).toEqual([]);
   expect(
-    await find(declining.approve, 'mail__send_mail').execute(
-      { to: 'a@example.com', body: 'Hi' },
-      toolCtx(),
-    ),
+    await (
+      await find(declining.approve, 'mail__send_mail')
+    ).execute({ to: 'a@example.com', body: 'Hi' }, toolCtx()),
   ).toMatchObject({ approved: false, status: 'declined' });
   // The owner saw the server's record of exactly what would run.
   expect(declining.asked).toEqual([
@@ -231,29 +229,27 @@ it('runs read-only tools directly and holds write tools for owner approval', asy
     },
   ]);
   expect(
-    await find(owner('expired').approve, 'mail__send_mail').execute(
-      { to: 'a@example.com', body: 'Hi' },
-      toolCtx(),
-    ),
+    await (
+      await find(owner('expired').approve, 'mail__send_mail')
+    ).execute({ to: 'a@example.com', body: 'Hi' }, toolCtx()),
   ).toMatchObject({ approved: false, status: 'expired' });
   // Schedules, voice and Slack cannot ask, so gated tools never run there.
   expect(
-    await find(undefined, 'mail__send_mail').execute(
-      { to: 'a@example.com', body: 'Hi' },
-      toolCtx(),
-    ),
+    await (
+      await find(undefined, 'mail__send_mail')
+    ).execute({ to: 'a@example.com', body: 'Hi' }, toolCtx()),
   ).toMatchObject({ status: 'unavailable' });
   expect(sent).not.toHaveBeenCalled();
 });
 it('runs an approved request once and records its receipt', async () => {
-  const { dot, connections, sent, workspace } = fixture();
+  const { dot, connections, sent, workspace } = await fixture();
   await connections.add(dot.id, {
     name: 'Mail',
     url: 'https://mail.example.com/mcp',
   });
-  const send = tools(connections, dot.id, owner('approved').approve).find(
-    (tool) => tool.name === 'mail__send_mail',
-  )!;
+  const send = (
+    await tools(connections, dot.id, owner('approved').approve)
+  ).find((tool) => tool.name === 'mail__send_mail')!;
   expect(
     await send.execute({ to: 'a@example.com', body: 'Hi' }, toolCtx('tc1')),
   ).toEqual({ approved: true, isError: false, text: 'Sent to a@example.com' });
@@ -263,23 +259,23 @@ it('runs an approved request once and records its receipt', async () => {
   ).toMatchObject({ approved: true, error: 'This action already ran.' });
   expect(sent).toHaveBeenCalledOnce();
   expect(sent.mock.calls[0][0]).toEqual({ to: 'a@example.com', body: 'Hi' });
-  expect(workspace.connections.action('thread', 'tc1')).toMatchObject({
+  expect(await workspace.connections.action('thread', 'tc1')).toMatchObject({
     status: 'done',
     result: { isError: false, text: 'Sent to a@example.com' },
   });
 });
 it('binds approvals to the exact tool, even when look-alike names collide', async () => {
-  const { dot, connections, sent, sentTwin } = fixture({ twin: true });
+  const { dot, connections, sent, sentTwin } = await fixture({ twin: true });
   await connections.add(dot.id, {
     name: 'Mail',
     url: 'https://mail.example.com/mcp',
   });
-  const names = connections.tools(dot.id).map((tool) => tool.name);
+  const names = (await connections.tools(dot.id)).map((tool) => tool.name);
   expect(names).toEqual(
     expect.arrayContaining(['mail__send_mail', 'mail__send_mail_2']),
   );
   const approving = owner('approved');
-  const twin = tools(connections, dot.id, approving.approve).find(
+  const twin = (await tools(connections, dot.id, approving.approve)).find(
     (tool) => tool.name === 'mail__send_mail_2',
   )!;
   await twin.execute({ to: 'a@example.com', body: 'Hi' }, toolCtx('tc1'));
@@ -288,20 +284,22 @@ it('binds approvals to the exact tool, even when look-alike names collide', asyn
   expect(sent).not.toHaveBeenCalled();
 });
 it('honors owner changes to a tool, including during a turn', async () => {
-  const { dot, connections, workspace } = fixture();
+  const { dot, connections, workspace } = await fixture();
   const connection = await connections.add(dot.id, {
     name: 'Mail',
     url: 'https://mail.example.com/mcp',
   });
-  const [search] = tools(connections, dot.id);
-  const before = workspace.connections.fingerprint(dot.id);
-  connections.setTool(connection.id, 'search_mail', { requiresApproval: true });
-  expect(workspace.connections.fingerprint(dot.id)).not.toBe(before);
+  const [search] = await tools(connections, dot.id);
+  const before = await workspace.connections.fingerprint(dot.id);
+  await connections.setTool(connection.id, 'search_mail', {
+    requiresApproval: true,
+  });
+  expect(await workspace.connections.fingerprint(dot.id)).not.toBe(before);
   expect(await search.execute!({ query: 'x' }, toolCtx())).toMatchObject({
     status: 'unavailable',
   });
-  connections.setTool(connection.id, 'search_mail', { enabled: false });
-  expect(connections.tools(dot.id).map((tool) => tool.name)).toEqual([
+  await connections.setTool(connection.id, 'search_mail', { enabled: false });
+  expect((await connections.tools(dot.id)).map((tool) => tool.name)).toEqual([
     'mail__send_mail',
   ]);
   await expect(search.execute!({ query: 'x' }, toolCtx())).rejects.toThrow(
@@ -309,7 +307,7 @@ it('honors owner changes to a tool, including during a turn', async () => {
   );
 });
 it('keeps owner changes made while a refresh is discovering tools', async () => {
-  const { dot, connections, gate } = fixture();
+  const { dot, connections, gate } = await fixture();
   const connection = await connections.add(dot.id, {
     name: 'Mail',
     url: 'https://mail.example.com/mcp',
@@ -319,8 +317,10 @@ it('keeps owner changes made while a refresh is discovering tools', async () => 
   const refreshing = connections.refresh(connection.id);
   await new Promise((resolve) => setTimeout(resolve, 20));
   // Revoke and gate while discovery is still pending.
-  connections.setTool(connection.id, 'send mail!', { enabled: false });
-  connections.setTool(connection.id, 'search_mail', { requiresApproval: true });
+  await connections.setTool(connection.id, 'send mail!', { enabled: false });
+  await connections.setTool(connection.id, 'search_mail', {
+    requiresApproval: true,
+  });
   gate.wait = undefined;
   release();
   const refreshed = await refreshing;
@@ -336,12 +336,12 @@ it('keeps owner changes made while a refresh is discovering tools', async () => 
   ]);
 });
 it('keeps owner choices on refresh and reports unreachable services', async () => {
-  const { dot, connections } = fixture();
+  const { dot, connections } = await fixture();
   const connection = await connections.add(dot.id, {
     name: 'Mail',
     url: 'https://mail.example.com/mcp',
   });
-  connections.setTool(connection.id, 'send mail!', { enabled: false });
+  await connections.setTool(connection.id, 'send mail!', { enabled: false });
   const refreshed = await connections.refresh(connection.id);
   expect(
     refreshed.tools.find((tool) => tool.name === 'send mail!'),
@@ -376,31 +376,16 @@ it('normalizes and bounds tool results', () => {
   ).toHaveLength(20000 + '\n[truncated]'.length);
   expect(normalizeResult('nope').isError).toBe(true);
 });
-it('migrates existing action receipts with their original claim time', () => {
-  const db = new DatabaseSync(':memory:');
-  try {
-    db.exec(`CREATE TABLE mcp_actions(
-      threadId TEXT NOT NULL,
-      toolCallId TEXT NOT NULL,
-      connectionId TEXT NOT NULL,
-      tool TEXT NOT NULL,
-      status TEXT NOT NULL,
-      result TEXT,
-      createdAt INTEGER NOT NULL,
-      approvalId TEXT,
-      PRIMARY KEY(threadId, toolCallId)
-    );`);
-    db.prepare(
-      "INSERT INTO mcp_actions VALUES ('thread', 'tc1', 'connection', 'send mail!', 'running', NULL, ?, 'approval-1')",
-    ).run(Date.now() - INTERRUPTED_ACTION_THRESHOLD_MS);
-
-    const store = new ConnectionStore(db);
-    expect(store.action('thread', 'tc1')).toMatchObject({
-      approvalId: 'approval-1',
-      status: 'interrupted',
-      result: null,
-    });
-  } finally {
-    db.close();
-  }
+it('treats a receipt without a claim time as claimed when it was created', async () => {
+  const db = await testDb();
+  // Receipts from before claim times were recorded have only created_at.
+  await db.run(
+    sql`INSERT INTO mcp_actions (thread_id, tool_call_id, connection_id, tool, status, result, created_at, approval_id) VALUES ('thread', 'tc1', 'connection', 'send mail!', 'running', NULL, ${Date.now() - INTERRUPTED_ACTION_THRESHOLD_MS}, 'approval-1')`,
+  );
+  const store = new ConnectionStore(db);
+  expect(await store.action('thread', 'tc1')).toMatchObject({
+    approvalId: 'approval-1',
+    status: 'interrupted',
+    result: null,
+  });
 });

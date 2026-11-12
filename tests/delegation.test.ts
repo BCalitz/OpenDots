@@ -1,9 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { Store } from '../src/server/store.js';
-import { WorkspaceStore } from '../src/server/workspace.js';
+import { testWorkspace } from './fixtures/db.js';
 import { Platform } from '../src/server/platform.js';
 import { Runner } from '../src/server/runner.js';
 import { createApp } from '../src/server/app.js';
@@ -16,23 +12,15 @@ afterEach(async () => {
   vi.restoreAllMocks();
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
-function start() {
-  const dir = mkdtempSync(join(tmpdir(), 'opendots-delegation-'));
-  const database = join(dir, 'opendots.sqlite');
-  const store = new Store(database);
-  const workspace = new WorkspaceStore(database, 'owner');
-  const platform = new Platform(
-    store,
-    workspace,
-    {
-      apiKey: 'fixture',
-      model: 'custom-model',
-      baseUrl: 'https://unused.invalid/v1',
-      voiceName: 'marin',
-      slackUsers: [],
-    },
-    { databasePath: database },
-  );
+async function start() {
+  const { store, workspace } = await testWorkspace();
+  const platform = await Platform.create(store, workspace, {
+    apiKey: 'fixture',
+    model: 'custom-model',
+    baseUrl: 'https://unused.invalid/v1',
+    voiceName: 'marin',
+    slackUsers: [],
+  });
   const config = {
     mode: 'live' as const,
     baseUrl: 'https://unused.invalid/v1',
@@ -45,9 +33,6 @@ function start() {
   });
   cleanup.push(async () => {
     await platform.stop();
-    store.close();
-    workspace.close();
-    rmSync(dir, { recursive: true, force: true });
   });
   return { app, workspace, platform };
 }
@@ -90,9 +75,9 @@ const hasToolResult = (body: Body) =>
   body.messages.some((message) => message.role === 'tool');
 
 it('lets a coordinator Dot hand work to a specialist and use its answer', async () => {
-  const { app, workspace, platform } = start();
-  const coordinator = workspace.dots()[0];
-  const space = workspace.spaces()[0];
+  const { app, workspace, platform } = await start();
+  const coordinator = (await workspace.dots())[0];
+  const space = (await workspace.spaces())[0];
   const researcher = (await (
     await app.request(
       '/api/dots',
@@ -160,10 +145,13 @@ it('lets a coordinator Dot hand work to a specialist and use its answer', async 
   );
 
   // The specialist's work is a normal conversation the owner can open.
-  const delegateThread = workspace.delegateThread(threadId, researcher.id)!;
-  expect(workspace.requireThread(delegateThread, researcher.id).title).toMatch(
-    /^(From Dot: How much did revenue grow\?|Named)$/,
-  );
+  const delegateThread = (await workspace.delegateThread(
+    threadId,
+    researcher.id,
+  ))!;
+  expect(
+    (await workspace.requireThread(delegateThread, researcher.id)).title,
+  ).toMatch(/^(From Dot: How much did revenue grow\?|Named)$/);
   const runs = (await (
     await app.request(`/api/runs?dotId=${researcher.id}`)
   ).json()) as RunSummary[];
@@ -178,8 +166,8 @@ it('lets a coordinator Dot hand work to a specialist and use its answer', async 
 });
 
 it('keeps one continuing conversation per Dot', async () => {
-  const { app, workspace } = start();
-  const dot = workspace.dots()[0];
+  const { app, workspace } = await start();
+  const dot = (await workspace.dots())[0];
   const first = await app.request(
     '/api/conversations',
     json({ dotId: dot.id, title: 'Hello' }),
@@ -199,8 +187,8 @@ it('keeps one continuing conversation per Dot', async () => {
 });
 
 it('only lets a Dot direct other existing Dots', async () => {
-  const { app, workspace } = start();
-  const dot = workspace.dots()[0];
+  const { app, workspace } = await start();
+  const dot = (await workspace.dots())[0];
   const body = (ids: string[]) =>
     json(
       {
@@ -218,5 +206,5 @@ it('only lets a Dot direct other existing Dots', async () => {
   expect(
     (await app.request(`/api/dots/${dot.id}`, body(['missing']))).status,
   ).toBe(400);
-  expect(workspace.dot(dot.id)?.delegateDotIds).toEqual([]);
+  expect((await workspace.dot(dot.id))?.delegateDotIds).toEqual([]);
 });

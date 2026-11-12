@@ -8,7 +8,11 @@ const logger = createLogger();
 const logError = logger.error.bind(logger);
 logger.error = (message, options) => {
   const code = (options?.error as NodeJS.ErrnoException | undefined)?.code;
-  if (message.includes('proxy error') && (code === 'ECONNREFUSED' || code === 'ECONNRESET')) return;
+  if (
+    message.includes('proxy error') &&
+    (code === 'ECONNREFUSED' || code === 'ECONNRESET')
+  )
+    return;
   logError(message, options);
 };
 

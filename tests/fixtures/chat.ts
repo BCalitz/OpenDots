@@ -21,7 +21,7 @@ export async function chatTurn(
   const events: BaseEvent[] = [];
   let finish!: () => void;
   const finished = new Promise<void>((resolve) => (finish = resolve));
-  const view = platform.engine!.watch(threadId, (event) => {
+  const view = await platform.engine!.watch(threadId, (event) => {
     events.push(event);
     if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') finish();
   });

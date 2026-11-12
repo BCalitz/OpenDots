@@ -53,11 +53,12 @@ export class PageService {
         400,
       );
     const key = `${pageId}:${dotId}`;
-    const pending = this.pending.get(key);
-    if (pending) return pending;
     const current = await this.workspace.pages.thread(pageId, dotId);
     if (current?.ready)
       return this.workspace.requireThread(current.threadId, dotId);
+    // Checked after the last await, so a concurrent request joins this one.
+    const pending = this.pending.get(key);
+    if (pending) return pending;
     const sdk = this.conversations();
     const task = (async () => {
       const candidateId = randomUUID();

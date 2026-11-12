@@ -9,7 +9,7 @@ import { WorkspaceStore } from '../../src/server/workspace.js';
  * The Postgres server tests run against. Start one with
  * `npm run test:db` (Docker), or point TEST_DATABASE_URL at your own.
  */
-export const TEST_DATABASE_URL =
+const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
   'postgres://opendots:opendots@127.0.0.1:54329/opendots_test';
 
@@ -35,6 +35,7 @@ export async function testDb(): Promise<Db> {
   } catch (error) {
     throw new Error(
       `Tests need Postgres at ${TEST_DATABASE_URL}. Run \`npm run test:db\` or set TEST_DATABASE_URL. (${error instanceof Error ? error.message : String(error)})`,
+      { cause: error },
     );
   }
   let closed = false;

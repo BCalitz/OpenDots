@@ -223,6 +223,10 @@ export class VoiceService {
     if (job) clearTimeout(job.deadline);
     this.jobs.delete(id);
     await this.platform.workspace.setCall(id, 'ended', transcript);
+    // An expiry that finished first ended the call without a transcript;
+    // keep this one as a late transcript instead of dropping it.
+    if (transcript)
+      await this.platform.workspace.saveLateTranscript(id, transcript);
     await this.hangup(id, job?.providerId);
     if (job) await Promise.allSettled(job.calls.values());
     await this.syncReceipt(id, transcript);

@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
 import { InboxStore } from '../src/server/inbox/store.js';
 import { InboxEngine } from '../src/server/inbox/engine.js';
 import {
@@ -22,24 +21,21 @@ import { detachedContext } from '../src/server/engine/tools.js';
 import type { ConnectionService } from '../src/server/connections.js';
 import type { InboxEvent } from '../src/server/inbox/source.js';
 import type { InboxEventView } from '../src/shared/inbox-types.js';
-import { Store } from '../src/server/store.js';
-import { WorkspaceStore } from '../src/server/workspace.js';
 import { DotEngine } from '../src/server/engine/index.js';
 import { ThreadRunner } from '../src/server/engine/thread-runner.js';
 import { discoveryMessagePrefix } from '../src/shared/discovery-message.js';
 import { completion } from './fixtures/model-stream.js';
+import { testDb, testWorkspace } from './fixtures/db.js';
 
-const cleanup: (() => void)[] = [];
-afterEach(() => {
+const cleanup: (() => unknown)[] = [];
+afterEach(async () => {
   vi.restoreAllMocks();
-  for (const fn of cleanup.splice(0).reverse()) fn();
+  for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
-function inbox() {
-  const db = new DatabaseSync(':memory:');
-  cleanup.push(() => db.close());
-  const store = new InboxStore(db);
-  const { source } = store.create({
+async function inbox() {
+  const store = new InboxStore(await testDb());
+  const { source } = await store.create({
     name: 'Gmail',
     kind: 'mail',
     type: 'composio',
@@ -272,40 +268,50 @@ describe('InboxStore.recentFrom', () => {
     occurredAt,
   });
 
-  it('finds a prior event from the same sender within the window', () => {
-    const { store, source } = inbox();
-    const [earlier] = store.ingest([
+  it('finds a prior event from the same sender within the window', async () => {
+    const { store, source } = await inbox();
+    const [earlier] = await store.ingest([
       event(source.id, 'm1', 'jane@client.com', 10 * HOUR),
     ]);
-    const [later] = store.ingest([
+    const [later] = await store.ingest([
       event(source.id, 'm2', 'jane@client.com', 11 * HOUR),
     ]);
     expect(
-      store
-        .recentFrom('jane@client.com', later.occurredAt, 48 * HOUR, later.id)
-        .map((e) => e.id),
+      (
+        await store.recentFrom(
+          'jane@client.com',
+          later.occurredAt,
+          48 * HOUR,
+          later.id,
+        )
+      ).map((e) => e.id),
     ).toEqual([earlier.id]);
   });
 
-  it('excludes events outside the window', () => {
-    const { store, source } = inbox();
-    store.ingest([event(source.id, 'm1', 'jane@client.com', 0)]);
-    const [later] = store.ingest([
+  it('excludes events outside the window', async () => {
+    const { store, source } = await inbox();
+    await store.ingest([event(source.id, 'm1', 'jane@client.com', 0)]);
+    const [later] = await store.ingest([
       event(source.id, 'm2', 'jane@client.com', 100 * HOUR),
     ]);
     expect(
-      store.recentFrom('jane@client.com', later.occurredAt, HOUR, later.id),
+      await store.recentFrom(
+        'jane@client.com',
+        later.occurredAt,
+        HOUR,
+        later.id,
+      ),
     ).toEqual([]);
   });
 
-  it('does not match a different sender', () => {
-    const { store, source } = inbox();
-    store.ingest([event(source.id, 'm1', 'jane@client.com', 0)]);
-    const [later] = store.ingest([
+  it('does not match a different sender', async () => {
+    const { store, source } = await inbox();
+    await store.ingest([event(source.id, 'm1', 'jane@client.com', 0)]);
+    const [later] = await store.ingest([
       event(source.id, 'm2', 'other@client.com', HOUR),
     ]);
     expect(
-      store.recentFrom(
+      await store.recentFrom(
         'other@client.com',
         later.occurredAt,
         48 * HOUR,
@@ -314,11 +320,13 @@ describe('InboxStore.recentFrom', () => {
     ).toEqual([]);
   });
 
-  it('never returns the event itself', () => {
-    const { store, source } = inbox();
-    const [only] = store.ingest([event(source.id, 'm1', 'jane@client.com', 0)]);
+  it('never returns the event itself', async () => {
+    const { store, source } = await inbox();
+    const [only] = await store.ingest([
+      event(source.id, 'm1', 'jane@client.com', 0),
+    ]);
     expect(
-      store.recentFrom('jane@client.com', only.occurredAt, HOUR, only.id),
+      await store.recentFrom('jane@client.com', only.occurredAt, HOUR, only.id),
     ).toEqual([]);
   });
 });
@@ -490,33 +498,35 @@ describe('discovery sources', () => {
   });
 
   it('polls discovery sources on the inbox timer and hands new items on', async () => {
-    const { store, source } = inbox();
+    const { store, source } = await inbox();
     const execute = vi.fn<ComposioExecute>(async () => ({
       messages: [{ messageId: 'm1', subject: 'Hello' }],
     }));
     const engine = new InboxEngine(store, {} as ConnectionService, {
-      paused: () => false,
+      paused: async () => false,
       composio: () => execute,
     });
     const batches: unknown[] = [];
     engine.onEvents((batch) => void batches.push(batch));
     await engine.tick();
     expect(execute).toHaveBeenCalledTimes(1);
-    expect(store.events({ sourceId: source.id })).toHaveLength(1);
+    expect(await store.events({ sourceId: source.id })).toHaveLength(1);
     expect(batches).toHaveLength(1);
 
     const noKey = new InboxEngine(store, {} as ConnectionService, {
-      paused: () => false,
+      paused: async () => false,
     });
-    store.pollNow(source.id);
+    await store.pollNow(source.id);
     await noKey.tick();
-    expect(store.source(source.id)?.lastError).toMatch(/COMPOSIO_API_KEY/);
+    expect((await store.source(source.id))?.lastError).toMatch(
+      /COMPOSIO_API_KEY/,
+    );
   });
 });
 
 describe('discovery service', () => {
-  function service(investigate?: Investigate, threshold?: number) {
-    const { store, source } = inbox();
+  async function service(investigate?: Investigate, threshold?: number) {
+    const { store, source } = await inbox();
     const judge = fakeJudge();
     const started: string[] = [];
     const discovery = new DiscoveryService(store, {
@@ -529,10 +539,10 @@ describe('discovery service', () => {
         }),
       threshold,
     });
-    const deliver = (events: InboxEvent[]) => {
-      const fresh = store.ingest(events);
+    const deliver = async (events: InboxEvent[]) => {
+      const fresh = await store.ingest(events);
       discovery.listener({
-        source: store.source(source.id)!,
+        source: (await store.source(source.id))!,
         events: fresh,
         initial: false,
       });
@@ -542,12 +552,12 @@ describe('discovery service', () => {
   }
 
   it('flags what needs the owner, investigates it and reports when ready', async () => {
-    const f = service();
+    const f = await service();
     const ready: string[] = [];
     f.discovery.onReady((finding, event) => {
       ready.push(`${event.title} -> ${finding.threadId}`);
     });
-    f.deliver([
+    await f.deliver([
       mail(f.source.id, 'm1', 'PayFast payment received'),
       mail(f.source.id, 'm2', 'Weekly newsletter'),
       mail(f.source.id, 'm3', 'Big sale', {
@@ -566,7 +576,7 @@ describe('discovery service', () => {
     // Below the confidence threshold counts as not needing the owner.
     expect(f.started).toEqual(['PayFast payment received']);
     expect(ready).toEqual(['PayFast payment received -> thread-m1']);
-    const events = f.store.events({ sourceId: f.source.id });
+    const events = await f.store.events({ sourceId: f.source.id });
     const byTitle = (title: string) =>
       events.find((event) => event.title === title)!.finding!;
     expect(byTitle('PayFast payment received')).toMatchObject({
@@ -585,16 +595,18 @@ describe('discovery service', () => {
   });
 
   it('ignores other sources and judges each item once', async () => {
-    const f = service();
-    const [event] = f.deliver([mail(f.source.id, 'm1', 'PayFast payment')]);
+    const f = await service();
+    const [event] = await f.deliver([
+      mail(f.source.id, 'm1', 'PayFast payment'),
+    ]);
     await f.discovery.idle();
     f.discovery.listener({
-      source: f.store.source(f.source.id)!,
+      source: (await f.store.source(f.source.id))!,
       events: [event],
       initial: false,
     });
     f.discovery.listener({
-      source: { ...f.store.source(f.source.id)!, type: 'mcp' },
+      source: { ...(await f.store.source(f.source.id))!, type: 'mcp' },
       events: [event],
       initial: false,
     });
@@ -604,7 +616,7 @@ describe('discovery service', () => {
   });
 
   it('continues the same conversation for a correlated follow-up instead of opening a second one', async () => {
-    const { store, source } = inbox();
+    const { store, source } = await inbox();
     const calls: { title: string; existingThreadId?: string }[] = [];
     const investigate: Investigate = async ({ event, existingThreadId }) => {
       calls.push({ title: event.title, existingThreadId });
@@ -628,26 +640,28 @@ describe('discovery service', () => {
       },
     });
     const discovery = new DiscoveryService(store, { judge, investigate });
-    const deliver = (events: InboxEvent[]) => {
-      const fresh = store.ingest(events);
+    const deliver = async (events: InboxEvent[]) => {
+      const fresh = await store.ingest(events);
       discovery.listener({
-        source: store.source(source.id)!,
+        source: (await store.source(source.id))!,
         events: fresh,
         initial: false,
       });
       return fresh;
     };
 
-    deliver([mail(source.id, 'm1', 'Invoice reminder')]);
+    await deliver([mail(source.id, 'm1', 'Invoice reminder')]);
     await discovery.idle();
-    deliver([{ ...mail(source.id, 'm2', 'Reply needed'), kind: 'message.received' }]);
+    await deliver([
+      { ...mail(source.id, 'm2', 'Reply needed'), kind: 'message.received' },
+    ]);
     await discovery.idle();
 
     expect(calls).toEqual([
       { title: 'Invoice reminder', existingThreadId: undefined },
       { title: 'Reply needed', existingThreadId: 'thread-m1' },
     ]);
-    const events = store.events({ sourceId: source.id });
+    const events = await store.events({ sourceId: source.id });
     const byTitle = (title: string) =>
       events.find((event) => event.title === title)!.finding!;
     // Both items now point at the one conversation the follow-up continued.
@@ -663,35 +677,35 @@ describe('discovery service', () => {
 
   it('keeps the conversation of a failed investigation and can retry it', async () => {
     let fail = true;
-    const f = service(async ({ event }) => {
+    const f = await service(async ({ event }) => {
       if (fail)
         throw Object.assign(new Error('The turn timed out.'), {
           threadId: 'thread-partial',
         });
       return { threadId: `thread-${event.externalId}` };
     });
-    f.deliver([mail(f.source.id, 'm1', 'PayFast payment')]);
+    await f.deliver([mail(f.source.id, 'm1', 'PayFast payment')]);
     await f.discovery.idle();
-    const [event] = f.store.events({ sourceId: f.source.id });
+    const [event] = await f.store.events({ sourceId: f.source.id });
     expect(event.finding).toMatchObject({
       state: 'failed',
       error: 'The turn timed out.',
       threadId: 'thread-partial',
     });
     fail = false;
-    f.discovery.investigate(event.finding!.id);
+    await f.discovery.investigate(event.finding!.id);
     await f.discovery.idle();
-    expect(f.store.event(event.id)?.finding).toMatchObject({
+    expect((await f.store.event(event.id))?.finding).toMatchObject({
       state: 'ready',
       threadId: 'thread-m1',
       error: null,
     });
   });
 
-  it('marks investigations a restart interrupted as failed', () => {
-    const f = service();
-    const [event] = f.store.ingest([mail(f.source.id, 'm1', 'PayFast')]);
-    const finding = f.store.saveFinding({
+  it('marks investigations a restart interrupted as failed', async () => {
+    const f = await service();
+    const [event] = await f.store.ingest([mail(f.source.id, 'm1', 'PayFast')]);
+    const finding = await f.store.saveFinding({
       eventId: event.id,
       attention: true,
       category: 'payment',
@@ -700,26 +714,26 @@ describe('discovery service', () => {
       judgedBy: 'fake-jev',
       dotId: 'books',
     });
-    f.store.updateFinding(finding.id, { state: 'investigating' });
-    f.discovery.start();
-    expect(f.store.finding(finding.id)).toMatchObject({
+    await f.store.updateFinding(finding.id, { state: 'investigating' });
+    await f.discovery.start();
+    expect(await f.store.finding(finding.id)).toMatchObject({
       state: 'failed',
       error: expect.stringMatching(/restarted/),
     });
   });
 
   it('removes findings with their source', async () => {
-    const f = service();
-    f.deliver([mail(f.source.id, 'm1', 'PayFast payment')]);
+    const f = await service();
+    await f.deliver([mail(f.source.id, 'm1', 'PayFast payment')]);
     await f.discovery.idle();
-    expect(f.store.findings('ready')).toHaveLength(1);
-    f.store.remove(f.source.id);
-    expect(f.store.findings('ready')).toHaveLength(0);
+    expect(await f.store.findings('ready')).toHaveLength(1);
+    await f.store.remove(f.source.id);
+    expect(await f.store.findings('ready')).toHaveLength(0);
   });
 
-  it('quotes the item as data in the first message', () => {
-    const f = service();
-    const [event] = f.store.ingest([
+  it('quotes the item as data in the first message', async () => {
+    const f = await service();
+    const [event] = await f.store.ingest([
       mail(f.source.id, 'm1', 'PayFast ```payment'),
     ]);
     const text = investigationMessage({
@@ -779,7 +793,7 @@ describe('read-only tools', () => {
     } as unknown as Parameters<typeof composioTools>[0];
     const tools = await composioTools(
       session,
-      () => {},
+      async () => {},
       undefined,
       undefined,
       async (slug) => /_(FETCH|LIST|GET)_/.test(slug),
@@ -808,14 +822,9 @@ describe('read-only tools', () => {
   });
 
   it('gives a discovery turn only tools that read, and says so', async () => {
-    const store = new Store(':memory:');
-    const workspace = new WorkspaceStore(':memory:', 'owner');
-    const runner = new ThreadRunner(':memory:', 'owner');
-    cleanup.push(() => {
-      runner.close();
-      store.close();
-      workspace.close();
-    });
+    const { db, store, workspace } = await testWorkspace();
+    const runner = new ThreadRunner(db, 'owner');
+    cleanup.push(() => runner.close());
     const engine = new DotEngine({
       store,
       workspace,
@@ -829,26 +838,28 @@ describe('read-only tools', () => {
       runner,
       delegate: async () => ({ threadId: 't', reply: '' }),
     });
-    const [dot] = workspace.dots();
-    const thread = workspace.bindThread(
+    const [dot] = await workspace.dots();
+    const thread = await workspace.bindThread(
       'thread',
       dot.id,
       'Gmail: PayFast',
       'discovery',
     );
-    runner.createThread({ threadId: thread.id, agentId: dot.id });
+    await runner.createThread({ threadId: thread.id, agentId: dot.id });
     const network = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(
         completion({ role: 'assistant', content: 'What came in: ...' }),
       );
-    const run = await engine.start({
-      threadId: thread.id,
-      message: {
-        content: 'Discovery flagged this.',
-        metadata: { opendotsSource: 'discovery' },
-      },
-    }).done;
+    const run = await (
+      await engine.start({
+        threadId: thread.id,
+        message: {
+          content: 'Discovery flagged this.',
+          metadata: { opendotsSource: 'discovery' },
+        },
+      })
+    ).done;
     expect(run.status).toBe('finished');
     expect(run.messages[0].id.startsWith(discoveryMessagePrefix)).toBe(true);
     const request = JSON.parse(String(network.mock.calls[0][1]?.body));
@@ -878,9 +889,8 @@ describe('discovery routes', () => {
     const { Platform } = await import('../src/server/platform.js');
     const { discoveryRoutes } =
       await import('../src/server/discovery/routes.js');
-    const store = new Store(':memory:');
-    const workspace = new WorkspaceStore(':memory:', 'owner');
-    const platform = new Platform(store, workspace, {
+    const { store, workspace } = await testWorkspace();
+    const platform = await Platform.create(store, workspace, {
       apiKey: 'fixture',
       model: 'custom-model',
       baseUrl: 'https://unused.invalid/v1',
@@ -889,11 +899,7 @@ describe('discovery routes', () => {
       composioApiKey,
       typesafeApiKey: 'unused',
     });
-    cleanup.push(() => {
-      void platform.stop();
-      store.close();
-      workspace.close();
-    });
+    cleanup.push(() => platform.stop());
     const account = (id: string, toolkit: string) => ({
       id,
       toolkit,
@@ -920,7 +926,7 @@ describe('discovery routes', () => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
-    return { app, put, platform, dot: workspace.dots()[0] };
+    return { app, put, platform, dot: (await workspace.dots())[0] };
   }
 
   it('turns discovery on per account and reports whether Jev is configured', async () => {
@@ -945,8 +951,8 @@ describe('discovery routes', () => {
     expect(after.accounts).toEqual([
       expect.objectContaining({ enabled: false }),
     ]);
-    expect(f.platform.inbox.store.sources()).toHaveLength(1);
-    expect(f.platform.inbox.store.sources()[0].notify).toBe('off');
+    expect(await f.platform.inbox.store.sources()).toHaveLength(1);
+    expect((await f.platform.inbox.store.sources())[0].notify).toBe('off');
   });
 
   it('refuses apps it cannot read, unknown accounts and unknown Dots', async () => {

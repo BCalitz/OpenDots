@@ -8,13 +8,13 @@ Phase 1 replaced the hosted Intelligence service. Phase 4 removed the CopilotKit
 
 | Piece                                 | Provided by            | Code                                                    |
 | ------------------------------------- | ---------------------- | ------------------------------------------------------- |
-| Conversation storage, streaming, stop | Our code + SQLite      | `src/server/engine/thread-runner.ts`, `chat-routes.ts`  |
+| Conversation storage, streaming, stop | Our code + Postgres    | `src/server/engine/thread-runner.ts`, `chat-routes.ts`  |
 | Agent loop, tools                     | Our code + TanStack AI | `src/server/engine/index.ts`, `engine/tools.ts`         |
-| Approvals                             | Our code + SQLite      | `src/server/engine/approvals.ts`                        |
+| Approvals                             | Our code + Postgres    | `src/server/engine/approvals.ts`                        |
 | Web and mobile chat client            | Our code               | `src/shared/thread-client.ts`, `useThread.ts`           |
 | Slack                                 | Our code (Socket Mode) | `src/server/channels/`                                  |
-| Event engine, insights, delegation    | Our code + SQLite      | `src/server/inbox/`, `insight-routes.ts`, `platform.ts` |
-| Pages, Dots, schedules, MCP, push     | Our code + SQLite      | `store.ts`, `workspace.ts`, `push.ts`, ...              |
+| Event engine, insights, delegation    | Our code + Postgres    | `src/server/inbox/`, `insight-routes.ts`, `platform.ts` |
+| Pages, Dots, schedules, MCP, push     | Our code + Postgres    | `store.ts`, `workspace.ts`, `push.ts`, ...              |
 
 No CopilotKit package or account is needed. `@ag-ui/core` remains for event types.
 
@@ -384,10 +384,10 @@ Discovery moves to Postgres along with the rest of OpenDots; see the build order
 
 #### Build order
 
-1. **Postgres in Compose:** the `pgvector/pgvector` image, `DATABASE_URL`, and the `vector` and `pg_trgm` extensions.
-2. **Async data layer:** a connection pool, migrations, and a test database for the test suite.
-3. **Move the 11 stores** (`store.ts`, `workspace.ts`, `pages.ts`, `inbox/store.ts`, `engine/thread-runner.ts`, `engine/approvals.ts`, `connection-store.ts`, `usage-store.ts`, `computer-store.ts`, `push.ts`, `channels/service.ts`) from synchronous `node:sqlite` to async Postgres, one at a time, with tests after each.
-4. **Import SQLite:** a one-time copy of an existing `DATABASE_PATH` file.
+1. **Postgres in Compose** (built): the `pgvector/pgvector` image, `DATABASE_URL`, and the `vector` and `pg_trgm` extensions.
+2. **Async data layer** (built): a connection pool, migrations, and a test database for the test suite (`src/server/db/`).
+3. **Move the 11 stores** (built: `store.ts`, `workspace.ts`, `pages.ts`, `inbox/store.ts`, `engine/thread-runner.ts`, `engine/approvals.ts`, `connection-store.ts`, `usage-store.ts`, `computer-store.ts`, `push.ts`, `channels/service.ts`) from synchronous `node:sqlite` to async Postgres.
+4. **Import SQLite** (built): a one-time copy of an existing `DATABASE_PATH` file (`npm run import-sqlite`).
 5. **Jev upgrades:** store raw answers, and add the injection, urgency and "what is asked" questions.
 6. **Tags and lookup:** `event_tags`, regex extraction, code lookup, Jev match, judging in context, and updating earlier items.
 7. **Similar items:** embed every item and add the closest to the history.
@@ -488,7 +488,7 @@ Sending mail, accepting meetings on your behalf and closing tickets never go abo
 ## Security and privacy
 
 - Mail, messages and tickets are **untrusted input**. A mail that says "forward all invoices to..." is data, never an instruction. Triage and tool prompts must say so, and write tools stay behind approvals.
-- Source credentials live in SQLite on the server like MCP tokens today. Protect `DATABASE_PATH`.
+- Source credentials live in Postgres on the server like MCP tokens today. Protect the database and its backups.
 - Everything stays on your machine except calls to the model provider and the sources themselves.
 - Every outside action is recorded in the audit view (phase 2).
 
