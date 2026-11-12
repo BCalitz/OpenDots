@@ -13,4 +13,17 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // The data layer is asynchronous: a missed await is a bug, not style.
+    files: ['src/server/**/*.ts', 'tests/**/*.ts'],
+    languageOptions: { parserOptions: { projectService: true } },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': [
+        'error',
+        { checksVoidReturn: false },
+      ],
+      '@typescript-eslint/await-thenable': 'error',
+    },
+  },
 );

@@ -1,7 +1,5 @@
-import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { sql, type Db } from './db/index.js';
 import type {
   Action,
   Detail,
@@ -22,75 +20,56 @@ const defaults: Settings = {
   memoryAllowed: true,
   appsAllowed: false,
 };
+const TASK = sql.raw(
+  'id, prompt, status, interval_seconds, next_run_at, created_at, updated_at, error, lease, lease_until',
+);
 export class Store {
-  private db: DatabaseSync;
-  constructor(path: string) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS setup_telemetry (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, prompt TEXT NOT NULL, status TEXT NOT NULL, intervalSeconds INTEGER, nextRunAt INTEGER, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, error TEXT, lease TEXT, leaseUntil INTEGER);
-      CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, taskId TEXT NOT NULL, status TEXT NOT NULL, startedAt INTEGER NOT NULL, finishedAt INTEGER, result TEXT, error TEXT);
-      CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, taskId TEXT NOT NULL, runId TEXT, text TEXT NOT NULL, createdAt INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, text TEXT NOT NULL, createdAt INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS tasks_due ON tasks(status, nextRunAt);
-      CREATE INDEX IF NOT EXISTS runs_task ON runs(taskId, startedAt);
-      CREATE INDEX IF NOT EXISTS events_task ON events(taskId, id);`);
-    this.db
-      .prepare('INSERT OR IGNORE INTO settings VALUES (1, ?)')
-      .run(JSON.stringify(defaults));
-  }
-  setupTelemetryState(): string | undefined {
+  constructor(readonly db: Db) {}
+  async setupTelemetryState(): Promise<string | undefined> {
     return (
-      this.db.prepare('SELECT value FROM setup_telemetry WHERE id=1').get() as
-        { value: string } | undefined
+      await this.db.row<{ value: string }>(
+        sql`SELECT value FROM setup_telemetry WHERE id=1`,
+      )
     )?.value;
   }
-  saveSetupTelemetryState(value: string) {
-    this.db
-      .prepare('INSERT OR REPLACE INTO setup_telemetry VALUES (1, ?)')
-      .run(value);
+  async saveSetupTelemetryState(value: string) {
+    await this.db.run(
+      sql`INSERT INTO setup_telemetry VALUES (1, ${value}) ON CONFLICT (id) DO UPDATE SET value=excluded.value`,
+    );
   }
-  clearSetupTelemetry() {
-    this.db.prepare('DELETE FROM setup_telemetry').run();
+  async clearSetupTelemetry() {
+    await this.db.run(sql`DELETE FROM setup_telemetry`);
   }
-  close() {
-    this.db.close();
+  private transaction<T>(fn: () => Promise<T>): Promise<T> {
+    return this.db.transaction(fn);
   }
-  private transaction<T>(fn: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const value = fn();
-      this.db.exec('COMMIT');
-      return value;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+  async settings(): Promise<Settings> {
+    const row = await this.db.row<{ value: string }>(
+      sql`SELECT value FROM settings WHERE id=1`,
+    );
+    return {
+      ...defaults,
+      ...(row ? (JSON.parse(row.value) as Partial<Settings>) : {}),
+    };
   }
-  settings(): Settings {
-    const row = this.db
-      .prepare('SELECT value FROM settings WHERE id=1')
-      .get() as { value: string };
-    return { ...defaults, ...(JSON.parse(row.value) as Partial<Settings>) };
-  }
-  updateSettings(patch: Partial<Settings>): Settings {
-    return this.transaction(() => {
-      const previous = this.settings();
+  updateSettings(patch: Partial<Settings>): Promise<Settings> {
+    return this.transaction(async () => {
+      const previous = await this.settings();
       const settings = { ...previous, ...patch };
-      this.db
-        .prepare('UPDATE settings SET value=? WHERE id=1')
-        .run(JSON.stringify(settings));
+      await this.db.run(
+        sql`INSERT INTO settings VALUES (1, ${JSON.stringify(settings)}) ON CONFLICT (id) DO UPDATE SET value=excluded.value`,
+      );
       if (
         (!previous.paused && settings.paused) ||
         (previous.researchAllowed && !settings.researchAllowed) ||
         (previous.memoryAllowed && !settings.memoryAllowed) ||
         (previous.appsAllowed && !settings.appsAllowed)
       ) {
-        const running = this.tasks().filter((t) => t.status === 'running');
+        const running = (await this.tasks()).filter(
+          (t) => t.status === 'running',
+        );
         for (const task of running) {
-          this.invalidate(
+          await this.invalidate(
             task,
             'interrupted',
             'Run interrupted because settings changed. Review completed effects before retrying.',
@@ -100,73 +79,64 @@ export class Store {
       return settings;
     });
   }
-  tasks(): Task[] {
-    return this.db
-      .prepare('SELECT * FROM tasks ORDER BY createdAt DESC')
-      .all() as unknown as Task[];
+  tasks(): Promise<Task[]> {
+    return this.db.rows<Task>(
+      sql`SELECT ${TASK} FROM tasks ORDER BY created_at DESC`,
+    );
   }
-  task(id: string): Task | undefined {
-    return this.db
-      .prepare('SELECT * FROM tasks WHERE id=?')
-      .get(id) as unknown as Task | undefined;
+  task(id: string): Promise<Task | undefined> {
+    return this.db.row<Task>(sql`SELECT ${TASK} FROM tasks WHERE id=${id}`);
   }
-  createTask(prompt: string, intervalSeconds: number | null = null): Task {
+  async createTask(
+    prompt: string,
+    intervalSeconds: number | null = null,
+  ): Promise<Task> {
     const now = Date.now();
     const id = randomUUID();
-    this.db
-      .prepare(
-        "INSERT INTO tasks VALUES (?, ?, 'queued', ?, NULL, ?, ?, NULL, NULL, NULL)",
-      )
-      .run(id, prompt, intervalSeconds, now, now);
-    this.event(id, null, 'Task added to the queue.');
-    return this.task(id)!;
+    await this.db.run(
+      sql`INSERT INTO tasks (id, prompt, status, interval_seconds, created_at, updated_at) VALUES (${id}, ${prompt}, 'queued', ${intervalSeconds}, ${now}, ${now})`,
+    );
+    await this.event(id, null, 'Task added to the queue.');
+    return (await this.task(id))!;
   }
-  detail(id: string): Detail | undefined {
-    const task = this.task(id);
+  async detail(id: string): Promise<Detail | undefined> {
+    const task = await this.task(id);
     if (!task) return undefined;
-    const rows = this.db
-      .prepare(
-        'SELECT * FROM runs WHERE taskId=? ORDER BY startedAt DESC, rowid DESC',
-      )
-      .all(id) as unknown as (Omit<Run, 'result'> & {
-      result: string | null;
-    })[];
+    const rows = await this.db.rows<
+      Omit<Run, 'result'> & { result: string | null }
+    >(
+      sql`SELECT id, task_id, status, started_at, finished_at, result, error FROM runs WHERE task_id=${id} ORDER BY started_at DESC, seq DESC`,
+    );
     return {
       task,
       runs: rows.map((row) => ({
         ...row,
         result: row.result ? (JSON.parse(row.result) as Result) : null,
       })),
-      events: this.db
-        .prepare('SELECT * FROM events WHERE taskId=? ORDER BY id')
-        .all(id) as unknown as TaskEvent[],
+      events: await this.db.rows<TaskEvent>(
+        sql`SELECT * FROM events WHERE task_id=${id} ORDER BY id`,
+      ),
     };
   }
-  event(taskId: string, runId: string | null, text: string) {
-    this.db
-      .prepare(
-        'INSERT INTO events (taskId, runId, text, createdAt) VALUES (?, ?, ?, ?)',
-      )
-      .run(taskId, runId, text, Date.now());
+  async event(taskId: string, runId: string | null, text: string) {
+    await this.db.run(
+      sql`INSERT INTO events (task_id, run_id, text, created_at) VALUES (${taskId}, ${runId}, ${text}, ${Date.now()})`,
+    );
   }
-  private invalidate(task: Task, status: string, reason: string) {
+  private async invalidate(task: Task, status: string, reason: string) {
     const now = Date.now();
     if (task.lease)
-      this.db
-        .prepare(
-          "UPDATE runs SET status='interrupted', finishedAt=?, error=? WHERE id=? AND status='running'",
-        )
-        .run(now, reason, task.lease);
-    this.db
-      .prepare(
-        'UPDATE tasks SET status=?, lease=NULL, leaseUntil=NULL, updatedAt=?, error=? WHERE id=?',
-      )
-      .run(status, now, status === 'interrupted' ? reason : null, task.id);
-    this.event(task.id, task.lease, reason);
+      await this.db.run(
+        sql`UPDATE runs SET status='interrupted', finished_at=${now}, error=${reason} WHERE id=${task.lease} AND status='running'`,
+      );
+    await this.db.run(
+      sql`UPDATE tasks SET status=${status}, lease=NULL, lease_until=NULL, updated_at=${now}, error=${status === 'interrupted' ? reason : null} WHERE id=${task.id}`,
+    );
+    await this.event(task.id, task.lease, reason);
   }
-  action(id: string, action: Action): Task | undefined {
-    return this.transaction(() => {
-      const task = this.task(id);
+  action(id: string, action: Action): Promise<Task | undefined> {
+    return this.transaction(async () => {
+      const task = await this.task(id);
       if (!task) return undefined;
       if (action === 'run' && task.status === 'running') return task;
       const status =
@@ -175,98 +145,87 @@ export class Store {
           : action === 'pause'
             ? 'paused'
             : 'cancelled';
-      this.invalidate(
+      await this.invalidate(
         task,
         status,
         action === 'run' ? 'Task queued for a new run.' : `Task ${status}.`,
       );
-      this.db
-        .prepare('UPDATE tasks SET error=NULL, nextRunAt=NULL WHERE id=?')
-        .run(id);
+      await this.db.run(
+        sql`UPDATE tasks SET error=NULL, next_run_at=NULL WHERE id=${id}`,
+      );
       return this.task(id);
     });
   }
-  schedule(id: string, intervalSeconds: number | null): Task | undefined {
-    const task = this.task(id);
-    if (!task) return undefined;
-    const next =
-      intervalSeconds && task.status === 'completed'
-        ? Date.now() + intervalSeconds * 1000
-        : null;
-    this.db
-      .prepare(
-        'UPDATE tasks SET intervalSeconds=?, nextRunAt=?, updatedAt=? WHERE id=?',
-      )
-      .run(intervalSeconds, next, Date.now(), id);
-    this.event(
-      id,
-      null,
-      intervalSeconds
-        ? `Repeats every ${intervalSeconds / 60} minutes after a successful run.`
-        : 'Repeat schedule removed.',
-    );
-    return this.task(id);
+  schedule(
+    id: string,
+    intervalSeconds: number | null,
+  ): Promise<Task | undefined> {
+    return this.transaction(async () => {
+      const task = await this.task(id);
+      if (!task) return undefined;
+      const next =
+        intervalSeconds && task.status === 'completed'
+          ? Date.now() + intervalSeconds * 1000
+          : null;
+      await this.db.run(
+        sql`UPDATE tasks SET interval_seconds=${intervalSeconds}, next_run_at=${next}, updated_at=${Date.now()} WHERE id=${id}`,
+      );
+      await this.event(
+        id,
+        null,
+        intervalSeconds
+          ? `Repeats every ${intervalSeconds / 60} minutes after a successful run.`
+          : 'Repeat schedule removed.',
+      );
+      return this.task(id);
+    });
   }
   claim(
     now = Date.now(),
     leaseDurationMs = DEFAULT_WORKER_LEASE_MS,
-  ): Claim | null {
-    return this.transaction(() => {
-      const settings = this.settings();
+  ): Promise<Claim | null> {
+    return this.transaction(async () => {
+      const settings = await this.settings();
       if (settings.paused || !settings.researchAllowed) return null;
-      const expired = this.db
-        .prepare("SELECT * FROM tasks WHERE status='running' AND leaseUntil<=?")
-        .all(now) as unknown as Task[];
+      const expired = await this.db.rows<Task>(
+        sql`SELECT ${TASK} FROM tasks WHERE status='running' AND lease_until<=${now}`,
+      );
       for (const task of expired)
-        this.invalidate(
+        await this.invalidate(
           task,
           'interrupted',
           'Worker lease expired. Review completed effects before retrying.',
         );
-      const task = this.db
-        .prepare(
-          "SELECT * FROM tasks WHERE status='queued' OR (status='completed' AND nextRunAt IS NOT NULL AND nextRunAt<=?) ORDER BY createdAt LIMIT 1",
-        )
-        .get(now) as unknown as Task | undefined;
+      const task = await this.db.row<Task>(
+        sql`SELECT ${TASK} FROM tasks WHERE status='queued' OR (status='completed' AND next_run_at IS NOT NULL AND next_run_at<=${now}) ORDER BY created_at LIMIT 1`,
+      );
       if (!task) return null;
       const lease = randomUUID();
-      this.db
-        .prepare(
-          "UPDATE tasks SET status='running', lease=?, leaseUntil=?, nextRunAt=NULL, error=NULL, updatedAt=? WHERE id=?",
-        )
-        .run(lease, now + leaseDurationMs, now, task.id);
-      this.db
-        .prepare(
-          "INSERT INTO runs VALUES (?, ?, 'running', ?, NULL, NULL, NULL)",
-        )
-        .run(lease, task.id, now);
-      this.event(task.id, lease, 'Run started.');
-      return { ...this.task(task.id)!, lease };
+      await this.db.run(
+        sql`UPDATE tasks SET status='running', lease=${lease}, lease_until=${now + leaseDurationMs}, next_run_at=NULL, error=NULL, updated_at=${now} WHERE id=${task.id}`,
+      );
+      await this.db.run(
+        sql`INSERT INTO runs (id, task_id, status, started_at) VALUES (${lease}, ${task.id}, 'running', ${now})`,
+      );
+      await this.event(task.id, lease, 'Run started.');
+      return { ...(await this.task(task.id))!, lease };
     });
   }
-  owns(claim: Claim): boolean {
-    const task = this.task(claim.id);
+  async owns(claim: Claim): Promise<boolean> {
+    const task = await this.task(claim.id);
     return task?.status === 'running' && task.lease === claim.lease;
   }
-  finish(claim: Claim, result: Result, now = Date.now()): boolean {
-    return this.transaction(() => {
-      if (!this.owns(claim)) return false;
-      const task = this.task(claim.id)!;
-      this.db
-        .prepare(
-          "UPDATE runs SET status='completed', finishedAt=?, result=? WHERE id=?",
-        )
-        .run(now, JSON.stringify(result), claim.lease);
-      this.db
-        .prepare(
-          "UPDATE tasks SET status='completed', lease=NULL, leaseUntil=NULL, updatedAt=?, nextRunAt=? WHERE id=?",
-        )
-        .run(
-          now,
-          task.intervalSeconds ? now + task.intervalSeconds * 1000 : null,
-          claim.id,
-        );
-      this.event(
+  finish(claim: Claim, result: Result, now = Date.now()): Promise<boolean> {
+    return this.transaction(async () => {
+      if (!(await this.owns(claim))) return false;
+      const task = (await this.task(claim.id))!;
+      await this.db.run(
+        sql`UPDATE runs SET status='completed', finished_at=${now}, result=${JSON.stringify(result)} WHERE id=${claim.lease}`,
+      );
+      await this.db.run(
+        sql`UPDATE tasks SET status='completed', lease=NULL, lease_until=NULL, updated_at=${now}, next_run_at=${task.intervalSeconds ? now + task.intervalSeconds * 1000 : null} WHERE id=${claim.id}`,
+      );
+      await this.event(
         claim.id,
         claim.lease,
         result.sample ? 'Fictional sample brief ready.' : 'Run completed.',
@@ -274,46 +233,36 @@ export class Store {
       return true;
     });
   }
-  interrupt(claim: Claim, reason: string) {
-    this.transaction(() => {
-      if (this.owns(claim)) this.invalidate(claim, 'interrupted', reason);
+  async interrupt(claim: Claim, reason: string) {
+    await this.transaction(async () => {
+      if (await this.owns(claim))
+        await this.invalidate(claim, 'interrupted', reason);
     });
   }
-  fail(claim: Claim, error: string) {
-    this.transaction(() => {
-      if (!this.owns(claim)) return;
+  async fail(claim: Claim, error: string) {
+    await this.transaction(async () => {
+      if (!(await this.owns(claim))) return;
       const now = Date.now();
-      this.db
-        .prepare(
-          "UPDATE runs SET status='failed', finishedAt=?, error=? WHERE id=?",
-        )
-        .run(now, error, claim.lease);
-      this.db
-        .prepare(
-          "UPDATE tasks SET status='failed', lease=NULL, leaseUntil=NULL, error=?, updatedAt=? WHERE id=?",
-        )
-        .run(error, now, claim.id);
-      this.event(claim.id, claim.lease, error);
+      await this.db.run(
+        sql`UPDATE runs SET status='failed', finished_at=${now}, error=${error} WHERE id=${claim.lease}`,
+      );
+      await this.db.run(
+        sql`UPDATE tasks SET status='failed', lease=NULL, lease_until=NULL, error=${error}, updated_at=${now} WHERE id=${claim.id}`,
+      );
+      await this.event(claim.id, claim.lease, error);
     });
   }
-  memories(): Memory[] {
-    return this.db
-      .prepare('SELECT * FROM memories ORDER BY createdAt DESC')
-      .all() as unknown as Memory[];
-  }
-  saveMemory(text: string, id: string = randomUUID()): Memory {
-    this.db
-      .prepare(
-        'INSERT INTO memories VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET text=excluded.text',
-      )
-      .run(id, text, Date.now());
-    return this.db
-      .prepare('SELECT * FROM memories WHERE id=?')
-      .get(id) as unknown as Memory;
-  }
-  deleteMemory(id: string): boolean {
-    return (
-      this.db.prepare('DELETE FROM memories WHERE id=?').run(id).changes > 0
+  memories(): Promise<Memory[]> {
+    return this.db.rows<Memory>(
+      sql`SELECT * FROM memories ORDER BY created_at DESC`,
     );
+  }
+  async saveMemory(text: string, id: string = randomUUID()): Promise<Memory> {
+    return (await this.db.row<Memory>(
+      sql`INSERT INTO memories VALUES (${id}, ${text}, ${Date.now()}) ON CONFLICT (id) DO UPDATE SET text=excluded.text RETURNING *`,
+    ))!;
+  }
+  async deleteMemory(id: string): Promise<boolean> {
+    return (await this.db.run(sql`DELETE FROM memories WHERE id=${id}`)) > 0;
   }
 }

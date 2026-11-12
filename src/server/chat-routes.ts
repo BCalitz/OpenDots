@@ -60,14 +60,14 @@ export function chatRoutes(platform: Platform) {
   // History first, then a `ready` frame, then live events for as long as
   // the client stays connected, including turns started elsewhere (voice,
   // schedules, another device).
-  app.get('/chat/:threadId/events', (c) => {
+  app.get('/chat/:threadId/events', async (c) => {
     const threadId = c.req.param('threadId');
     const chat = engine();
-    platform.workspace.requireThread(threadId);
+    await platform.workspace.requireThread(threadId);
     const encoder = new TextEncoder();
     let close = () => {};
     const body = new ReadableStream<Uint8Array>({
-      start(controller) {
+      async start(controller) {
         let open = true;
         const write = (chunk: string) => {
           if (!open) return;
@@ -79,9 +79,15 @@ export function chatRoutes(platform: Platform) {
         };
         const send = (frame: ChatFrame) =>
           write(`data: ${JSON.stringify(frame)}\n\n`);
-        const view = chat.watch(threadId, (event) =>
+        const view = await chat.watch(threadId, (event) =>
           send({ kind: 'event', event }),
         );
+        // The client may have left while the history was loading.
+        if (c.req.raw.signal.aborted) {
+          view.unsubscribe();
+          open = false;
+          return;
+        }
         for (const event of view.events) send({ kind: 'event', event });
         send({ kind: 'ready', running: view.running });
         const heartbeat = setInterval(() => write(': ping\n\n'), HEARTBEAT_MS);
@@ -116,7 +122,7 @@ export function chatRoutes(platform: Platform) {
   app.post('/chat/:threadId/messages', async (c) => {
     const chat = engine();
     platform.requireReady();
-    if (platform.store.settings().paused)
+    if ((await platform.store.settings()).paused)
       return c.json(
         {
           error: 'OpenDots is paused. Resume it to keep chatting.',
@@ -125,7 +131,7 @@ export function chatRoutes(platform: Platform) {
         409,
       );
     const input = messageInput.parse(await c.req.json());
-    const { runId } = chat.start({
+    const { runId } = await chat.start({
       threadId: c.req.param('threadId'),
       message: input,
       source: 'chat',
@@ -133,13 +139,15 @@ export function chatRoutes(platform: Platform) {
     return c.json({ runId }, 202);
   });
 
-  app.post('/chat/:threadId/stop', (c) =>
-    c.json({ stopped: engine().stop(c.req.param('threadId')) }),
+  app.post('/chat/:threadId/stop', async (c) =>
+    c.json({ stopped: await engine().stop(c.req.param('threadId')) }),
   );
 
-  app.get('/chat/:threadId/approvals', (c) => {
-    const thread = platform.workspace.requireThread(c.req.param('threadId'));
-    return c.json(platform.approvals?.pending(thread.id) ?? []);
+  app.get('/chat/:threadId/approvals', async (c) => {
+    const thread = await platform.workspace.requireThread(
+      c.req.param('threadId'),
+    );
+    return c.json((await platform.approvals?.pending(thread.id)) ?? []);
   });
 
   app.post('/chat/approvals/:id', async (c) => {
@@ -148,11 +156,11 @@ export function chatRoutes(platform: Platform) {
       .strict()
       .parse(await c.req.json());
     const approvals = platform.approvals;
-    const current = approvals?.get(c.req.param('id'));
+    const current = await approvals?.get(c.req.param('id'));
     if (!approvals || !current) throw new Error('Approval request not found.');
     // Only for a conversation that still exists in this workspace.
-    platform.workspace.requireThread(current.threadId);
-    return c.json(approvals.decide(current.id, approved));
+    await platform.workspace.requireThread(current.threadId);
+    return c.json(await approvals.decide(current.id, approved));
   });
   return app;
 }

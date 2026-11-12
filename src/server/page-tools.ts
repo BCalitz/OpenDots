@@ -2,18 +2,20 @@ import { defineTool } from './engine/tools.js';
 import { z } from 'zod';
 import type { WorkspaceStore } from './workspace.js';
 import { pageInput, pagePatch } from './pages.js';
-export function pageAccess(
+export async function pageAccess(
   workspace: WorkspaceStore,
   spaceId: string,
   threadId: string,
-  check: () => void,
+  check: () => Promise<void>,
 ) {
-  const dotId = workspace.requireThread(threadId).dotId;
-  const resolve = (requested?: string) => {
-    check();
+  const dotId = (await workspace.requireThread(threadId)).dotId;
+  const resolve = async (requested?: string) => {
+    await check();
     const target =
-      requested ?? workspace.pages.forThread(threadId)?.spaceId ?? spaceId;
-    if (!workspace.canAccessSpace(dotId, target))
+      requested ??
+      (await workspace.pages.forThread(threadId))?.spaceId ??
+      spaceId;
+    if (!(await workspace.canAccessSpace(dotId, target)))
       throw new Error('Space access has been revoked or was not granted.');
     return target;
   };
@@ -22,29 +24,33 @@ export function pageAccess(
     url: `/#/spaces/${page.spaceId}/pages/${page.id}`,
   });
   return {
-    context: () => workspace.pages.forThread(threadId, resolve()),
-    spaces: () => {
-      check();
-      return workspace
-        .spaces()
-        .filter((space) => workspace.canAccessSpace(dotId, space.id));
+    context: async () => workspace.pages.forThread(threadId, await resolve()),
+    spaces: async () => {
+      await check();
+      const spaces = [];
+      for (const space of await workspace.spaces())
+        if (await workspace.canAccessSpace(dotId, space.id)) spaces.push(space);
+      return spaces;
     },
-    list: (requested?: string) =>
-      workspace.pages
-        .list(resolve(requested))
-        .map(({ id, spaceId, title, parentId, revision }) =>
+    list: async (requested?: string) =>
+      (await workspace.pages.list(await resolve(requested))).map(
+        ({ id, spaceId, title, parentId, revision }) =>
           linked({ id, spaceId, title, parentId, revision }),
-        ),
-    read: (id: string, requested?: string) =>
-      linked(workspace.pages.get(resolve(requested), id)),
-    create: (input: z.input<typeof pageInput>, requested?: string) =>
-      linked(workspace.pages.create(resolve(requested), input)),
-    edit: (id: string, input: z.input<typeof pagePatch>, requested?: string) =>
-      linked(workspace.pages.update(resolve(requested), id, input)),
+      ),
+    read: async (id: string, requested?: string) =>
+      linked(await workspace.pages.get(await resolve(requested), id)),
+    create: async (input: z.input<typeof pageInput>, requested?: string) =>
+      linked(await workspace.pages.create(await resolve(requested), input)),
+    edit: async (
+      id: string,
+      input: z.input<typeof pagePatch>,
+      requested?: string,
+    ) =>
+      linked(await workspace.pages.update(await resolve(requested), id, input)),
   };
 }
 
-export function pageTools(access: ReturnType<typeof pageAccess>) {
+export function pageTools(access: Awaited<ReturnType<typeof pageAccess>>) {
   const scope = {
     spaceId: z
       .string()

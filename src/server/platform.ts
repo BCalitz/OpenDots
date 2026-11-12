@@ -48,27 +48,50 @@ export class Platform {
   /** One request at a time per specialist thread. */
   private delegations = new Map<string, Promise<unknown>>();
   readonly delegate: Delegate = (input) => this.runDelegation(input);
-  constructor(
+  /**
+   * Builds the platform and finishes what a restart left open: runs and
+   * approvals that were in flight.
+   */
+  static async create(
+    store: Store,
+    workspace: WorkspaceStore,
+    config: PlatformConfig,
+    options: { fetch?: typeof fetch } = {},
+  ) {
+    let slackDotId: string | undefined;
+    if (slackSetup(config) === 'configured') {
+      slackDotId = config.slackDotId ?? (await workspace.dots())[0].id;
+      if (!(await workspace.dot(slackDotId)))
+        throw new Error('SLACK_DOT_ID does not identify an existing Dot.');
+    }
+    const platform = new Platform(
+      store,
+      workspace,
+      config,
+      await SetupTelemetry.create(store),
+      slackDotId,
+      options,
+    );
+    await platform.runner.recoverInterruptedRuns();
+    await platform.approvals.expireStale();
+    return platform;
+  }
+  private constructor(
     readonly store: Store,
     readonly workspace: WorkspaceStore,
     readonly config: PlatformConfig,
-    private options: {
-      /** SQLite file for conversations; in-memory when omitted. */
-      databasePath?: string;
-      fetch?: typeof fetch;
-    } = {},
+    setupTelemetry: SetupTelemetry,
+    slackDotId: string | undefined,
+    private options: { fetch?: typeof fetch } = {},
   ) {
-    this.setupTelemetry = new SetupTelemetry(store);
-    this.computers = new ComputerService(
-      workspace,
-      config,
-      () => store.settings().paused,
-    );
+    const paused = async () => (await store.settings()).paused;
+    this.setupTelemetry = setupTelemetry;
+    this.computers = new ComputerService(workspace, config, paused);
     this.connections = new ConnectionService(workspace.connections);
     let reader: ReturnType<typeof composioReader> | undefined;
     let readerKey: string | undefined;
     this.inbox = new InboxEngine(workspace.inbox, this.connections, {
-      paused: () => store.settings().paused,
+      paused,
       composio: () => {
         const key = config.composioApiKey;
         if (!key) return undefined;
@@ -89,11 +112,10 @@ export class Platform {
       this.requireReady();
       return this.conversations;
     });
-    const database = options.databasePath ?? ':memory:';
-    this.runner = new ThreadRunner(database, workspace.ownerId, {
+    this.runner = new ThreadRunner(workspace.db, workspace.ownerId, {
       onRunFinished: (run) => void this.nameThread(run),
     });
-    this.approvals = new Approvals(database);
+    this.approvals = new Approvals(workspace.db);
     this.engine = new DotEngine({
       store,
       workspace,
@@ -104,21 +126,19 @@ export class Platform {
       approvals: this.approvals,
     });
     this.conversations = new LocalConversationBackend(this.runner, this.engine);
-    if (slackSetup(config) === 'configured') {
-      const dotId = config.slackDotId ?? workspace.dots()[0].id;
-      if (!workspace.dot(dotId))
-        throw new Error('SLACK_DOT_ID does not identify an existing Dot.');
+    if (slackDotId) {
+      const dotId = slackDotId;
       this.channel = new ChannelService(
         new SlackAdapter({
           botToken: config.slackBotToken!,
           appToken: config.slackAppToken!,
         }),
         {
-          database,
+          db: workspace.db,
           tenantId: config.slackTeam!,
           userIds: config.slackUsers,
           dotId,
-          paused: () => store.settings().paused,
+          paused,
           createThread: async (id, title) =>
             (await this.createConversation(id, title, 'slack')).id,
           turn: (threadId, prompt, signal) =>
@@ -137,7 +157,7 @@ export class Platform {
   }
   async start() {
     this.setupTelemetry.start();
-    this.discovery.start();
+    await this.discovery.start();
     if (!this.channel) return;
     try {
       await this.channel.start();
@@ -185,7 +205,10 @@ export class Platform {
     try {
       await this.turn(
         threadId,
-        investigationMessage({ ...input, continuing: !!input.existingThreadId }),
+        investigationMessage({
+          ...input,
+          continuing: !!input.existingThreadId,
+        }),
         signal,
         { opendotsSource: 'discovery', findingId: input.finding.id },
       );
@@ -200,16 +223,16 @@ export class Platform {
   /** A new thread; `source` marks background threads such as Slack's. */
   async createConversation(dotId: string, title: string, source?: string) {
     this.requireReady();
-    if (!this.workspace.dot(dotId)) throw new Error('Dot not found.');
+    if (!(await this.workspace.dot(dotId))) throw new Error('Dot not found.');
     const id = randomUUID();
     await this.conversations.createThread({ threadId: id, dotId });
     return this.workspace.bindThread(id, dotId, title, source);
   }
   /** The Dot's one continuing chat, created on first use. */
   async dotConversation(dotId: string, title?: string) {
-    const existing = this.workspace.mainConversation(dotId);
+    const existing = await this.workspace.mainConversation(dotId);
     if (existing) return { conversation: existing, created: false };
-    const dot = this.workspace.dot(dotId);
+    const dot = await this.workspace.dot(dotId);
     if (!dot) throw new Error('Dot not found.');
     return {
       conversation: await this.createConversation(dotId, title || dot.name),
@@ -218,7 +241,7 @@ export class Platform {
   }
   async history(threadId: string): Promise<string> {
     this.requireReady();
-    this.workspace.requireThread(threadId);
+    await this.workspace.requireThread(threadId);
     const history = await this.conversations.getThreadMessages({ threadId });
     return history.messages
       .filter((message) => ['user', 'assistant'].includes(message.role))
@@ -234,7 +257,7 @@ export class Platform {
   private async nameThread(run: FinishedRun) {
     const runner = this.runner;
     if (run.status !== 'finished' || this.naming.has(run.threadId)) return;
-    if (runner.thread(run.threadId)?.name) return;
+    if ((await runner.thread(run.threadId))?.name) return;
     const excerpt = namingExcerpt(run.messages);
     if (!excerpt) return;
     this.naming.add(run.threadId);
@@ -245,9 +268,9 @@ export class Platform {
         this.options.fetch,
       );
       // The owner may have renamed it while the model was answering.
-      if (!name || runner.thread(run.threadId)?.name) return;
-      runner.renameThread(run.threadId, name);
-      this.workspace.retitleThread(run.threadId, name);
+      if (!name || (await runner.thread(run.threadId))?.name) return;
+      await runner.renameThread(run.threadId, name);
+      await this.workspace.retitleThread(run.threadId, name);
     } catch {
       // Naming is cosmetic; the database may already be closed on shutdown.
     } finally {
@@ -267,21 +290,21 @@ export class Platform {
     request,
     signal,
   }: Parameters<Delegate>[0]) {
-    const from = this.workspace.dot(fromDotId);
-    const to = this.workspace.dot(toDotId);
+    const from = await this.workspace.dot(fromDotId);
+    const to = await this.workspace.dot(toDotId);
     if (!from || !to || !(from.delegateDotIds ?? []).includes(to.id))
       throw new Error('This Dot is not allowed to direct that Dot.');
-    if (this.workspace.isDelegateThread(parentThreadId))
+    if (await this.workspace.isDelegateThread(parentThreadId))
       throw new Error(
         'A Dot answering another Dot cannot pass the work on again.',
       );
-    let threadId = this.workspace.delegateThread(parentThreadId, to.id);
+    let threadId = await this.workspace.delegateThread(parentThreadId, to.id);
     if (!threadId) {
       const conversation = await this.createConversation(
         to.id,
         `From ${from.name}: ${request.replace(/\s+/g, ' ').slice(0, 60)}`,
       );
-      this.workspace.bindDelegate(parentThreadId, to.id, conversation.id);
+      await this.workspace.bindDelegate(parentThreadId, to.id, conversation.id);
       threadId = conversation.id;
     }
     const target = threadId;
@@ -310,7 +333,7 @@ export class Platform {
     metadata?: Record<string, unknown>,
   ): Promise<string> {
     this.requireReady();
-    this.workspace.requireThread(threadId);
+    await this.workspace.requireThread(threadId);
     return this.conversations.turn({
       threadId,
       prompt,

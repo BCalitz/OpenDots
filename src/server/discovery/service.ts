@@ -81,9 +81,9 @@ export class DiscoveryService {
     });
   };
   /** Picks up work a restart interrupted. */
-  start() {
-    for (const finding of this.store.findings('investigating'))
-      this.store.updateFinding(finding.id, {
+  async start() {
+    for (const finding of await this.store.findings('investigating'))
+      await this.store.updateFinding(finding.id, {
         state: 'failed',
         error:
           'OpenDots restarted during this investigation. Start it again from the Inbox.',
@@ -102,8 +102,8 @@ export class DiscoveryService {
     await this.investigating;
   }
   /** Queues a read-only investigation, for example from the Inbox. */
-  investigate(findingId: string) {
-    const finding = this.store.finding(findingId);
+  async investigate(findingId: string) {
+    const finding = await this.store.finding(findingId);
     if (!finding?.dotId) throw new Error('Finding not found.');
     if (finding.state === 'investigating' || this.queued.has(finding.id))
       return finding;
@@ -121,16 +121,16 @@ export class DiscoveryService {
     const flagged: FindingView[] = [];
     for (const event of batch.events.slice(0, this.options.maxJudged ?? 25)) {
       if (this.controller.signal.aborted) return;
-      if (this.store.findingForEvent(event.id)) continue;
+      if (await this.store.findingForEvent(event.id)) continue;
       let verdict: Verdict | undefined = ruleVerdict(
-        this.store.payload(event.id),
+        await this.store.payload(event.id),
       );
       let judgedBy = 'rules';
       if (!verdict) {
         const model = this.options.judge();
         if (!model) return;
         const candidates = event.from
-          ? this.store.recentFrom(
+          ? await this.store.recentFrom(
               event.from,
               event.occurredAt,
               this.windowMs,
@@ -155,7 +155,7 @@ export class DiscoveryService {
       const correlated =
         verdict.referencedEventId !== null &&
         (verdict.urgency ?? 0) >= this.threshold;
-      const finding = this.store.saveFinding({
+      const finding = await this.store.saveFinding({
         eventId: event.id,
         attention:
           (verdict.attention && verdict.confidence >= this.threshold) ||
@@ -169,35 +169,35 @@ export class DiscoveryService {
       });
       if (finding.state === 'flagged') flagged.push(finding);
     }
-    flagged
+    for (const finding of flagged
       .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, this.options.maxInvestigations ?? 5)
-      .forEach((finding) => this.investigate(finding.id));
+      .slice(0, this.options.maxInvestigations ?? 5))
+      await this.investigate(finding.id);
   }
 
   private async run(findingId: string) {
-    const finding = this.store.finding(findingId);
-    const event = finding && this.store.event(finding.eventId);
+    const finding = await this.store.finding(findingId);
+    const event = finding && (await this.store.event(finding.eventId));
     if (!finding?.dotId || !event || this.controller.signal.aborted) return;
-    const source = this.store.source(event.sourceId);
+    const source = await this.store.source(event.sourceId);
     const toolkit =
       source?.type === 'composio'
         ? (source.config as ComposioSourceConfig).toolkit
         : undefined;
     const referencedEvent = finding.referencedEventId
-      ? this.store.event(finding.referencedEventId)
+      ? await this.store.event(finding.referencedEventId)
       : undefined;
     // When this item follows up on one already flagged for the same Dot,
     // continue that conversation instead of opening a second, disconnected
     // one for what is really the same thread of work.
     const referencedFinding = finding.referencedEventId
-      ? this.store.findingForEvent(finding.referencedEventId)
+      ? await this.store.findingForEvent(finding.referencedEventId)
       : undefined;
     const sameDot = referencedFinding?.dotId === finding.dotId;
     const existingThreadId = sameDot
       ? (referencedFinding!.threadId ?? undefined)
       : undefined;
-    this.store.updateFinding(finding.id, { state: 'investigating' });
+    await this.store.updateFinding(finding.id, { state: 'investigating' });
     try {
       const { threadId } = await this.options.investigate(
         {
@@ -216,14 +216,14 @@ export class DiscoveryService {
           ),
         ]),
       );
-      const done = this.store.updateFinding(finding.id, {
+      const done = await this.store.updateFinding(finding.id, {
         state: 'ready',
         threadId,
       });
       // The item this one followed up on now shares this conversation, so
       // it never needs a standalone investigation of its own.
       if (sameDot && referencedFinding!.threadId !== threadId)
-        this.store.updateFinding(referencedFinding!.id, {
+        await this.store.updateFinding(referencedFinding!.id, {
           state: 'ready',
           threadId,
         });
@@ -240,7 +240,7 @@ export class DiscoveryService {
         error && typeof error === 'object' && 'threadId' in error
           ? String(error.threadId)
           : undefined;
-      this.store.updateFinding(finding.id, {
+      await this.store.updateFinding(finding.id, {
         state: 'failed',
         error: safeError(error),
         ...(threadId ? { threadId } : {}),

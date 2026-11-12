@@ -26,11 +26,11 @@ export function notApproved(status: ApprovalStatus, what: string) {
 // owner's decision on the exact connection, tool and arguments it was called
 // with, then runs once. Without `approve` (schedules, voice, Slack) gated
 // tools never run.
-export function connectionTools(
+export async function connectionTools(
   connections: ConnectionService,
   dotId: string,
   threadId: string,
-  check: () => void,
+  check: () => Promise<void>,
   signal: AbortSignal,
   approve: Approve | undefined,
   log?: UsageStore,
@@ -39,8 +39,7 @@ export function connectionTools(
 ) {
   const readable = (tool: { readOnly: boolean; requiresApproval: boolean }) =>
     !readOnly || (tool.readOnly && !tool.requiresApproval);
-  return connections
-    .tools(dotId)
+  return (await connections.tools(dotId))
     .filter((exposed) => readable(exposed.tool))
     .map((exposed): Tool => ({
       name: exposed.name,
@@ -51,9 +50,9 @@ export function connectionTools(
         ),
       parameters: exposed.tool.inputSchema as JSONSchema,
       execute: async (args: unknown, context: ToolContext) => {
-        check();
+        await check();
         // Re-resolve so a tool the owner just disabled or gated is honored.
-        const current = connections.resolve(dotId, exposed.name);
+        const current = await connections.resolve(dotId, exposed.name);
         const input = (args ?? {}) as Record<string, unknown>;
         if (!readable(current.tool))
           return {
@@ -69,7 +68,7 @@ export function connectionTools(
                 'This action needs owner approval in an OpenDots chat. Ask the owner to continue there.',
             };
           // The stored request is what runs, never arguments sent later.
-          const approvalId = connections.store.createApproval({
+          const approvalId = await connections.store.createApproval({
             threadId,
             dotId,
             connectionId: current.connection.id,
@@ -86,26 +85,30 @@ export function connectionTools(
             },
           });
           // A permission change while waiting stops the turn here.
-          check();
+          await check();
           if (decision !== 'approved') return notApproved(decision, 'action');
           // One run per tool call, even if the decision arrives twice.
           if (
-            !connections.store.claimAction(
+            !(await connections.store.claimAction(
               threadId,
               context.toolCallId,
               approvalId,
               current.connection.id,
               current.tool.name,
-            )
+            ))
           )
             return { approved: true, error: 'This action already ran.' };
           const result = await connections.call(current, input, signal);
-          connections.store.finishAction(threadId, context.toolCallId, result);
-          check();
+          await connections.store.finishAction(
+            threadId,
+            context.toolCallId,
+            result,
+          );
+          await check();
           return { approved: true, ...result };
         }
         // Approved actions keep their own receipts; ungated calls are logged here.
-        const entry = log?.beginAction({
+        const entry = await log?.beginAction({
           dotId,
           threadId,
           kind: 'mcp',
@@ -115,8 +118,11 @@ export function connectionTools(
         });
         const result = await connections.call(current, input, signal);
         if (entry)
-          log!.finishAction(entry, result.isError ? 'failed' : 'succeeded');
-        check();
+          await log!.finishAction(
+            entry,
+            result.isError ? 'failed' : 'succeeded',
+          );
+        await check();
         return result;
       },
     }));

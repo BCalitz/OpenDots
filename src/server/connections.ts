@@ -214,13 +214,13 @@ export class ConnectionService {
     return this.store.create(dotId, value, tools);
   }
   async refresh(id: string) {
-    const connection = this.store.get(id);
+    const connection = await this.store.get(id);
     if (!connection) throw new Error('Connection not found.');
     try {
-      const discovered = await this.discover(this.store.credentials(id));
+      const discovered = await this.discover(await this.store.credentials(id));
       // Owner changes made while discovery ran win: merge against the
       // settings as they are now, not as they were when it started.
-      const current = this.store.get(id);
+      const current = await this.store.get(id);
       if (!current) throw new Error('Connection not found.');
       return this.store.saveTools(
         id,
@@ -239,12 +239,12 @@ export class ConnectionService {
       return this.store.setError(id, failure(error));
     }
   }
-  setTool(
+  async setTool(
     id: string,
     name: string,
     patch: { enabled?: boolean; requiresApproval?: boolean },
   ) {
-    const connection = this.store.get(id);
+    const connection = await this.store.get(id);
     if (!connection) throw new Error('Connection not found.');
     if (!connection.tools.some((tool) => tool.name === name))
       throw new Error('Connection tool not found.');
@@ -256,19 +256,19 @@ export class ConnectionService {
       connection.error,
     );
   }
-  tools(dotId: string) {
-    return exposedTools(this.store.list(dotId));
+  async tools(dotId: string) {
+    return exposedTools(await this.store.list(dotId));
   }
-  resolve(dotId: string, name: string) {
-    const match = this.tools(dotId).find((tool) => tool.name === name);
+  async resolve(dotId: string, name: string) {
+    const match = (await this.tools(dotId)).find((tool) => tool.name === name);
     if (!match)
       throw new Error('Connection tool is not available to this Dot.');
     return match;
   }
   // The tool an approval was created for, by connection and real tool name,
   // if the Dot still has it enabled.
-  bound(dotId: string, connectionId: string, toolName: string) {
-    const match = this.tools(dotId).find(
+  async bound(dotId: string, connectionId: string, toolName: string) {
+    const match = (await this.tools(dotId)).find(
       (item) =>
         item.connection.id === connectionId && item.tool.name === toolName,
     );
@@ -285,7 +285,7 @@ export class ConnectionService {
   ): Promise<ConnectionActionResult> {
     try {
       return await this.session(
-        this.store.credentials(exposed.connection.id),
+        await this.store.credentials(exposed.connection.id),
         signal,
         async (client, bounded) =>
           normalizeResult(

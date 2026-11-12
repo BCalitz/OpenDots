@@ -73,7 +73,7 @@ export async function composioSession(
     },
     { signal },
   );
-  workspace.saveComposioSession(dot.id, session.sessionId, policyHash);
+  await workspace.saveComposioSession(dot.id, session.sessionId, policyHash);
   return session;
 }
 

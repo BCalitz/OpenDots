@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, onTestFinished } from 'vitest';
 import { openDatabase, type Db } from '../../src/server/db/index.js';
+import { Store } from '../../src/server/store.js';
+import { WorkspaceStore } from '../../src/server/workspace.js';
 
 /**
  * The Postgres server tests run against. Start one with
@@ -48,4 +50,14 @@ export async function testDb(): Promise<Db> {
     afterAll(dispose);
   }
   return db;
+}
+
+/** A fresh database with the task store and a seeded workspace on it. */
+export async function testWorkspace(ownerId = 'owner') {
+  const db = await testDb();
+  return {
+    db,
+    store: new Store(db),
+    workspace: await WorkspaceStore.open(db, ownerId),
+  };
 }

@@ -137,9 +137,15 @@ export class DotEngine {
       approvals?: Approvals;
     },
   ) {}
+  /** Token usage writes, in order. */
+  private metering: Promise<void> = Promise.resolve();
+  /** Resolves once usage reported so far is recorded. */
+  metered() {
+    return this.metering;
+  }
 
-  /** Starts a turn and returns at once; events go to the thread's stream. */
-  start(input: {
+  /** Starts a turn and returns once it is recorded; events go to the thread's stream. */
+  async start(input: {
     threadId: string;
     message: {
       id?: string;
@@ -147,9 +153,9 @@ export class DotEngine {
       metadata?: Record<string, unknown>;
     };
     source?: TurnSource;
-  }): { runId: string; done: Promise<FinishedRun> } {
+  }): Promise<{ runId: string; done: Promise<FinishedRun> }> {
     const { workspace, runner } = this.deps;
-    const thread = workspace.requireThread(input.threadId);
+    const thread = await workspace.requireThread(input.threadId);
     const content = input.message.content;
     if (!content.trim()) throw new Error('Write a message first.');
     if (content.length > MAX_MESSAGE_LENGTH)
@@ -158,7 +164,7 @@ export class DotEngine {
       );
     const metadata = input.message.metadata;
     const id = input.message.id ?? `${idPrefix(metadata)}${randomUUID()}`;
-    if (runner.messages(thread.id).some((message) => message.id === id))
+    if ((await runner.messages(thread.id)).some((message) => message.id === id))
       throw new Error('This message was already sent.');
     const source = input.source ?? sourceFromMetadata(metadata);
     const message = {
@@ -188,7 +194,7 @@ export class DotEngine {
     metadata?: Record<string, unknown>,
   ): Promise<string> {
     const { runner } = this.deps;
-    let started: ReturnType<DotEngine['start']> | undefined;
+    let started: Awaited<ReturnType<DotEngine['start']>> | undefined;
     while (!started) {
       signal.throwIfAborted();
       const busy = runner.done(threadId);
@@ -202,7 +208,7 @@ export class DotEngine {
         continue;
       }
       try {
-        started = this.start({
+        started = await this.start({
           threadId,
           message: { content: prompt, ...(metadata ? { metadata } : {}) },
         });
@@ -236,13 +242,13 @@ export class DotEngine {
   }
 
   /** Stored events, then live ones, for this run and later ones. */
-  watch(threadId: string, listener: (event: BaseEvent) => void) {
-    this.deps.workspace.requireThread(threadId);
+  async watch(threadId: string, listener: (event: BaseEvent) => void) {
+    await this.deps.workspace.requireThread(threadId);
     return this.deps.runner.watch(threadId, listener);
   }
 
-  stop(threadId: string) {
-    this.deps.workspace.requireThread(threadId);
+  async stop(threadId: string) {
+    await this.deps.workspace.requireThread(threadId);
     return this.deps.runner.stop(threadId);
   }
 
@@ -309,7 +315,7 @@ export class DotEngine {
     );
     aborted.catch(() => {});
     const body = async () => {
-      const dot = workspace.dot(dotId);
+      const dot = await workspace.dot(dotId);
       if (!dot) throw new Error('Specialist Dot not found.');
       if (!config.apiKey || !config.model) {
         configurationFailure = true;
@@ -321,16 +327,22 @@ export class DotEngine {
         throw new Error('Model configuration is required.');
       }
       const cap = dot.monthlyTokenCap;
-      if (cap && workspace.usage.monthTokens(dot.id) >= cap)
+      if (cap && (await workspace.usage.monthTokens(dot.id)) >= cap)
         throw new Error(
           `${dot.name} reached its monthly limit of ${cap.toLocaleString('en-US')} tokens. Raise or remove the limit in this Dot's settings to continue.`,
         );
-      const initialSettings = store.settings();
-      const initialConnections = workspace.connections.fingerprint(dot.id);
+      const initialSettings = await store.settings();
+      const initialConnections = await workspace.connections.fingerprint(
+        dot.id,
+      );
       // A turn keeps the permissions it started with. Any change stops it.
-      const check = () => {
-        const settings = store.settings();
-        const current = workspace.dot(dot.id);
+      const check = async () => {
+        controller.signal.throwIfAborted();
+        const [settings, current, connections] = await Promise.all([
+          store.settings(),
+          workspace.dot(dot.id),
+          workspace.connections.fingerprint(dot.id),
+        ]);
         if (settings.paused)
           abort('OpenDots was paused, so this turn stopped.');
         else if (
@@ -344,7 +356,7 @@ export class DotEngine {
           JSON.stringify(current.composioToolkits) !==
             JSON.stringify(dot.composioToolkits) ||
           current.spaceId !== dot.spaceId ||
-          workspace.connections.fingerprint(dot.id) !== initialConnections ||
+          connections !== initialConnections ||
           JSON.stringify(current.spaceIds) !== JSON.stringify(dot.spaceIds) ||
           JSON.stringify(current.delegateDotIds) !==
             JSON.stringify(dot.delegateDotIds)
@@ -354,19 +366,22 @@ export class DotEngine {
           );
         controller.signal.throwIfAborted();
       };
-      check();
+      await check();
+      let checking = false;
       watcher = setInterval(() => {
-        try {
-          check();
-        } catch {
-          // check() already aborted the turn.
-        }
+        if (checking) return;
+        checking = true;
+        check()
+          // check() already aborted the turn, or the database is briefly
+          // unreachable and the next check will tell.
+          .catch(() => undefined)
+          .finally(() => (checking = false));
       }, 100);
       const signal = controller.signal;
       const computer = new ComputerService(
         workspace,
         config,
-        () => store.settings().paused,
+        async () => (await store.settings()).paused,
       );
       const tools: Tool[] = [];
       const research = dot.researchAllowed && initialSettings.researchAllowed;
@@ -379,12 +394,13 @@ export class DotEngine {
       if (research && (config.webSearchProvider ?? 'parallel') === 'parallel')
         tools.push(...this.parallelTools(run.threadId, check, signal));
       // A Dot answering another Dot never gets ask_dot, so work cannot loop.
+      const allDots = await workspace.dots();
       const team =
         this.deps.delegate &&
         !readOnly &&
-        !workspace.isDelegateThread(run.threadId)
+        !(await workspace.isDelegateThread(run.threadId))
           ? (dot.delegateDotIds ?? [])
-              .map((id) => workspace.dot(id))
+              .map((id) => allDots.find((other) => other.id === id))
               .filter((other) => !!other)
           : [];
       if (team.length)
@@ -400,7 +416,7 @@ export class DotEngine {
           this.reviewTool(dot.id, run.threadId, approve, check),
           this.approvalRequestTool(approve, check),
         );
-      const connected = connectionTools(
+      const connected = await connectionTools(
         new ConnectionService(workspace.connections),
         dot.id,
         run.threadId,
@@ -410,11 +426,16 @@ export class DotEngine {
         workspace.usage,
         readOnly,
       );
-      const pages = pageAccess(workspace, dot.spaceId, run.threadId, check);
-      const pageContext = pages.context();
+      const pages = await pageAccess(
+        workspace,
+        dot.spaceId,
+        run.threadId,
+        check,
+      );
+      const pageContext = await pages.context();
       const memories =
         initialSettings.memoryAllowed && dot.memoryAllowed
-          ? store.memories().map((memory) => memory.text)
+          ? (await store.memories()).map((memory) => memory.text)
           : [];
       const appTools =
         config.composioApiKey && initialSettings.appsAllowed && dot.appsAllowed
@@ -436,7 +457,7 @@ export class DotEngine {
                 : undefined,
             )
           : [];
-      check();
+      await check();
       const serverTools = [
         ...tools,
         ...appTools,
@@ -511,20 +532,22 @@ export class DotEngine {
    * turn that fails later is still counted.
    */
   private meter(run: RunContext, dotId: string, entries: TokenUsage[]) {
-    try {
-      for (const entry of entries)
-        this.deps.workspace.usage.record({
-          runId: run.runId,
-          threadId: run.threadId,
-          dotId,
-          model: entry.model ?? null,
-          inputTokens: entry.inputTokens ?? 0,
-          outputTokens: entry.outputTokens ?? 0,
-        });
-    } catch {
-      // Metering must never fail the answer the owner is waiting for.
-      console.error('Could not record token usage for this run.');
-    }
+    for (const entry of entries)
+      this.metering = this.metering
+        .then(() =>
+          this.deps.workspace.usage.record({
+            runId: run.runId,
+            threadId: run.threadId,
+            dotId,
+            model: entry.model ?? null,
+            inputTokens: entry.inputTokens ?? 0,
+            outputTokens: entry.outputTokens ?? 0,
+          }),
+        )
+        // Metering must never fail the answer the owner is waiting for.
+        .catch(() =>
+          console.error('Could not record token usage for this run.'),
+        );
   }
 
   /** Shows a page draft to the owner and saves it only if they approve. */
@@ -534,18 +557,18 @@ export class DotEngine {
    * does not gate other tools by itself: actions that must never run
    * unapproved keep their own gate (connection "Ask first", page review).
    */
-  private approvalRequestTool(approve: Approve, check: () => void) {
+  private approvalRequestTool(approve: Approve, check: () => Promise<void>) {
     return defineTool({
       name: approvalRequestTool.name,
       description: approvalRequestTool.description,
       parameters: approvalRequestSchema,
       execute: async (request, context) => {
-        check();
+        await check();
         const decision = await approve(context, {
           kind: 'action',
           payload: request,
         });
-        check();
+        await check();
         if (decision !== 'approved') return notApproved(decision, 'action');
         return {
           approved: true,
@@ -559,7 +582,7 @@ export class DotEngine {
     dotId: string,
     threadId: string,
     approve: Approve,
-    check: () => void,
+    check: () => Promise<void>,
   ) {
     const { workspace } = this.deps;
     return defineTool({
@@ -567,8 +590,8 @@ export class DotEngine {
       description: pageReviewTool.description,
       parameters: pageReviewSchema,
       execute: async (draft, context) => {
-        check();
-        if (!workspace.canAccessSpace(dotId, draft.spaceId))
+        await check();
+        if (!(await workspace.canAccessSpace(dotId, draft.spaceId)))
           return {
             approved: false,
             error:
@@ -578,10 +601,10 @@ export class DotEngine {
           kind: 'page_review',
           payload: draft,
         });
-        check();
+        await check();
         if (decision !== 'approved') return notApproved(decision, 'page');
         // Keyed by tool call, so a repeated save returns the same page.
-        const page = workspace.pages.createReviewed(
+        const page = await workspace.pages.createReviewed(
           draft.spaceId,
           { title: draft.title, content: draft.content },
           threadId,
@@ -600,7 +623,7 @@ export class DotEngine {
   /** Reads one public page in the separate read-only browser. */
   private browserTool(
     threadId: string,
-    check: () => void,
+    check: () => Promise<void>,
     signal: AbortSignal,
   ) {
     const { store, workspace, config } = this.deps;
@@ -610,8 +633,8 @@ export class DotEngine {
         'Read a provided canonical public HTTP(S) URL in a separate read-only browser, returning source evidence. No web search, redirects, authenticated sites, or write actions.',
       parameters: z.object({ url: z.string().url().max(2048) }),
       execute: async ({ url }) => {
-        check();
-        if (!store.settings().researchAllowed)
+        await check();
+        if (!(await store.settings()).researchAllowed)
           throw new Error('Research permission is disabled.');
         if (!config.browserUrl || !config.browserSecret)
           throw new Error(
@@ -634,8 +657,8 @@ export class DotEngine {
             `Browser returned HTTP ${response.status}. Provide a public canonical page URL; redirects and private addresses are blocked.`,
           );
         const page = browserResponse.parse(await response.json());
-        check();
-        workspace.saveCapture(threadId, {
+        await check();
+        await workspace.saveCapture(threadId, {
           sample: false,
           text: page.text,
           sources: [
@@ -659,7 +682,7 @@ export class DotEngine {
   /** Web search and page reading through Parallel. */
   private parallelTools(
     threadId: string,
-    check: () => void,
+    check: () => Promise<void>,
     signal: AbortSignal,
   ) {
     const { workspace, config } = this.deps;
@@ -669,7 +692,7 @@ export class DotEngine {
       searchQueries?: string[],
     ) => {
       const limitations: string[] = [];
-      check();
+      await check();
       const sources = await parallelSources(
         {
           objective,
@@ -681,8 +704,8 @@ export class DotEngine {
         config,
         signal,
       );
-      check();
-      workspace.saveCapture(threadId, {
+      await check();
+      await workspace.saveCapture(threadId, {
         sample: false,
         text:
           sources
@@ -731,9 +754,9 @@ export class DotEngine {
   /** Hands work to another of the owner's Dots and waits for its answer. */
   private askDotTool(
     fromDotId: string,
-    team: NonNullable<ReturnType<WorkspaceStore['dot']>>[],
+    team: NonNullable<Awaited<ReturnType<WorkspaceStore['dot']>>>[],
     threadId: string,
-    check: () => void,
+    check: () => Promise<void>,
     signal: AbortSignal,
   ) {
     const delegate = this.deps.delegate!;
@@ -756,7 +779,7 @@ export class DotEngine {
           .describe('A complete, self-contained request.'),
       }),
       execute: async ({ dot: name, request }) => {
-        check();
+        await check();
         const target = team.find(
           (other) =>
             other.id === name ||
@@ -772,7 +795,7 @@ export class DotEngine {
             request,
             signal,
           });
-          check();
+          await check();
           return { dot: target.name, reply: result.reply.slice(0, 20000) };
         } catch (error) {
           signal.throwIfAborted();

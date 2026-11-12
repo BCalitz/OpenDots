@@ -1,7 +1,9 @@
 export function createShutdown(options: {
-  stopRunner: () => void;
+  stopRunner: () => void | Promise<void>;
   stopPlatform: () => Promise<void>;
   closeServer: () => Promise<void>;
+  /** Runs last, once everything that writes to the database has stopped. */
+  closeDatabase?: () => Promise<void>;
   exit: (code: number) => void;
   report: (operation: string, error: unknown) => void;
   timeoutMs?: number;
@@ -14,8 +16,11 @@ export function createShutdown(options: {
         failed = true;
         options.report(operation, error);
       };
+      let runnerStopped: Promise<void> = Promise.resolve();
       try {
-        options.stopRunner();
+        runnerStopped = Promise.resolve(options.stopRunner()).catch((error) =>
+          report('Stopping scheduler failed', error),
+        );
       } catch (error) {
         report('Stopping scheduler failed', error);
       }
@@ -35,9 +40,14 @@ export function createShutdown(options: {
       };
       await Promise.race([
         Promise.all([
+          runnerStopped,
           settle('Stopping Channels failed', options.stopPlatform),
           settle('Closing HTTP server failed', options.closeServer),
-        ]),
+        ]).then(() =>
+          options.closeDatabase
+            ? settle('Closing database failed', options.closeDatabase)
+            : undefined,
+        ),
         deadline,
       ]);
       clearTimeout(timer);

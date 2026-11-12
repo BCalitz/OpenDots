@@ -38,16 +38,16 @@ async function bounded<T>(operation: Promise<T>): Promise<T> {
 export class PageService {
   private pending = new Map<
     string,
-    Promise<ReturnType<WorkspaceStore['requireThread']>>
+    ReturnType<WorkspaceStore['requireThread']>
   >();
   constructor(
     private workspace: WorkspaceStore,
     private conversations: () => PageConversations,
   ) {}
   async conversation(spaceId: string, pageId: string, dotId: string) {
-    const page = this.workspace.pages.get(spaceId, pageId);
-    const dot = this.workspace.dot(dotId);
-    if (!dot || !this.workspace.canAccessSpace(dotId, spaceId))
+    const page = await this.workspace.pages.get(spaceId, pageId);
+    const dot = await this.workspace.dot(dotId);
+    if (!dot || !(await this.workspace.canAccessSpace(dotId, spaceId)))
       throw new PageError(
         'Choose a specialist in this Space with access enabled.',
         400,
@@ -55,18 +55,21 @@ export class PageService {
     const key = `${pageId}:${dotId}`;
     const pending = this.pending.get(key);
     if (pending) return pending;
-    const current = this.workspace.pages.thread(pageId, dotId);
+    const current = await this.workspace.pages.thread(pageId, dotId);
     if (current?.ready)
       return this.workspace.requireThread(current.threadId, dotId);
     const sdk = this.conversations();
     const task = (async () => {
       const candidateId = randomUUID();
-      if (!this.workspace.pages.reserveThread(pageId, dotId, candidateId))
+      if (
+        !(await this.workspace.pages.reserveThread(pageId, dotId, candidateId))
+      )
         throw new PageError(
           'This page conversation is being created. Retry shortly.',
           409,
         );
-      const threadId = this.workspace.pages.thread(pageId, dotId)!.threadId;
+      const threadId = (await this.workspace.pages.thread(pageId, dotId))!
+        .threadId;
       try {
         await bounded(
           sdk.getOrCreateThread({
@@ -78,16 +81,16 @@ export class PageService {
         );
         // The page may have been deleted while its thread was being created.
         // Recheck before binding a local conversation or marking it ready.
-        this.workspace.pages.get(spaceId, pageId);
-        if (!this.workspace.canAccessSpace(dotId, spaceId))
+        await this.workspace.pages.get(spaceId, pageId);
+        if (!(await this.workspace.canAccessSpace(dotId, spaceId)))
           throw new PageError('Space access has been revoked.');
         const thread =
-          this.workspace.conversations().find((t) => t.id === threadId) ??
-          this.workspace.bindThread(threadId, dotId, page.title);
-        this.workspace.pages.finishThread(pageId, dotId);
+          (await this.workspace.conversation(threadId)) ??
+          (await this.workspace.bindThread(threadId, dotId, page.title));
+        await this.workspace.pages.finishThread(pageId, dotId);
         return thread;
       } catch (error) {
-        this.workspace.pages.releaseThread(pageId, dotId);
+        await this.workspace.pages.releaseThread(pageId, dotId);
         throw error;
       }
     })();
@@ -103,8 +106,8 @@ export class PageService {
     title: string,
     parentId: string | null,
   ) {
-    const thread = this.workspace.requireThread(threadId);
-    const dot = this.workspace.dot(thread.dotId)!;
+    const thread = await this.workspace.requireThread(threadId);
+    const dot = (await this.workspace.dot(thread.dotId))!;
     const history = await bounded(
       this.conversations().getThreadMessages({
         threadId,
@@ -139,8 +142,8 @@ export class PageService {
         'This conversation exceeds the 100,000 character page limit. Save a shorter conversation.',
       );
     const destination =
-      this.workspace.pages.forThread(threadId)?.spaceId ?? dot.spaceId;
-    if (!this.workspace.canAccessSpace(dot.id, destination))
+      (await this.workspace.pages.forThread(threadId))?.spaceId ?? dot.spaceId;
+    if (!(await this.workspace.canAccessSpace(dot.id, destination)))
       throw new PageError('Space access has been revoked.', 400);
     return this.workspace.pages.create(
       destination,

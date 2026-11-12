@@ -168,7 +168,7 @@ export class McpListSource implements Source {
     private connections: ConnectionService,
   ) {}
   async poll(since: Date | null, signal: AbortSignal) {
-    const tool = this.connections.bound(
+    const tool = await this.connections.bound(
       this.config.dotId,
       this.config.connectionId,
       this.config.tool,

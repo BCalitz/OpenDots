@@ -1,51 +1,50 @@
-import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import { sql, type Db } from './db/index.js';
 import type {
   ComputerAudit,
   ComputerPermissions,
 } from '../shared/computer-types.js';
 export class ComputerStore {
-  constructor(private db: DatabaseSync) {
-    db.exec(`CREATE TABLE IF NOT EXISTS computer_permissions(dotId TEXT PRIMARY KEY,value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS computer_audit(id TEXT PRIMARY KEY,dotId TEXT NOT NULL,action TEXT NOT NULL,actor TEXT NOT NULL,outcome TEXT NOT NULL,createdAt INTEGER NOT NULL);`);
-  }
-  permissions(id: string): ComputerPermissions {
-    const row = this.db
-      .prepare('SELECT value FROM computer_permissions WHERE dotId=?')
-      .get(id);
+  constructor(private db: Db) {}
+  async permissions(id: string): Promise<ComputerPermissions> {
+    const row = await this.db.row<{ value: string }>(
+      sql`SELECT value FROM computer_permissions WHERE dot_id=${id}`,
+    );
     return row
-      ? JSON.parse(String(row.value))
+      ? JSON.parse(row.value)
       : { enabled: false, browser: false, files: false, shell: false };
   }
   patch(id: string, patch: Partial<ComputerPermissions>) {
-    const value = { ...this.permissions(id), ...patch };
-    this.db
-      .prepare('INSERT OR REPLACE INTO computer_permissions VALUES (?,?)')
-      .run(id, JSON.stringify(value));
-    return value;
+    return this.db.transaction(async () => {
+      const value = { ...(await this.permissions(id)), ...patch };
+      await this.db.run(
+        sql`INSERT INTO computer_permissions VALUES (${id}, ${JSON.stringify(value)}) ON CONFLICT (dot_id) DO UPDATE SET value=excluded.value`,
+      );
+      return value;
+    });
   }
-  begin(dotId: string, action: string, actor: 'owner' | 'agent') {
+  async begin(dotId: string, action: string, actor: 'owner' | 'agent') {
     const id = randomUUID();
-    this.db
-      .prepare('INSERT INTO computer_audit VALUES (?,?,?,?,?,?)')
-      .run(id, dotId, action, actor, 'pending', Date.now());
+    await this.db.run(
+      sql`INSERT INTO computer_audit (id, dot_id, action, actor, outcome, created_at) VALUES (${id}, ${dotId}, ${action}, ${actor}, 'pending', ${Date.now()})`,
+    );
     return id;
   }
-  finish(id: string, outcome: 'succeeded' | 'failed') {
-    this.db
-      .prepare('UPDATE computer_audit SET outcome=? WHERE id=?')
-      .run(outcome, id);
-    this.db
-      .prepare(
-        `DELETE FROM computer_audit WHERE dotId=(SELECT dotId FROM computer_audit WHERE id=?) AND outcome!='pending' AND id NOT IN (SELECT id FROM computer_audit WHERE dotId=(SELECT dotId FROM computer_audit WHERE id=?) AND outcome!='pending' ORDER BY createdAt DESC,rowid DESC LIMIT 1000)`,
-      )
-      .run(id, id);
+  async finish(id: string, outcome: 'succeeded' | 'failed') {
+    await this.db.transaction(async () => {
+      const row = await this.db.row<{ dotId: string }>(
+        sql`UPDATE computer_audit SET outcome=${outcome} WHERE id=${id} RETURNING dot_id`,
+      );
+      if (!row) return;
+      // Keep the latest 1,000 finished actions per Dot.
+      await this.db.run(
+        sql`DELETE FROM computer_audit WHERE dot_id=${row.dotId} AND outcome<>'pending' AND id NOT IN (SELECT id FROM computer_audit WHERE dot_id=${row.dotId} AND outcome<>'pending' ORDER BY created_at DESC, seq DESC LIMIT 1000)`,
+      );
+    });
   }
-  audit(id: string): ComputerAudit[] {
-    return this.db
-      .prepare(
-        'SELECT id,action,actor,outcome,createdAt FROM computer_audit WHERE dotId=? ORDER BY createdAt DESC,rowid DESC LIMIT 50',
-      )
-      .all(id) as unknown as ComputerAudit[];
+  audit(id: string): Promise<ComputerAudit[]> {
+    return this.db.rows<ComputerAudit>(
+      sql`SELECT id, action, actor, outcome, created_at FROM computer_audit WHERE dot_id=${id} ORDER BY created_at DESC, seq DESC LIMIT 50`,
+    );
   }
 }

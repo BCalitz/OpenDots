@@ -11,9 +11,8 @@ export class LocalConversationBackend {
     private engine: DotEngine,
   ) {}
   /** Chat threads start unnamed; a name is generated after the first answer. */
-  createThread({ threadId, dotId }: { threadId: string; dotId: string }) {
-    this.runner.createThread({ threadId, agentId: dotId });
-    return Promise.resolve();
+  async createThread({ threadId, dotId }: { threadId: string; dotId: string }) {
+    await this.runner.createThread({ threadId, agentId: dotId });
   }
   getOrCreateThread({
     threadId,
@@ -24,12 +23,10 @@ export class LocalConversationBackend {
     agentId: string;
     name: string;
   }) {
-    return Promise.resolve(
-      this.runner.createThread({ threadId, agentId, name }),
-    );
+    return this.runner.createThread({ threadId, agentId, name });
   }
-  getThreadMessages({ threadId }: { threadId: string; userId?: string }) {
-    return Promise.resolve({ messages: this.runner.messages(threadId) });
+  async getThreadMessages({ threadId }: { threadId: string; userId?: string }) {
+    return { messages: await this.runner.messages(threadId) };
   }
   /** Runs one turn in-process through the same engine the apps use. */
   turn({

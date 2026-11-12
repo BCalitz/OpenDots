@@ -41,7 +41,7 @@ export function toolSlugs(name: string, input: unknown): string[] {
 
 export async function composioTools(
   session: Session,
-  check: () => void,
+  check: () => Promise<void>,
   signal?: AbortSignal,
   log?: { store: UsageStore; dotId: string; threadId: string },
   /**
@@ -50,7 +50,7 @@ export async function composioTools(
    */
   readOnly?: (slug: string) => Promise<boolean>,
 ) {
-  check();
+  await check();
   // @composio/core 0.22 supports request options at runtime but omits them
   // from the public Session function aliases.
   const cancellable = session as CancellableSession;
@@ -63,7 +63,7 @@ export async function composioTools(
       description: fn.description ?? `Use the Composio ${fn.name} tool.`,
       parameters: (fn.parameters ?? { type: 'object' }) as JSONSchema,
       execute: async (input: unknown) => {
-        check();
+        await check();
         if (readOnly) {
           for (const slug of toolSlugs(fn.name, input))
             if (!slug || !(await readOnly(slug)))
@@ -71,10 +71,10 @@ export async function composioTools(
                 data: {},
                 error: `This turn is read-only, so ${slug || 'that tool'} did not run: it can change things in the owner's account. Describe it in your proposal instead.`,
               };
-          check();
+          await check();
         }
         // Composio slugs start with the toolkit, e.g. GMAIL_SEND_EMAIL.
-        const entry = log?.store.beginAction({
+        const entry = await log?.store.beginAction({
           dotId: log.dotId,
           threadId: log.threadId,
           kind: 'app',
@@ -89,10 +89,14 @@ export async function composioTools(
             { signal },
           );
           if (entry)
-            log!.store.finishAction(entry, error ? 'failed' : 'succeeded');
+            await log!.store.finishAction(
+              entry,
+              error ? 'failed' : 'succeeded',
+            );
           return { data, error };
         } catch (error) {
-          if (entry) log!.store.finishAction(entry, 'failed');
+          if (entry)
+            await log!.store.finishAction(entry, 'failed').catch(() => {});
           return {
             data: {},
             error: `Composio tool failed: ${safeFailure(error)}.`,

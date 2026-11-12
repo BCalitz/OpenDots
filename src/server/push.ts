@@ -1,6 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { sql, type Db } from './db/index.js';
 import { z } from 'zod';
 
 export const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
@@ -31,53 +29,44 @@ type ExpoTicket = {
 const MAX_DEVICES = 20;
 
 export class PushService {
-  private db: DatabaseSync;
   constructor(
-    path: string,
+    private db: Db,
     private options: {
       accessToken?: string;
       previews?: boolean;
       fetch?: typeof fetch;
     } = {},
-  ) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS push_devices (token TEXT PRIMARY KEY, platform TEXT NOT NULL, createdAt INTEGER NOT NULL);`);
-  }
+  ) {}
   get previews() {
     return this.options.previews === true;
   }
-  devices(): PushDevice[] {
-    return this.db
-      .prepare(
-        'SELECT token, platform, createdAt FROM push_devices ORDER BY createdAt',
-      )
-      .all() as unknown as PushDevice[];
+  devices(): Promise<PushDevice[]> {
+    return this.db.rows<PushDevice>(
+      sql`SELECT token, platform, created_at FROM push_devices ORDER BY created_at`,
+    );
   }
-  register(device: z.infer<typeof pushDeviceSchema>) {
-    this.db
-      .prepare(
-        'INSERT INTO push_devices VALUES (?, ?, ?) ON CONFLICT(token) DO UPDATE SET platform=excluded.platform',
-      )
-      .run(device.token, device.platform, Date.now());
-    // Keep the newest devices only; stale installs stop receiving pushes.
-    this.db
-      .prepare(
-        'DELETE FROM push_devices WHERE token NOT IN (SELECT token FROM push_devices ORDER BY createdAt DESC LIMIT ?)',
-      )
-      .run(MAX_DEVICES);
+  async register(device: z.infer<typeof pushDeviceSchema>) {
+    await this.db.transaction(async () => {
+      await this.db.run(
+        sql`INSERT INTO push_devices VALUES (${device.token}, ${device.platform}, ${Date.now()}) ON CONFLICT (token) DO UPDATE SET platform=excluded.platform`,
+      );
+      // Keep the newest devices only; stale installs stop receiving pushes.
+      await this.db.run(
+        sql`DELETE FROM push_devices WHERE token NOT IN (SELECT token FROM push_devices ORDER BY created_at DESC LIMIT ${MAX_DEVICES})`,
+      );
+    });
   }
-  remove(token: string) {
-    this.db.prepare('DELETE FROM push_devices WHERE token=?').run(token);
+  async remove(token: string) {
+    await this.db.run(sql`DELETE FROM push_devices WHERE token=${token}`);
   }
   // Sends to every registered device. Failures are reported, never thrown,
   // so a notification problem cannot fail the run that triggered it.
   async send(message: PushMessage): Promise<{ sent: number; failed: number }> {
-    const devices = this.devices();
-    if (!devices.length) return { sent: 0, failed: 0 };
     const requestFetch = this.options.fetch ?? fetch;
+    let devices: PushDevice[] = [];
     try {
+      devices = await this.devices();
+      if (!devices.length) return { sent: 0, failed: 0 };
       const response = await requestFetch(EXPO_PUSH_URL, {
         method: 'POST',
         headers: {
@@ -106,22 +95,19 @@ export class PushService {
       }
       const { data } = (await response.json()) as { data?: ExpoTicket[] };
       let failed = 0;
-      (data ?? []).forEach((ticket, index) => {
-        if (ticket.status === 'ok') return;
+      for (const [index, ticket] of (data ?? []).entries()) {
+        if (ticket.status === 'ok') continue;
         failed++;
         // The app was uninstalled or the token rotated.
         if (ticket.details?.error === 'DeviceNotRegistered')
-          this.remove(devices[index].token);
-      });
+          await this.remove(devices[index].token);
+      }
       return { sent: devices.length - failed, failed };
     } catch {
       // Do not log message content or tokens.
       console.error('Push notification delivery failed.');
       return { sent: 0, failed: devices.length };
     }
-  }
-  close() {
-    this.db.close();
   }
 }
 

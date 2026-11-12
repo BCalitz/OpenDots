@@ -6,6 +6,7 @@ import { DEFAULT_AGENT_RUN_TIMEOUT_MS } from './platform-config.js';
 export class Runner {
   private timer?: ReturnType<typeof setInterval>;
   private active = new Map<string, AbortController>();
+  private claiming = false;
   constructor(
     private store: Store,
     private config: Config,
@@ -23,17 +24,21 @@ export class Runner {
       void this.tick();
     }
   }
-  stop() {
+  async stop() {
     clearInterval(this.timer);
     this.timer = undefined;
-    for (const task of this.store.tasks()) {
-      if (this.active.has(task.id) && task.lease)
-        this.store.interrupt(
-          { ...task, lease: task.lease },
-          'Server stopped during this run. Review completed effects before retrying.',
-        );
+    try {
+      // Interrupt first, so the aborted run cannot record itself as failed.
+      for (const task of await this.store.tasks()) {
+        if (this.active.has(task.id) && task.lease)
+          await this.store.interrupt(
+            { ...task, lease: task.lease },
+            'Server stopped during this run. Review completed effects before retrying.',
+          );
+      }
+    } finally {
+      this.abortAll();
     }
-    this.abortAll();
   }
   abort(id: string) {
     this.active.get(id)?.abort(new Error('Run stopped.'));
@@ -54,22 +59,34 @@ export class Runner {
     }
   }
   private async runTick() {
-    if (this.active.size) return;
+    if (this.active.size || this.claiming) return;
     // Leave time to persist the outcome after the configured run timeout.
-    const claim = this.store.claim(
-      Date.now(),
-      Math.max(DEFAULT_WORKER_LEASE_MS, this.runTimeoutMs * 2),
-    );
+    this.claiming = true;
+    let claim: Claim | null;
+    try {
+      claim = await this.store.claim(
+        Date.now(),
+        Math.max(DEFAULT_WORKER_LEASE_MS, this.runTimeoutMs * 2),
+      );
+    } finally {
+      this.claiming = false;
+    }
     if (!claim) return;
+    const owned = claim;
     const controller = new AbortController();
     this.active.set(claim.id, controller);
+    let checking = false;
     const ownershipCheck = setInterval(() => {
-      try {
-        if (!this.store.owns(claim))
-          controller.abort(new Error('Run permission or lease was revoked.'));
-      } catch {
-        controller.abort(new Error('Run ownership check failed.'));
-      }
+      if (checking) return;
+      checking = true;
+      this.store
+        .owns(owned)
+        .then((owns) => {
+          if (!owns)
+            controller.abort(new Error('Run permission or lease was revoked.'));
+        })
+        .catch(() => controller.abort(new Error('Run ownership check failed.')))
+        .finally(() => (checking = false));
     }, 100);
     const timeout = setTimeout(
       () =>
@@ -81,13 +98,18 @@ export class Runner {
       this.runTimeoutMs,
     );
     try {
-      const settings = this.store.settings();
-      const memories = settings.memoryAllowed ? this.store.memories() : [];
+      const settings = await this.store.settings();
+      const memories = settings.memoryAllowed
+        ? await this.store.memories()
+        : [];
+      // Progress lines are written in order; the ownership check above
+      // stops a run whose lease was revoked.
+      let progressWrites = Promise.resolve();
       const progress = (text: string) => {
-        if (!this.store.owns(claim))
-          controller.abort(new Error('Run permission or lease was revoked.'));
         controller.signal.throwIfAborted();
-        this.store.event(claim.id, claim.lease, text);
+        progressWrites = progressWrites
+          .then(() => this.store.event(owned.id, owned.lease, text))
+          .catch(() => undefined);
       };
       const result = this.execute
         ? await this.execute(claim, memories, controller.signal, progress)
@@ -99,9 +121,10 @@ export class Runner {
             progress,
           );
       controller.signal.throwIfAborted();
-      this.store.finish(claim, result);
+      await progressWrites;
+      await this.store.finish(claim, result);
     } catch (error) {
-      this.store.fail(
+      await this.store.fail(
         claim,
         error instanceof Error ? error.message : 'Unexpected research failure.',
       );

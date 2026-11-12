@@ -4,6 +4,7 @@ import { reportChannelFailure, safeFailure } from './channels/adapter.js';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Store } from './store.js';
+import { databaseUrl, openDatabase } from './db/index.js';
 import { Runner } from './runner.js';
 import { createApp } from './app.js';
 import { resolveAppOrigins } from './app-origin.js';
@@ -27,14 +28,18 @@ if (
   throw new Error(
     'External binding requires an OWNER_TOKEN of at least 24 characters.',
   );
-const database = process.env.DATABASE_PATH ?? 'data/opendots.sqlite';
-const store = new Store(database);
-const push = new PushService(database, {
+if (process.env.DATABASE_PATH)
+  console.warn(
+    'DATABASE_PATH is no longer read: OpenDots stores its data in Postgres (DATABASE_URL). Copy an existing SQLite file with `npm run import-sqlite`; see docs/SETUP.md.',
+  );
+const db = await openDatabase(databaseUrl());
+const store = new Store(db);
+const push = new PushService(db, {
   accessToken: process.env.EXPO_ACCESS_TOKEN || undefined,
   previews: process.env.PUSH_PREVIEWS === 'true',
 });
-const workspace = new WorkspaceStore(
-  database,
+const workspace = await WorkspaceStore.open(
+  db,
   process.env.OWNER_ID ?? 'opendots-owner',
 );
 const config: PlatformConfig = {
@@ -66,10 +71,8 @@ const config: PlatformConfig = {
   slackDotId: process.env.SLACK_DOT_ID || undefined,
   ownerToken,
 };
-const platform = new Platform(store, workspace, config, {
-  databasePath: database,
-});
-console.log(`Conversations are stored in ${database}.`);
+const platform = await Platform.create(store, workspace, config);
+console.log('Conversations are stored in Postgres.');
 const legacy = legacySettingsNotice(process.env);
 if (legacy) console.warn(legacy);
 const researchConfig = {
@@ -86,32 +89,31 @@ const runner = new Runner(
   store,
   researchConfig,
   async (claim, _memories, signal, progress) => {
-    const threadId = workspace.taskThread(claim.id);
+    const threadId = await workspace.taskThread(claim.id);
     if (!threadId)
       throw new Error(
         'This legacy task has no conversation. Create a new scheduled task from a conversation.',
       );
     progress('Running this task in its conversation.');
-    const notify = (outcome: { text: string } | { error: string }) => {
-      const dotId = workspace
-        .conversations()
-        .find((thread) => thread.id === threadId)?.dotId;
-      const dotName = (dotId && workspace.dot(dotId)?.name) || 'Your Dot';
-      void push.send(scheduledResultMessage(push, dotName, threadId, outcome));
+    const notify = async (outcome: { text: string } | { error: string }) => {
+      const dotId = (await workspace.conversation(threadId))?.dotId;
+      const dotName =
+        (dotId && (await workspace.dot(dotId))?.name) || 'Your Dot';
+      await push.send(scheduledResultMessage(push, dotName, threadId, outcome));
     };
     try {
       const text = await platform.turn(threadId, claim.prompt, signal, {
         opendotsSource: 'scheduled_task',
       });
-      notify({ text });
+      void notify({ text }).catch(() => undefined);
       return { text, sources: [], sample: false };
     } catch (error) {
       // A stopped or cancelled run is the owner's own action; stay quiet.
       if (!signal.aborted)
-        notify({
+        void notify({
           error:
             error instanceof Error ? error.message : 'The run did not finish.',
-        });
+        }).catch(() => undefined);
       throw error;
     }
   },
@@ -145,9 +147,10 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`OpenDots template listening on http://${host}:${info.port}`);
   runner.start();
   platform.inbox.onEvents(pushNotifier(push));
-  platform.discovery.onReady((finding, event) => {
+  platform.discovery.onReady(async (finding, event) => {
     const dotName =
-      (finding.dotId && workspace.dot(finding.dotId)?.name) || 'Your Dot';
+      (finding.dotId && (await workspace.dot(finding.dotId))?.name) ||
+      'Your Dot';
     return push.send({
       title: `${dotName} looked into something for you`,
       body: push.previews
@@ -172,6 +175,7 @@ const shutdown = createShutdown({
     new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     ),
+  closeDatabase: () => db.close(),
   exit: (code) => process.exit(code),
   report: (operation, error) =>
     reportChannelFailure(operation, [safeFailure(error)]),

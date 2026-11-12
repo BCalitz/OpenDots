@@ -75,14 +75,14 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     platform.setupTelemetry.capture(event);
     return c.json({ ok: true });
   });
-  app.get('/workspace', (c) =>
+  app.get('/workspace', async (c) =>
     c.json({
-      spaces: platform.workspace.spaces(),
-      dots: platform.workspace.dots(),
-      conversations: platform.workspace.conversations(),
-      mainConversations: platform.workspace.mainConversations(),
+      spaces: await platform.workspace.spaces(),
+      dots: await platform.workspace.dots(),
+      conversations: await platform.workspace.conversations(),
+      mainConversations: await platform.workspace.mainConversations(),
       setup: platform.setup(),
-      calls: platform.workspace.calls(),
+      calls: await platform.workspace.calls(),
     }),
   );
   app.post('/spaces', async (c) => {
@@ -99,24 +99,31 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         400,
       );
     return c.json(
-      platform.workspace.createSpace(data.data.name, data.data.description),
+      await platform.workspace.createSpace(
+        data.data.name,
+        data.data.description,
+      ),
       201,
     );
   });
   // Settings stored outside updateDot: the token cap and which Dots it directs.
-  const applyLimits = (
+  const applyLimits = async (
     id: string,
     data: { monthlyTokenCap?: number | null; delegateDotIds?: string[] },
   ) => {
     if (data.monthlyTokenCap !== undefined)
-      platform.workspace.setMonthlyTokenCap(id, data.monthlyTokenCap);
+      await platform.workspace.setMonthlyTokenCap(id, data.monthlyTokenCap);
     if (data.delegateDotIds !== undefined)
-      platform.workspace.setDelegates(id, data.delegateDotIds);
-    return platform.workspace.dot(id)!;
+      await platform.workspace.setDelegates(id, data.delegateDotIds);
+    return (await platform.workspace.dot(id))!;
   };
-  const badDelegates = (id: string | undefined, ids?: string[]) =>
-    ids !== undefined &&
-    ids.some((other) => other === id || !platform.workspace.dot(other));
+  const badDelegates = async (id: string | undefined, ids?: string[]) => {
+    if (ids === undefined) return false;
+    const dots = await platform.workspace.dots();
+    return ids.some(
+      (other) => other === id || !dots.some((dot) => dot.id === other),
+    );
+  };
   app.post('/dots', async (c) => {
     const data = dotSchema
       .extend({ spaceId: z.string() })
@@ -129,9 +136,9 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         },
         400,
       );
-    if (badDelegates(undefined, data.data.delegateDotIds))
+    if (await badDelegates(undefined, data.data.delegateDotIds))
       return c.json({ error: 'Choose existing Dots for it to direct.' }, 400);
-    const dot = platform.workspace.createDot(
+    const dot = await platform.workspace.createDot(
       data.data.spaceId,
       data.data.name,
       data.data.instructions,
@@ -141,21 +148,24 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       data.data.appsAllowed,
       data.data.composioToolkits,
     );
-    return c.json(applyLimits(dot.id, data.data), 201);
+    return c.json(await applyLimits(dot.id, data.data), 201);
   });
   app.put('/dots/:id', async (c) => {
     const data = dotSchema.safeParse(await c.req.json().catch(() => null));
     if (!data.success)
       return c.json({ error: 'Invalid specialist settings.' }, 400);
-    const current = platform.workspace.dot(c.req.param('id'));
+    const current = await platform.workspace.dot(c.req.param('id'));
     if (!current) return c.json({ error: 'Dot not found.' }, 404);
-    if (badDelegates(current.id, data.data.delegateDotIds))
+    if (await badDelegates(current.id, data.data.delegateDotIds))
       return c.json(
         { error: 'A Dot can direct other existing Dots, not itself.' },
         400,
       );
-    const dot = platform.workspace.updateDot(c.req.param('id'), data.data);
-    return c.json(applyLimits(dot.id, data.data));
+    const dot = await platform.workspace.updateDot(
+      c.req.param('id'),
+      data.data,
+    );
+    return c.json(await applyLimits(dot.id, data.data));
   });
   app.post('/conversations', async (c) => {
     const data = z
@@ -179,8 +189,8 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     );
     return c.json(conversation, created ? 201 : 200);
   });
-  app.get('/conversations/:id/capture', (c) =>
-    c.json(platform.workspace.capture(c.req.param('id'))),
+  app.get('/conversations/:id/capture', async (c) =>
+    c.json(await platform.workspace.capture(c.req.param('id'))),
   );
   app.post('/voice/calls', async (c) => {
     const data = z
@@ -197,11 +207,11 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       201,
     );
   });
-  app.get('/voice/calls/:id', (c) =>
-    c.json(platform.workspace.call(c.req.param('id'))),
+  app.get('/voice/calls/:id', async (c) =>
+    c.json(await platform.workspace.call(c.req.param('id'))),
   );
-  app.post('/voice/calls/:id/active', (c) =>
-    c.json(voice.activate(c.req.param('id'))),
+  app.post('/voice/calls/:id/active', async (c) =>
+    c.json(await voice.activate(c.req.param('id'))),
   );
   app.post('/voice/calls/:id/compute', async (c) => {
     const data = z
@@ -238,7 +248,10 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         { error: 'Transcript exceeds the 20,000 character limit.' },
         400,
       );
-    platform.workspace.anchorCall(c.req.param('id'), data.data.anchorMessageId);
+    await platform.workspace.anchorCall(
+      c.req.param('id'),
+      data.data.anchorMessageId,
+    );
     return c.json(await voice.end(c.req.param('id'), data.data.transcript));
   });
   app.onError((error, c) => {

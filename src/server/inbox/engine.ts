@@ -36,7 +36,7 @@ export class InboxEngine {
     readonly store: InboxStore,
     private connections: ConnectionService,
     private options: {
-      paused: () => boolean;
+      paused: () => Promise<boolean>;
       /** Runs Composio tools for discovery sources; unset without a key. */
       composio?: () => ComposioExecute | undefined;
       tickMs?: number;
@@ -86,11 +86,12 @@ export class InboxEngine {
   }
   /** Polls at most one due source. Safe to call repeatedly. */
   async tick() {
-    if (this.polling || this.options.paused()) return;
+    if (this.polling) return;
     const controller = new AbortController();
     this.polling = controller;
     try {
-      const claim = this.store.claimDue(
+      if (await this.options.paused()) return;
+      const claim = await this.store.claimDue(
         Date.now(),
         (this.options.pollTimeoutMs ?? 60_000) * 2,
       );
@@ -109,16 +110,18 @@ export class InboxEngine {
           : null;
         const events = await source.poll(since, controller.signal);
         controller.signal.throwIfAborted();
-        if (!this.store.owns(claim)) return;
-        const fresh = this.store.ingest(events);
-        this.store.finishPoll(claim, { cursor: startedAt.toISOString() });
+        if (!(await this.store.owns(claim))) return;
+        const fresh = await this.store.ingest(events);
+        await this.store.finishPoll(claim, {
+          cursor: startedAt.toISOString(),
+        });
         await this.emit({
           source: claim.source,
           events: fresh,
           initial: !claim.source.cursor,
         });
       } catch (error) {
-        this.store.finishPoll(claim, { error: safeError(error) });
+        await this.store.finishPoll(claim, { error: safeError(error) });
       } finally {
         clearTimeout(timeout);
       }
@@ -132,12 +135,12 @@ export class InboxEngine {
   }
   /** Handles a webhook delivery whose secret was already verified. */
   async receive(sourceId: string, body: unknown) {
-    const record = this.store.source(sourceId);
+    const record = await this.store.source(sourceId);
     if (!record || record.type !== 'webhook' || !record.enabled)
       throw new Error('Source not found.');
     const source = this.sourceFor(record);
     const events = source.webhook!(body);
-    const fresh = this.store.ingest(events);
+    const fresh = await this.store.ingest(events);
     await this.emit({ source: record, events: fresh, initial: false });
     return { received: events.length, new: fresh.length };
   }

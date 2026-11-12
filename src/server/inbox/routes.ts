@@ -52,9 +52,14 @@ const createSource = z.discriminatedUnion('type', [
 const hookUrl = (id: string) => `/api/inbox/hooks/${id}`;
 
 /** Checks an MCP source points at a tool its Dot can run on a timer. */
-function validateMcp(platform: Platform, config: z.infer<typeof mcpConfig>) {
-  if (!platform.workspace.dot(config.dotId)) return 'Dot not found.';
-  const connection = platform.workspace.connections.get(config.connectionId);
+async function validateMcp(
+  platform: Platform,
+  config: z.infer<typeof mcpConfig>,
+) {
+  if (!(await platform.workspace.dot(config.dotId))) return 'Dot not found.';
+  const connection = await platform.workspace.connections.get(
+    config.connectionId,
+  );
   if (!connection || connection.dotId !== config.dotId)
     return 'That connection does not belong to this Dot.';
   const tool = connection.tools.find((item) => item.name === config.tool);
@@ -70,7 +75,7 @@ function validateMcp(platform: Platform, config: z.infer<typeof mcpConfig>) {
 export function inboxRoutes(platform: Platform) {
   const app = new Hono();
   const store = platform.inbox.store;
-  app.get('/inbox', (c) => {
+  app.get('/inbox', async (c) => {
     const query = z
       .object({
         sourceId: z.string().max(200).optional(),
@@ -80,8 +85,8 @@ export function inboxRoutes(platform: Platform) {
       .safeParse(c.req.query());
     if (!query.success) return c.json({ error: 'Invalid inbox filter.' }, 400);
     return c.json({
-      sources: store.sources(),
-      events: store.events({
+      sources: await store.sources(),
+      events: await store.events({
         sourceId: query.data.sourceId,
         state: query.data.state,
         includeDismissed: query.data.all === '1',
@@ -100,12 +105,15 @@ export function inboxRoutes(platform: Platform) {
       );
     const value = parsed.data;
     if (value.type === 'mcp') {
-      const problem = validateMcp(platform, value.config);
+      const problem = await validateMcp(platform, value.config);
       if (problem) return c.json({ error: problem }, 400);
-      const { source } = store.create({ ...value, config: value.config });
+      const { source } = await store.create({
+        ...value,
+        config: value.config,
+      });
       return c.json({ source }, 201);
     }
-    const { source, secret } = store.create({
+    const { source, secret } = await store.create({
       ...value,
       config: {},
       intervalSeconds: 0,
@@ -125,35 +133,35 @@ export function inboxRoutes(platform: Platform) {
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success)
       return c.json({ error: 'Invalid source settings.' }, 400);
-    const current = store.source(c.req.param('id'));
+    const current = await store.source(c.req.param('id'));
     if (!current) return c.json({ error: 'Source not found.' }, 404);
     if (parsed.data.config) {
       if (current.type !== 'mcp')
         return c.json({ error: 'Webhook sources have no tool.' }, 400);
-      const problem = validateMcp(platform, parsed.data.config);
+      const problem = await validateMcp(platform, parsed.data.config);
       if (problem) return c.json({ error: problem }, 400);
     }
-    return c.json(store.update(current.id, parsed.data));
+    return c.json(await store.update(current.id, parsed.data));
   });
-  app.delete('/inbox/sources/:id', (c) =>
-    store.remove(c.req.param('id'))
+  app.delete('/inbox/sources/:id', async (c) =>
+    (await store.remove(c.req.param('id')))
       ? c.json({ ok: true })
       : c.json({ error: 'Source not found.' }, 404),
   );
-  app.post('/inbox/sources/:id/poll', (c) => {
-    if (!store.pollNow(c.req.param('id')))
+  app.post('/inbox/sources/:id/poll', async (c) => {
+    if (!(await store.pollNow(c.req.param('id'))))
       return c.json({ error: 'Only connection sources can be polled.' }, 404);
     void platform.inbox.tick();
     return c.json({ ok: true });
   });
-  app.post('/inbox/sources/:id/secret', (c) => {
-    const secret = store.rotateSecret(c.req.param('id'));
+  app.post('/inbox/sources/:id/secret', async (c) => {
+    const secret = await store.rotateSecret(c.req.param('id'));
     return secret
       ? c.json({ secret, url: hookUrl(c.req.param('id')) })
       : c.json({ error: 'Webhook source not found.' }, 404);
   });
-  app.get('/inbox/events/:id/raw', (c) => {
-    const raw = store.payload(c.req.param('id'));
+  app.get('/inbox/events/:id/raw', async (c) => {
+    const raw = await store.payload(c.req.param('id'));
     return raw === undefined
       ? c.json({ error: 'Event not found.' }, 404)
       : c.json({ raw });
@@ -164,7 +172,7 @@ export function inboxRoutes(platform: Platform) {
       .strict()
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'Unknown event state.' }, 400);
-    const event = store.setState(c.req.param('id'), parsed.data.state);
+    const event = await store.setState(c.req.param('id'), parsed.data.state);
     return event ? c.json(event) : c.json({ error: 'Event not found.' }, 404);
   });
   return app;
@@ -185,7 +193,7 @@ export function inboxHookRoute(platform: Platform) {
       c.req.header('authorization')?.replace(/^Bearer /, '') ??
       '';
     // One answer for a wrong secret and an unknown source.
-    if (!platform.inbox.store.verifySecret(id, secret))
+    if (!(await platform.inbox.store.verifySecret(id, secret)))
       return c.json({ error: 'Unknown source or wrong secret.' }, 401);
     if (!c.req.header('content-type')?.includes('application/json'))
       return c.json({ error: 'Use application/json.' }, 415);

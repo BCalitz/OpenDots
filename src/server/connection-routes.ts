@@ -18,29 +18,29 @@ export function connectionRoutes(
       400,
     ),
   );
-  const requireDot = (id: string) => {
-    if (!workspace.dot(id)) throw new Error('Dot not found.');
+  const requireDot = async (id: string) => {
+    if (!(await workspace.dot(id))) throw new Error('Dot not found.');
     return id;
   };
-  const owned = (id: string) => {
-    const connection = connections.store.get(id);
+  const owned = async (id: string) => {
+    const connection = await connections.store.get(id);
     if (!connection) throw new Error('Connection not found.');
     return connection;
   };
-  app.get('/dots/:id/connections', (c) =>
-    c.json(connections.store.list(requireDot(c.req.param('id')))),
+  app.get('/dots/:id/connections', async (c) =>
+    c.json(await connections.store.list(await requireDot(c.req.param('id')))),
   );
   app.post('/dots/:id/connections', async (c) =>
     c.json(
       await connections.add(
-        requireDot(c.req.param('id')),
+        await requireDot(c.req.param('id')),
         connectionInput.parse(await c.req.json()),
       ),
       201,
     ),
   );
   app.post('/connections/:id/refresh', async (c) =>
-    c.json(await connections.refresh(owned(c.req.param('id')).id)),
+    c.json(await connections.refresh((await owned(c.req.param('id'))).id)),
   );
   app.patch('/connections/:id/tools/:name', async (c) => {
     const patch = z
@@ -51,15 +51,15 @@ export function connectionRoutes(
       .strict()
       .parse(await c.req.json());
     return c.json(
-      connections.setTool(
-        owned(c.req.param('id')).id,
+      await connections.setTool(
+        (await owned(c.req.param('id'))).id,
         c.req.param('name'),
         patch,
       ),
     );
   });
-  app.delete('/connections/:id', (c) => {
-    connections.store.remove(owned(c.req.param('id')).id);
+  app.delete('/connections/:id', async (c) => {
+    await connections.store.remove((await owned(c.req.param('id'))).id);
     return c.json({ ok: true });
   });
   return app;

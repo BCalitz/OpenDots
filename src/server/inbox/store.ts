@@ -1,10 +1,10 @@
-import type { DatabaseSync } from 'node:sqlite';
 import {
   createHash,
   randomBytes,
   randomUUID,
   timingSafeEqual,
 } from 'node:crypto';
+import { sql, type Db } from '../db/index.js';
 import type {
   ComposioSourceConfig,
   FindingState,
@@ -41,9 +41,8 @@ export interface SourceClaim {
   source: SourceRecord;
   lease: string;
 }
-type SourceRow = Omit<SourceRecord, 'config' | 'enabled'> & {
+type SourceRow = Omit<SourceRecord, 'config'> & {
   config: string;
-  enabled: number;
   secretHash: string | null;
   lease: string | null;
   leaseUntil: number | null;
@@ -52,39 +51,23 @@ const hash = (secret: string) =>
   createHash('sha256').update(secret).digest('hex');
 const clip = (value: string, max = MAX_TEXT) =>
   value.length > max ? `${value.slice(0, max - 1)}…` : value;
+const isWebUrl = (url: string) => /^https?:\/\//i.test(url);
 /** Sources the poller runs on a timer. */
-const POLLED = "type IN ('mcp', 'composio')";
-type FindingRow = Omit<FindingView, 'attention'> & { attention: number };
-const findingView = (row: FindingRow): FindingView => ({
-  ...row,
-  attention: !!row.attention,
-});
+const POLLED = sql.raw("type IN ('mcp', 'composio')");
+const FINDING = sql.raw(
+  'id, event_id, attention, category, confidence, reason, judged_by, state, dot_id, thread_id, referenced_event_id, error, created_at, updated_at',
+);
 type EventRow = Omit<InboxEventView, 'finding'> & {
   findingId: string | null;
 };
+const EVENT_QUERY = sql`SELECT e.id, e.source_id, COALESCE(s.name, 'Removed source') AS source_name, e.external_id, e.kind, e.title, e.summary, e.priority, e.sender AS "from", e.url, e.occurred_at, e.received_at, e.state, f.id AS finding_id FROM inbox_events e LEFT JOIN inbox_sources s ON s.id=e.source_id LEFT JOIN discovery_findings f ON f.event_id=e.id`;
 
 export class InboxStore {
-  constructor(private db: DatabaseSync) {
-    db.exec(`CREATE TABLE IF NOT EXISTS inbox_sources(id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notify TEXT NOT NULL DEFAULT 'urgent', intervalSeconds INTEGER NOT NULL DEFAULT 300, secretHash TEXT, cursor TEXT, lease TEXT, leaseUntil INTEGER, lastPolledAt INTEGER, nextPollAt INTEGER, lastError TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS inbox_events(id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, externalId TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL, priority TEXT NOT NULL, sender TEXT, url TEXT, payload TEXT NOT NULL, occurredAt INTEGER NOT NULL, receivedAt INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'new', UNIQUE(sourceId, externalId));
-      CREATE INDEX IF NOT EXISTS inbox_events_time ON inbox_events(receivedAt);
-      CREATE TABLE IF NOT EXISTS discovery_findings(id TEXT PRIMARY KEY, eventId TEXT NOT NULL UNIQUE, attention INTEGER NOT NULL, category TEXT NOT NULL, confidence REAL NOT NULL, reason TEXT NOT NULL, judgedBy TEXT NOT NULL, state TEXT NOT NULL, dotId TEXT, threadId TEXT, referencedEventId TEXT, error TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS discovery_findings_state ON discovery_findings(state);`);
-  }
-  private transaction<T>(work: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const value = work();
-      this.db.exec('COMMIT');
-      return value;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
+  constructor(private db: Db) {}
   private row(id: string) {
-    return this.db.prepare('SELECT * FROM inbox_sources WHERE id=?').get(id) as
-      SourceRow | undefined;
+    return this.db.row<SourceRow>(
+      sql`SELECT * FROM inbox_sources WHERE id=${id}`,
+    );
   }
   private record(row: SourceRow): SourceRecord {
     return {
@@ -93,7 +76,7 @@ export class InboxStore {
       kind: row.kind,
       type: row.type,
       config: JSON.parse(row.config),
-      enabled: !!row.enabled,
+      enabled: row.enabled,
       notify: row.notify,
       intervalSeconds: row.intervalSeconds,
       cursor: row.cursor,
@@ -103,21 +86,18 @@ export class InboxStore {
       createdAt: row.createdAt,
     };
   }
-  source(id: string) {
-    const row = this.row(id);
+  async source(id: string) {
+    const row = await this.row(id);
     return row ? this.record(row) : undefined;
   }
-  sources(): InboxSourceView[] {
-    const rows = this.db
-      .prepare(
-        `SELECT s.*, (SELECT COUNT(*) FROM inbox_events e WHERE e.sourceId=s.id) AS eventCount,
-          (SELECT COUNT(*) FROM inbox_events e WHERE e.sourceId=s.id AND e.state='new') AS newCount
-        FROM inbox_sources s ORDER BY s.createdAt, s.rowid`,
-      )
-      .all() as unknown as (SourceRow & {
-      eventCount: number;
-      newCount: number;
-    })[];
+  async sources(): Promise<InboxSourceView[]> {
+    const rows = await this.db.rows<
+      SourceRow & { eventCount: number; newCount: number }
+    >(
+      sql`SELECT s.*, (SELECT COUNT(*) FROM inbox_events e WHERE e.source_id=s.id) AS event_count,
+          (SELECT COUNT(*) FROM inbox_events e WHERE e.source_id=s.id AND e.state='new') AS new_count
+        FROM inbox_sources s ORDER BY s.created_at, s.seq`,
+    );
     return rows.map((row) => {
       const record = this.record(row);
       return {
@@ -140,7 +120,7 @@ export class InboxStore {
     });
   }
   /** Webhook sources get a secret, returned once and stored only as a hash. */
-  create(value: {
+  async create(value: {
     name: string;
     kind: SourceKind;
     type: SourceType;
@@ -154,24 +134,10 @@ export class InboxStore {
       value.type === 'webhook'
         ? randomBytes(32).toString('base64url')
         : undefined;
-    this.db
-      .prepare(
-        'INSERT INTO inbox_sources (id, name, kind, type, config, enabled, notify, intervalSeconds, secretHash, nextPollAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)',
-      )
-      .run(
-        id,
-        value.name,
-        value.kind,
-        value.type,
-        JSON.stringify(value.config),
-        value.notify,
-        value.intervalSeconds,
-        secret ? hash(secret) : null,
-        value.type === 'webhook' ? null : now,
-        now,
-        now,
-      );
-    return { source: this.source(id)!, secret };
+    await this.db.run(
+      sql`INSERT INTO inbox_sources (id, name, kind, type, config, enabled, notify, interval_seconds, secret_hash, next_poll_at, created_at, updated_at) VALUES (${id}, ${value.name}, ${value.kind}, ${value.type}, ${JSON.stringify(value.config)}, true, ${value.notify}, ${value.intervalSeconds}, ${secret ? hash(secret) : null}, ${value.type === 'webhook' ? null : now}, ${now}, ${now})`,
+    );
+    return { source: (await this.source(id))!, secret };
   }
   update(
     id: string,
@@ -179,117 +145,94 @@ export class InboxStore {
       Pick<SourceRecord, 'name' | 'enabled' | 'notify' | 'intervalSeconds'>
     > & { config?: McpSourceConfig | ComposioSourceConfig },
   ) {
-    const current = this.source(id);
-    if (!current) return undefined;
-    const next = { ...current, ...patch };
-    this.db
-      .prepare(
-        'UPDATE inbox_sources SET name=?, enabled=?, notify=?, intervalSeconds=?, config=?, lastError=CASE WHEN ? THEN NULL ELSE lastError END, updatedAt=? WHERE id=?',
-      )
-      .run(
-        next.name,
-        next.enabled ? 1 : 0,
-        next.notify,
-        next.intervalSeconds,
-        JSON.stringify(next.config),
-        patch.config || patch.enabled ? 1 : 0,
-        Date.now(),
-        id,
+    return this.db.transaction(async () => {
+      const current = await this.source(id);
+      if (!current) return undefined;
+      const next = { ...current, ...patch };
+      const clearError = !!(patch.config || patch.enabled);
+      await this.db.run(
+        sql`UPDATE inbox_sources SET name=${next.name}, enabled=${next.enabled}, notify=${next.notify}, interval_seconds=${next.intervalSeconds}, config=${JSON.stringify(next.config)}, last_error=CASE WHEN ${clearError}::boolean THEN NULL ELSE last_error END, updated_at=${Date.now()} WHERE id=${id}`,
       );
-    return this.source(id);
+      return this.source(id);
+    });
   }
   remove(id: string) {
-    return this.transaction(() => {
-      this.db
-        .prepare(
-          'DELETE FROM discovery_findings WHERE eventId IN (SELECT id FROM inbox_events WHERE sourceId=?)',
-        )
-        .run(id);
-      this.db.prepare('DELETE FROM inbox_events WHERE sourceId=?').run(id);
+    return this.db.transaction(async () => {
+      await this.db.run(
+        sql`DELETE FROM discovery_findings WHERE event_id IN (SELECT id FROM inbox_events WHERE source_id=${id})`,
+      );
+      await this.db.run(sql`DELETE FROM inbox_events WHERE source_id=${id}`);
       return (
-        this.db.prepare('DELETE FROM inbox_sources WHERE id=?').run(id)
-          .changes > 0
+        (await this.db.run(sql`DELETE FROM inbox_sources WHERE id=${id}`)) > 0
       );
     });
   }
-  rotateSecret(id: string) {
-    const row = this.row(id);
+  async rotateSecret(id: string) {
+    const row = await this.row(id);
     if (!row || row.type !== 'webhook') return undefined;
     const secret = randomBytes(32).toString('base64url');
-    this.db
-      .prepare('UPDATE inbox_sources SET secretHash=?, updatedAt=? WHERE id=?')
-      .run(hash(secret), Date.now(), id);
+    await this.db.run(
+      sql`UPDATE inbox_sources SET secret_hash=${hash(secret)}, updated_at=${Date.now()} WHERE id=${id}`,
+    );
     return secret;
   }
   /** Constant-time check of a webhook secret. */
-  verifySecret(id: string, secret: string) {
-    const row = this.row(id);
+  async verifySecret(id: string, secret: string) {
+    const row = await this.row(id);
     if (!row?.secretHash || !row.enabled || !secret) return false;
     const expected = Buffer.from(row.secretHash, 'hex');
     const supplied = Buffer.from(hash(secret), 'hex');
     return timingSafeEqual(expected, supplied);
   }
-  pollNow(id: string) {
+  async pollNow(id: string) {
     return (
-      this.db
-        .prepare(
-          `UPDATE inbox_sources SET nextPollAt=? WHERE id=? AND ${POLLED}`,
-        )
-        .run(Date.now(), id).changes > 0
+      (await this.db.run(
+        sql`UPDATE inbox_sources SET next_poll_at=${Date.now()} WHERE id=${id} AND ${POLLED}`,
+      )) > 0
     );
   }
   /**
    * Claims one due polling source under a lease, like scheduled tasks, so two
    * workers never poll the same source at once.
    */
-  claimDue(now = Date.now(), leaseMs = 120_000): SourceClaim | undefined {
-    return this.transaction(() => {
-      const row = this.db
-        .prepare(
-          `SELECT * FROM inbox_sources WHERE ${POLLED} AND enabled=1 AND COALESCE(nextPollAt, 0)<=? AND (lease IS NULL OR leaseUntil<=?) ORDER BY COALESCE(nextPollAt, 0), rowid LIMIT 1`,
-        )
-        .get(now, now) as SourceRow | undefined;
+  claimDue(
+    now = Date.now(),
+    leaseMs = 120_000,
+  ): Promise<SourceClaim | undefined> {
+    return this.db.transaction(async () => {
+      const row = await this.db.row<SourceRow>(
+        sql`SELECT * FROM inbox_sources WHERE ${POLLED} AND enabled AND COALESCE(next_poll_at, 0)<=${now} AND (lease IS NULL OR lease_until<=${now}) ORDER BY COALESCE(next_poll_at, 0), seq LIMIT 1`,
+      );
       if (!row) return undefined;
       const lease = randomUUID();
-      this.db
-        .prepare('UPDATE inbox_sources SET lease=?, leaseUntil=? WHERE id=?')
-        .run(lease, now + leaseMs, row.id);
+      await this.db.run(
+        sql`UPDATE inbox_sources SET lease=${lease}, lease_until=${now + leaseMs} WHERE id=${row.id}`,
+      );
       return { source: this.record(row), lease };
     });
   }
-  owns(claim: SourceClaim) {
-    return this.row(claim.source.id)?.lease === claim.lease;
+  async owns(claim: SourceClaim) {
+    return (await this.row(claim.source.id))?.lease === claim.lease;
   }
   /** Releases the lease and schedules the next poll. Ignored if the lease moved on. */
-  finishPoll(
+  async finishPoll(
     claim: SourceClaim,
     outcome: { cursor?: string; error?: string },
     now = Date.now(),
   ) {
-    const current = this.row(claim.source.id);
     return (
-      this.db
-        .prepare(
-          'UPDATE inbox_sources SET lease=NULL, leaseUntil=NULL, lastPolledAt=?, nextPollAt=?, cursor=COALESCE(?, cursor), lastError=? WHERE id=? AND lease=?',
-        )
-        .run(
-          now,
-          now +
-            (current?.intervalSeconds ?? claim.source.intervalSeconds) * 1000,
-          outcome.cursor ?? null,
-          outcome.error ?? null,
-          claim.source.id,
-          claim.lease,
-        ).changes > 0
+      (await this.db.run(
+        sql`UPDATE inbox_sources SET lease=NULL, lease_until=NULL, last_polled_at=${now}, next_poll_at=${now}::bigint + interval_seconds::bigint * 1000, cursor=COALESCE(${outcome.cursor ?? null}::text, cursor), last_error=${outcome.error ?? null} WHERE id=${claim.source.id} AND lease=${claim.lease}`,
+      )) > 0
     );
   }
   /** Writes events, skipping ones already seen. Returns only the new ones. */
-  ingest(events: InboxEvent[], now = Date.now()): InboxEventView[] {
+  async ingest(
+    events: InboxEvent[],
+    now = Date.now(),
+  ): Promise<InboxEventView[]> {
     const inserted: string[] = [];
-    this.transaction(() => {
-      const insert = this.db.prepare(
-        'INSERT INTO inbox_events (id, sourceId, externalId, kind, title, summary, priority, sender, url, payload, occurredAt, receivedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sourceId, externalId) DO NOTHING',
-      );
+    await this.db.transaction(async () => {
       for (const event of events) {
         const id = randomUUID();
         let payload: string;
@@ -298,48 +241,46 @@ export class InboxStore {
         } catch {
           payload = 'null';
         }
-        const changes = insert.run(
-          id,
-          event.sourceId,
-          clip(event.externalId, 300),
-          clip(event.kind, 80),
-          clip(event.title || '(untitled)', 300),
-          clip(event.summary ?? ''),
-          event.priority ?? 'normal',
-          event.from ? clip(event.from, 200) : null,
-          event.url && /^https?:\/\//i.test(event.url)
-            ? clip(event.url, 2048)
-            : null,
-          clip(payload, 50_000),
-          event.occurredAt,
-          now,
-        ).changes;
+        const url =
+          event.url && isWebUrl(event.url) ? clip(event.url, 2048) : null;
+        const changes = await this.db.run(
+          sql`INSERT INTO inbox_events (id, source_id, external_id, kind, title, summary, priority, sender, url, payload, occurred_at, received_at) VALUES (${id}, ${event.sourceId}, ${clip(event.externalId, 300)}, ${clip(event.kind, 80)}, ${clip(event.title || '(untitled)', 300)}, ${clip(event.summary ?? '')}, ${event.priority ?? 'normal'}, ${event.from ? clip(event.from, 200) : null}, ${url}, ${clip(payload, 50_000)}, ${event.occurredAt}, ${now}) ON CONFLICT (source_id, external_id) DO NOTHING`,
+        );
         if (changes) inserted.push(id);
       }
       for (const sourceId of new Set(events.map((event) => event.sourceId)))
-        this.db
-          .prepare(
-            `DELETE FROM inbox_events WHERE sourceId=? AND id NOT IN (SELECT id FROM inbox_events WHERE sourceId=? ORDER BY receivedAt DESC, rowid DESC LIMIT ${MAX_EVENTS_PER_SOURCE})`,
-          )
-          .run(sourceId, sourceId);
-      this.db.exec(
-        'DELETE FROM discovery_findings WHERE eventId NOT IN (SELECT id FROM inbox_events)',
+        await this.db.run(
+          sql`DELETE FROM inbox_events WHERE source_id=${sourceId} AND id NOT IN (SELECT id FROM inbox_events WHERE source_id=${sourceId} ORDER BY received_at DESC, seq DESC LIMIT ${MAX_EVENTS_PER_SOURCE})`,
+        );
+      await this.db.run(
+        sql`DELETE FROM discovery_findings f WHERE NOT EXISTS (SELECT 1 FROM inbox_events e WHERE e.id=f.event_id)`,
       );
     });
-    return inserted
-      .map((id) => this.event(id))
-      .filter((event): event is InboxEventView => !!event);
+    const views: InboxEventView[] = [];
+    for (const id of inserted) {
+      const event = await this.event(id);
+      if (event) views.push(event);
+    }
+    return views;
   }
-  private eventQuery = `SELECT e.id, e.sourceId, COALESCE(s.name, 'Removed source') AS sourceName, e.externalId, e.kind, e.title, e.summary, e.priority, e.sender AS "from", e.url, e.occurredAt, e.receivedAt, e.state, f.id AS findingId FROM inbox_events e LEFT JOIN inbox_sources s ON s.id=e.sourceId LEFT JOIN discovery_findings f ON f.eventId=e.id`;
-  private toEvent({ findingId, ...row }: EventRow): InboxEventView {
+  private async toEvent({
+    findingId,
+    ...row
+  }: EventRow): Promise<InboxEventView> {
     return {
       ...row,
-      finding: findingId ? (this.finding(findingId) ?? null) : null,
+      finding: findingId ? ((await this.finding(findingId)) ?? null) : null,
     };
   }
-  event(id: string) {
-    const row = this.db.prepare(`${this.eventQuery} WHERE e.id=?`).get(id) as
-      EventRow | undefined;
+  private async toEvents(rows: EventRow[]) {
+    const views: InboxEventView[] = [];
+    for (const row of rows) views.push(await this.toEvent(row));
+    return views;
+  }
+  async event(id: string) {
+    const row = await this.db.row<EventRow>(
+      sql`${EVENT_QUERY} WHERE e.id=${id}`,
+    );
     return row ? this.toEvent(row) : undefined;
   }
   /**
@@ -348,101 +289,82 @@ export class InboxStore {
    * No per-source-pair logic: any source that labels an event's `sender`
    * participates.
    */
-  recentFrom(
+  async recentFrom(
     from: string,
     beforeMs: number,
     windowMs: number,
     excludeId: string,
     limit = 10,
-  ): InboxEventView[] {
-    const rows = this.db
-      .prepare(
-        `${this.eventQuery} WHERE e.sender=? AND e.id!=? AND e.occurredAt BETWEEN ? AND ? ORDER BY e.occurredAt DESC LIMIT ?`,
-      )
-      .all(from, excludeId, beforeMs - windowMs, beforeMs, limit) as unknown as EventRow[];
-    return rows.map((row) => this.toEvent(row));
+  ): Promise<InboxEventView[]> {
+    return this.toEvents(
+      await this.db.rows<EventRow>(
+        sql`${EVENT_QUERY} WHERE e.sender=${from} AND e.id<>${excludeId} AND e.occurred_at BETWEEN ${beforeMs - windowMs} AND ${beforeMs} ORDER BY e.occurred_at DESC LIMIT ${limit}`,
+      ),
+    );
   }
   /** The stored raw payload, as untrusted data. */
-  payload(id: string): unknown {
-    const row = this.db
-      .prepare('SELECT payload FROM inbox_events WHERE id=?')
-      .get(id) as { payload: string } | undefined;
+  async payload(id: string): Promise<unknown> {
+    const row = await this.db.row<{ payload: string }>(
+      sql`SELECT payload FROM inbox_events WHERE id=${id}`,
+    );
     return row ? JSON.parse(row.payload) : undefined;
   }
-  events(
+  async events(
     filter: {
       sourceId?: string;
       state?: InboxEventState;
       includeDismissed?: boolean;
       limit?: number;
     } = {},
-  ): InboxEventView[] {
-    const where: string[] = [];
-    const values: string[] = [];
-    if (filter.sourceId) {
-      where.push('e.sourceId=?');
-      values.push(filter.sourceId);
-    }
-    if (filter.state) {
-      where.push('e.state=?');
-      values.push(filter.state);
-    } else if (!filter.includeDismissed) where.push("e.state<>'dismissed'");
+  ): Promise<InboxEventView[]> {
+    const where = [];
+    if (filter.sourceId) where.push(sql`e.source_id=${filter.sourceId}`);
+    if (filter.state) where.push(sql`e.state=${filter.state}`);
+    else if (!filter.includeDismissed) where.push(sql`e.state<>'dismissed'`);
     const limit = Math.min(Math.max(filter.limit ?? 100, 1), 500);
-    const rows = this.db
-      .prepare(
-        `${this.eventQuery} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY CASE e.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, e.receivedAt DESC LIMIT ${limit}`,
-      )
-      .all(...values) as unknown as EventRow[];
-    return rows.map((row) => this.toEvent(row));
+    return this.toEvents(
+      await this.db.rows<EventRow>(
+        sql`${EVENT_QUERY} ${where.length ? sql`WHERE ${sql.join(where, ' AND ')}` : sql``} ORDER BY CASE e.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, e.received_at DESC LIMIT ${limit}`,
+      ),
+    );
   }
-  setState(id: string, state: InboxEventState) {
-    return this.db
-      .prepare('UPDATE inbox_events SET state=? WHERE id=?')
-      .run(state, id).changes > 0
-      ? this.event(id)
-      : undefined;
+  async setState(id: string, state: InboxEventState) {
+    const changed = await this.db.run(
+      sql`UPDATE inbox_events SET state=${state} WHERE id=${id}`,
+    );
+    return changed > 0 ? this.event(id) : undefined;
   }
   /** The discovery source for a connected account, if there is one. */
-  composioSource(accountId: string) {
-    const row = this.db
-      .prepare(
-        "SELECT * FROM inbox_sources WHERE type='composio' AND json_extract(config, '$.accountId')=? ORDER BY createdAt LIMIT 1",
-      )
-      .get(accountId) as SourceRow | undefined;
+  async composioSource(accountId: string) {
+    const row = await this.db.row<SourceRow>(
+      sql`SELECT * FROM inbox_sources WHERE type='composio' AND config::jsonb->>'accountId'=${accountId} ORDER BY created_at LIMIT 1`,
+    );
     return row ? this.record(row) : undefined;
   }
-  composioSources() {
+  async composioSources() {
     return (
-      this.db
-        .prepare(
-          "SELECT * FROM inbox_sources WHERE type='composio' ORDER BY createdAt",
-        )
-        .all() as unknown as SourceRow[]
+      await this.db.rows<SourceRow>(
+        sql`SELECT * FROM inbox_sources WHERE type='composio' ORDER BY created_at`,
+      )
     ).map((row) => this.record(row));
   }
   finding(id: string) {
-    const row = this.db
-      .prepare('SELECT * FROM discovery_findings WHERE id=?')
-      .get(id) as FindingRow | undefined;
-    return row ? findingView(row) : undefined;
+    return this.db.row<FindingView>(
+      sql`SELECT ${FINDING} FROM discovery_findings WHERE id=${id}`,
+    );
   }
   findingForEvent(eventId: string) {
-    const row = this.db
-      .prepare('SELECT * FROM discovery_findings WHERE eventId=?')
-      .get(eventId) as FindingRow | undefined;
-    return row ? findingView(row) : undefined;
+    return this.db.row<FindingView>(
+      sql`SELECT ${FINDING} FROM discovery_findings WHERE event_id=${eventId}`,
+    );
   }
   findings(state: FindingState) {
-    return (
-      this.db
-        .prepare(
-          'SELECT * FROM discovery_findings WHERE state=? ORDER BY createdAt, rowid',
-        )
-        .all(state) as unknown as FindingRow[]
-    ).map(findingView);
+    return this.db.rows<FindingView>(
+      sql`SELECT ${FINDING} FROM discovery_findings WHERE state=${state} ORDER BY created_at, seq`,
+    );
   }
   /** Records the discovery model's verdict on an event, once per event. */
-  saveFinding(value: {
+  async saveFinding(value: {
     eventId: string;
     attention: boolean;
     category: string;
@@ -453,41 +375,18 @@ export class InboxStore {
     referencedEventId?: string | null;
   }) {
     const now = Date.now();
-    this.db
-      .prepare(
-        'INSERT INTO discovery_findings (id, eventId, attention, category, confidence, reason, judgedBy, state, dotId, referencedEventId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(eventId) DO NOTHING',
-      )
-      .run(
-        randomUUID(),
-        value.eventId,
-        value.attention ? 1 : 0,
-        clip(value.category, 40),
-        Math.min(Math.max(value.confidence, 0), 1),
-        clip(value.reason, 500),
-        clip(value.judgedBy, 120),
-        value.attention ? 'flagged' : 'ignored',
-        value.dotId,
-        value.referencedEventId ?? null,
-        now,
-        now,
-      );
-    return this.findingForEvent(value.eventId)!;
+    await this.db.run(
+      sql`INSERT INTO discovery_findings (id, event_id, attention, category, confidence, reason, judged_by, state, dot_id, referenced_event_id, created_at, updated_at) VALUES (${randomUUID()}, ${value.eventId}, ${value.attention}, ${clip(value.category, 40)}, ${Math.min(Math.max(value.confidence, 0), 1)}, ${clip(value.reason, 500)}, ${clip(value.judgedBy, 120)}, ${value.attention ? 'flagged' : 'ignored'}, ${value.dotId}, ${value.referencedEventId ?? null}, ${now}, ${now}) ON CONFLICT (event_id) DO NOTHING`,
+    );
+    return (await this.findingForEvent(value.eventId))!;
   }
-  updateFinding(
+  async updateFinding(
     id: string,
     patch: { state: FindingState; threadId?: string; error?: string | null },
   ) {
-    this.db
-      .prepare(
-        'UPDATE discovery_findings SET state=?, threadId=COALESCE(?, threadId), error=?, updatedAt=? WHERE id=?',
-      )
-      .run(
-        patch.state,
-        patch.threadId ?? null,
-        patch.error ? clip(patch.error, 500) : null,
-        Date.now(),
-        id,
-      );
+    await this.db.run(
+      sql`UPDATE discovery_findings SET state=${patch.state}, thread_id=COALESCE(${patch.threadId ?? null}::text, thread_id), error=${patch.error ? clip(patch.error, 500) : null}, updated_at=${Date.now()} WHERE id=${id}`,
+    );
     return this.finding(id);
   }
 }

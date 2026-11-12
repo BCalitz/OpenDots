@@ -15,23 +15,23 @@ const listQuery = z.object({
 /** Run inspector, cost meter and audit view (roadmap phase 2). */
 export function insightRoutes(platform: Platform) {
   const app = new Hono();
-  app.get('/runs', (c) => {
+  app.get('/runs', async (c) => {
     const runner = platform.runner;
     if (!runner) return c.json({ error: LOCAL_ONLY }, 422);
     const query = listQuery.safeParse(c.req.query());
     if (!query.success) return c.json({ error: 'Invalid run filter.' }, 400);
     return c.json(
-      runner.listRuns({
+      await runner.listRuns({
         agentId: query.data.dotId,
         threadId: query.data.threadId,
         limit: query.data.limit,
       }),
     );
   });
-  app.get('/runs/:id', (c) => {
+  app.get('/runs/:id', async (c) => {
     const runner = platform.runner;
     if (!runner) return c.json({ error: LOCAL_ONLY }, 422);
-    const detail = runner.runDetail(c.req.param('id'));
+    const detail = await runner.runDetail(c.req.param('id'));
     if (!detail) return c.json({ error: 'Run not found.' }, 404);
     const body: RunDetail = {
       run: detail.run,
@@ -40,7 +40,7 @@ export function insightRoutes(platform: Platform) {
     };
     return c.json(body);
   });
-  app.get('/usage', (c) => {
+  app.get('/usage', async (c) => {
     const days = z.coerce
       .number()
       .int()
@@ -49,10 +49,13 @@ export function insightRoutes(platform: Platform) {
       .catch(30)
       .parse(c.req.query('days') ?? 30);
     return c.json(
-      platform.workspace.usage.report(platform.workspace.dots(), days),
+      await platform.workspace.usage.report(
+        await platform.workspace.dots(),
+        days,
+      ),
     );
   });
-  app.get('/audit', (c) => {
+  app.get('/audit', async (c) => {
     const query = z
       .object({
         dotId: z.string().max(200).optional(),
@@ -62,7 +65,7 @@ export function insightRoutes(platform: Platform) {
       .safeParse(c.req.query());
     if (!query.success) return c.json({ error: 'Invalid audit filter.' }, 400);
     return c.json(
-      platform.workspace.usage.audit({
+      await platform.workspace.usage.audit({
         dotId: query.data.dotId,
         changesOnly: query.data.changes === '1',
         limit: query.data.limit,

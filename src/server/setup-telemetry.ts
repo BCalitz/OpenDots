@@ -99,6 +99,14 @@ export class SetupTelemetry {
   private state?: State;
   private pending?: Promise<void>;
   private timer?: ReturnType<typeof setInterval>;
+  /** Writes to the store, one at a time and in order. */
+  private writes: Promise<void> = Promise.resolve();
+  /** Loads saved state; events captured before it resolves are dropped. */
+  static async create(...args: ConstructorParameters<typeof SetupTelemetry>) {
+    const telemetry = new SetupTelemetry(...args);
+    await telemetry.load();
+    return telemetry;
+  }
   constructor(
     private store: Store,
     private env: NodeJS.ProcessEnv = process.env,
@@ -109,10 +117,11 @@ export class SetupTelemetry {
         context: { component: 'setup_telemetry' },
         timestamp: new Date().toISOString(),
       }),
-  ) {
-    if (!this.enabled()) return;
+  ) {}
+  async load() {
+    if (!this.enabled()) return this.writes;
     try {
-      const saved = this.store.setupTelemetryState();
+      const saved = await this.store.setupTelemetryState();
       const parsed = saved
         ? stateSchema.safeParse(JSON.parse(saved))
         : undefined;
@@ -138,6 +147,16 @@ export class SetupTelemetry {
     } catch {
       this.report('storage_failed');
     }
+    return this.writes;
+  }
+  /** Resolves once every queued write has reached the store. */
+  saved() {
+    return this.writes;
+  }
+  private write(work: () => Promise<void>) {
+    this.writes = this.writes
+      .then(work)
+      .catch(() => this.report('storage_failed'));
   }
   get identity() {
     return this.state?.identity;
@@ -155,23 +174,15 @@ export class SetupTelemetry {
       ) || this.env.COPILOTKIT_TELEMETRY_SAMPLE_RATE === '0';
     if (off) {
       this.state = undefined;
-      try {
-        this.store.clearSetupTelemetry();
-      } catch {
-        this.report('storage_failed');
-      }
+      this.write(() => this.store.clearSetupTelemetry());
     }
     return !off;
   }
   private persist() {
     if (!this.state) return false;
-    try {
-      this.store.saveSetupTelemetryState(JSON.stringify(this.state));
-      return true;
-    } catch {
-      this.report('storage_failed');
-      return false;
-    }
+    const value = JSON.stringify(this.state);
+    this.write(() => this.store.saveSetupTelemetryState(value));
+    return true;
   }
   capture(input: SetupEvent) {
     if (!this.enabled() || !this.state) return;
@@ -215,6 +226,7 @@ export class SetupTelemetry {
   }
   flush(): Promise<void> {
     return (this.pending ??= this.deliver()
+      .then(() => this.writes)
       .catch(() => this.report('delivery_failed'))
       .finally(() => {
         this.pending = undefined;

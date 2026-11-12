@@ -15,10 +15,10 @@ export function discoveryRoutes(
 ) {
   const app = new Hono();
   const store = platform.inbox.store;
-  app.get('/discovery', (c) => {
+  app.get('/discovery', async (c) => {
     const { config } = platform;
     const state: DiscoveryState = {
-      accounts: store.composioSources().map((source) => {
+      accounts: (await store.composioSources()).map((source) => {
         const value = source.config as ComposioSourceConfig;
         return {
           sourceId: source.id,
@@ -56,7 +56,7 @@ export function discoveryRoutes(
         },
         422,
       );
-    const dot = platform.workspace.dot(body.data.dotId);
+    const dot = await platform.workspace.dot(body.data.dotId);
     if (!dot) return c.json({ error: 'Dot not found.' }, 400);
     let account;
     try {
@@ -83,31 +83,33 @@ export function discoveryRoutes(
       accountId: account.id,
       toolkit: account.toolkit,
     };
-    const existing = store.composioSource(account.id);
+    const existing = await store.composioSource(account.id);
     const source = existing
-      ? store.update(existing.id, {
+      ? (await store.update(existing.id, {
           config,
           enabled: body.data.enabled,
           ...(body.data.intervalSeconds
             ? { intervalSeconds: body.data.intervalSeconds }
             : {}),
-        })!
-      : store.create({
-          name: `${toolkit.name}${account.alias ? ` (${account.alias})` : ''}`,
-          kind: toolkit.kind,
-          type: 'composio',
-          config,
-          // Discovery notifies when a Dot has something to say, not per item.
-          notify: 'off',
-          intervalSeconds: body.data.intervalSeconds ?? 300,
-        }).source;
+        }))!
+      : (
+          await store.create({
+            name: `${toolkit.name}${account.alias ? ` (${account.alias})` : ''}`,
+            kind: toolkit.kind,
+            type: 'composio',
+            config,
+            // Discovery notifies when a Dot has something to say, not per item.
+            notify: 'off',
+            intervalSeconds: body.data.intervalSeconds ?? 300,
+          })
+        ).source;
     if (!existing && !body.data.enabled)
-      store.update(source.id, { enabled: false });
+      await store.update(source.id, { enabled: false });
     if (body.data.enabled) {
-      store.pollNow(source.id);
+      await store.pollNow(source.id);
       void platform.inbox.tick();
     }
-    const settings = platform.store.settings();
+    const settings = await platform.store.settings();
     return c.json({
       sourceId: source.id,
       // Without app access the Dot cannot check other apps while investigating.
@@ -117,9 +119,9 @@ export function discoveryRoutes(
           : undefined,
     });
   });
-  app.post('/inbox/findings/:id/investigate', (c) => {
+  app.post('/inbox/findings/:id/investigate', async (c) => {
     try {
-      return c.json(platform.discovery.investigate(c.req.param('id')));
+      return c.json(await platform.discovery.investigate(c.req.param('id')));
     } catch (error) {
       return c.json(
         {

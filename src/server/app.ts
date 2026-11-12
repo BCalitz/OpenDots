@@ -105,11 +105,11 @@ export function createApp({
     );
   const voice = platform ? new VoiceService(platform) : undefined;
   if (platform && voice) app.route('/api', workspaceRoutes(platform, voice));
-  app.get('/api/state', (c) =>
+  app.get('/api/state', async (c) =>
     c.json({
-      settings: store.settings(),
-      tasks: store.tasks(),
-      memories: store.memories(),
+      settings: await store.settings(),
+      tasks: await store.tasks(),
+      memories: await store.memories(),
       mode: config.mode,
       configured: configured(config),
     }),
@@ -131,7 +131,7 @@ export function createApp({
         },
         400,
       );
-    if (!store.settings().researchAllowed)
+    if (!(await store.settings()).researchAllowed)
       return c.json({ error: 'Research is disabled in Settings.' }, 403);
     if (platform) {
       if (platform.setup().missing.length)
@@ -145,7 +145,7 @@ export function createApp({
           400,
         );
       try {
-        platform.workspace.requireThread(parsed.data.threadId);
+        await platform.workspace.requireThread(parsed.data.threadId);
       } catch {
         return c.json(
           { error: 'Conversation is not owned by this workspace.' },
@@ -153,16 +153,21 @@ export function createApp({
         );
       }
     }
-    const task = store.createTask(
-      parsed.data.prompt,
-      parsed.data.intervalSeconds,
-    );
-    if (platform && parsed.data.threadId)
-      platform.workspace.bindTask(task.id, parsed.data.threadId);
+    // One transaction, so the runner never claims a task before it has its
+    // conversation.
+    const task = await store.db.transaction(async () => {
+      const task = await store.createTask(
+        parsed.data.prompt,
+        parsed.data.intervalSeconds,
+      );
+      if (platform && parsed.data.threadId)
+        await platform.workspace.bindTask(task.id, parsed.data.threadId);
+      return task;
+    });
     return c.json(task, 201);
   });
-  app.get('/api/tasks/:id', (c) => {
-    const detail = store.detail(c.req.param('id'));
+  app.get('/api/tasks/:id', async (c) => {
+    const detail = await store.detail(c.req.param('id'));
     return detail ? c.json(detail) : c.json({ error: 'Task not found.' }, 404);
   });
   app.post('/api/tasks/:id/actions', async (c) => {
@@ -171,9 +176,12 @@ export function createApp({
       .strict()
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'Unknown task action.' }, 400);
-    if (parsed.data.action === 'run' && !store.settings().researchAllowed)
+    if (
+      parsed.data.action === 'run' &&
+      !(await store.settings()).researchAllowed
+    )
       return c.json({ error: 'Research is disabled in Settings.' }, 403);
-    const task = store.action(c.req.param('id'), parsed.data.action);
+    const task = await store.action(c.req.param('id'), parsed.data.action);
     if (parsed.data.action !== 'run') runner.abort(c.req.param('id'));
     return task ? c.json(task) : c.json({ error: 'Task not found.' }, 404);
   });
@@ -187,7 +195,10 @@ export function createApp({
         { error: 'Repeat interval must be 60 seconds to one year, or null.' },
         400,
       );
-    const task = store.schedule(c.req.param('id'), parsed.data.intervalSeconds);
+    const task = await store.schedule(
+      c.req.param('id'),
+      parsed.data.intervalSeconds,
+    );
     return task ? c.json(task) : c.json({ error: 'Task not found.' }, 404);
   });
   app.patch('/api/settings', async (c) => {
@@ -202,8 +213,8 @@ export function createApp({
       .strict()
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'Invalid settings.' }, 400);
-    const previous = store.settings();
-    const settings = store.updateSettings(parsed.data);
+    const previous = await store.settings();
+    const settings = await store.updateSettings(parsed.data);
     if (
       settings.paused ||
       !settings.researchAllowed ||
@@ -225,7 +236,7 @@ export function createApp({
         { error: 'Memory must be between 1 and 2,000 characters.' },
         400,
       );
-    return c.json(store.saveMemory(parsed.data.text), 201);
+    return c.json(await store.saveMemory(parsed.data.text), 201);
   });
   app.put('/api/memories/:id', async (c) => {
     const parsed = z
@@ -237,12 +248,12 @@ export function createApp({
         { error: 'Memory must be between 1 and 2,000 characters.' },
         400,
       );
-    if (!store.memories().some((m) => m.id === c.req.param('id')))
+    if (!(await store.memories()).some((m) => m.id === c.req.param('id')))
       return c.json({ error: 'Memory not found.' }, 404);
-    return c.json(store.saveMemory(parsed.data.text, c.req.param('id')));
+    return c.json(await store.saveMemory(parsed.data.text, c.req.param('id')));
   });
-  app.delete('/api/memories/:id', (c) =>
-    store.deleteMemory(c.req.param('id'))
+  app.delete('/api/memories/:id', async (c) =>
+    (await store.deleteMemory(c.req.param('id')))
       ? c.json({ ok: true })
       : c.json({ error: 'Memory not found.' }, 404),
   );
@@ -254,7 +265,7 @@ export function createApp({
       );
       if (!parsed.success)
         return c.json({ error: 'Enter a valid Expo push token.' }, 400);
-      push.register(parsed.data);
+      await push.register(parsed.data);
       return c.json({ ok: true }, 201);
     });
     app.delete('/api/push/devices', async (c) => {
@@ -264,7 +275,7 @@ export function createApp({
         .safeParse(await c.req.json().catch(() => null));
       if (!parsed.success)
         return c.json({ error: 'Enter a valid Expo push token.' }, 400);
-      push.remove(parsed.data.token);
+      await push.remove(parsed.data.token);
       return c.json({ ok: true });
     });
     app.post('/api/push/test', async (c) => {

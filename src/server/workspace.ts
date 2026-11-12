@@ -3,143 +3,101 @@ import { ConnectionStore } from './connection-store.js';
 import { Pages } from './pages.js';
 import { UsageStore } from './usage-store.js';
 import { InboxStore } from './inbox/store.js';
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { sql, type Db } from './db/index.js';
 import type { CallReceipt, Conversation, Dot, Space } from '../shared/types.js';
+
+type DotRow = Omit<Dot, 'spaceIds' | 'composioToolkits' | 'delegateDotIds'> & {
+  composioToolkits: string;
+  delegateDotIds: string;
+};
+const DOT = sql.raw(
+  'id, space_id, name, instructions, research_allowed, memory_allowed, created_at, apps_allowed, composio_toolkits, composio_session_id, composio_policy_hash, monthly_token_cap, delegate_dot_ids',
+);
+const CALL = sql.raw(
+  'id, thread_id, started_at, ended_at, status, transcript, error, anchor_message_id',
+);
+
 export class WorkspaceStore {
-  private db: DatabaseSync;
   readonly pages: Pages;
   readonly computers: ComputerStore;
   readonly connections: ConnectionStore;
   readonly usage: UsageStore;
   readonly inbox: InboxStore;
+  /** A workspace with at least one Space and Dot. */
+  static async open(db: Db, ownerId: string) {
+    const workspace = new WorkspaceStore(db, ownerId);
+    await workspace.seed();
+    return workspace;
+  }
   constructor(
-    path: string,
+    readonly db: Db,
     readonly ownerId: string,
   ) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS spaces(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, createdAt INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS dots(id TEXT PRIMARY KEY, spaceId TEXT NOT NULL, name TEXT NOT NULL, instructions TEXT NOT NULL, researchAllowed INTEGER NOT NULL, memoryAllowed INTEGER NOT NULL, createdAt INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS thread_bindings(id TEXT PRIMARY KEY, dotId TEXT NOT NULL, ownerId TEXT NOT NULL, title TEXT NOT NULL, createdAt INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS task_threads(taskId TEXT PRIMARY KEY, threadId TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, startedAt INTEGER NOT NULL, endedAt INTEGER, status TEXT NOT NULL, transcript TEXT NOT NULL, error TEXT);
-      CREATE TABLE IF NOT EXISTS captures(threadId TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS delegate_threads(parentThreadId TEXT NOT NULL, dotId TEXT NOT NULL, threadId TEXT NOT NULL UNIQUE, PRIMARY KEY(parentThreadId, dotId));`);
-    for (const [table, column, definition] of [
-      ['dots', 'learningContainerId', 'TEXT'],
-      ['dots', 'skillDeliveryEnabled', 'INTEGER NOT NULL DEFAULT 0'],
-      ['dots', 'appsAllowed', 'INTEGER NOT NULL DEFAULT 0'],
-      ['dots', 'composioToolkits', "TEXT NOT NULL DEFAULT '[]'"],
-      ['dots', 'composioSessionId', 'TEXT'],
-      ['dots', 'composioPolicyHash', 'TEXT'],
-      ['dots', 'monthlyTokenCap', 'INTEGER'],
-      ['dots', 'delegateDotIds', "TEXT NOT NULL DEFAULT '[]'"],
-      ['thread_bindings', 'learningContainerId', 'TEXT'],
-      ['thread_bindings', 'source', 'TEXT'],
-    ]) {
-      if (
-        !this.db
-          .prepare(`PRAGMA table_info(${table})`)
-          .all()
-          .some((field) => field.name === column)
-      )
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-    }
-    // Migrate only once: restarting must never restore a revoked grant.
-    if (
-      !this.db
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name='dot_spaces'",
-        )
-        .get()
-    ) {
-      this.db.exec(`BEGIN;
-        CREATE TABLE dot_spaces(dotId TEXT NOT NULL, spaceId TEXT NOT NULL, PRIMARY KEY(dotId, spaceId));
-        INSERT INTO dot_spaces SELECT id, spaceId FROM dots;
-        COMMIT;`);
-    }
-    this.computers = new ComputerStore(this.db);
-    this.connections = new ConnectionStore(this.db);
-    this.usage = new UsageStore(this.db);
-    this.inbox = new InboxStore(this.db);
-    this.pages = new Pages(this.db, (id) =>
-      this.spaces().some((space) => space.id === id),
-    );
-    if (
-      !this.db
-        .prepare('PRAGMA table_info(calls)')
-        .all()
-        .some((column) => column.name === 'anchorMessageId')
-    )
-      this.db.exec('ALTER TABLE calls ADD COLUMN anchorMessageId TEXT');
-    if (!this.spaces().length) {
-      const space = this.createSpace(
+    this.computers = new ComputerStore(db);
+    this.connections = new ConnectionStore(db);
+    this.usage = new UsageStore(db);
+    this.inbox = new InboxStore(db);
+    this.pages = new Pages(db, (id) => this.spaceExists(id));
+  }
+  /** Creates the first Space and Dot on a new install. */
+  async seed() {
+    await this.db.transaction(async () => {
+      if ((await this.spaces()).length) return;
+      const space = await this.createSpace(
         'Everyday',
         'A little space for your day.',
       );
-      this.createDot(
+      await this.createDot(
         space.id,
         'Dot',
         'Be thoughtful, practical, and concise. Help the user think clearly and follow through.',
         true,
         true,
       );
-    }
+    });
   }
-  close() {
-    this.db.close();
+  spaces(): Promise<Space[]> {
+    return this.db.rows<Space>(
+      sql`SELECT id, name, description, created_at FROM spaces ORDER BY created_at`,
+    );
   }
-  spaces(): Space[] {
-    return this.db
-      .prepare('SELECT * FROM spaces ORDER BY createdAt')
-      .all() as unknown as Space[];
+  async spaceExists(id: string) {
+    return !!(await this.db.row(sql`SELECT 1 FROM spaces WHERE id=${id}`));
   }
-  createSpace(name: string, description: string): Space {
+  async createSpace(name: string, description: string): Promise<Space> {
     const space = {
       id: randomUUID(),
       name,
       description,
       createdAt: Date.now(),
     };
-    this.db
-      .prepare('INSERT INTO spaces VALUES (?, ?, ?, ?)')
-      .run(space.id, name, description, space.createdAt);
+    await this.db.run(
+      sql`INSERT INTO spaces VALUES (${space.id}, ${name}, ${description}, ${space.createdAt})`,
+    );
     return space;
   }
-  dots(): Dot[] {
-    return (
-      this.db
-        .prepare('SELECT * FROM dots ORDER BY createdAt')
-        .all()
-        // Learning columns are left from the Intelligence releases; unused.
-        .map(
-          ({ learningContainerId: _l, skillDeliveryEnabled: _s, ...row }) => ({
-            ...row,
-            spaceIds: this.db
-              .prepare(
-                'SELECT spaceId FROM dot_spaces WHERE dotId=? ORDER BY spaceId',
-              )
-              .all(String(row.id))
-              .map((grant) => String(grant.spaceId)),
-            researchAllowed: !!row.researchAllowed,
-            memoryAllowed: !!row.memoryAllowed,
-            appsAllowed: !!row.appsAllowed,
-            composioToolkits: JSON.parse(String(row.composioToolkits ?? '[]')),
-            monthlyTokenCap:
-              row.monthlyTokenCap == null ? null : Number(row.monthlyTokenCap),
-            delegateDotIds: JSON.parse(String(row.delegateDotIds ?? '[]')),
-          }),
-        ) as unknown as Dot[]
-    );
+  async dots(): Promise<Dot[]> {
+    const [rows, grants] = await Promise.all([
+      this.db.rows<DotRow>(sql`SELECT ${DOT} FROM dots ORDER BY created_at`),
+      this.db.rows<{ dotId: string; spaceId: string }>(
+        sql`SELECT dot_id, space_id FROM dot_spaces ORDER BY space_id`,
+      ),
+    ]);
+    return rows.map((row) => ({
+      ...row,
+      spaceIds: grants
+        .filter((grant) => grant.dotId === row.id)
+        .map((grant) => grant.spaceId),
+      composioToolkits: JSON.parse(row.composioToolkits ?? '[]'),
+      monthlyTokenCap: row.monthlyTokenCap ?? null,
+      delegateDotIds: JSON.parse(row.delegateDotIds ?? '[]'),
+    }));
   }
-  dot(id: string) {
-    return this.dots().find((dot) => dot.id === id);
+  async dot(id: string) {
+    return (await this.dots()).find((dot) => dot.id === id);
   }
-  createDot(
+  async createDot(
     spaceId: string,
     name: string,
     instructions: string,
@@ -148,8 +106,8 @@ export class WorkspaceStore {
     spaceIds: string[] = [spaceId],
     appsAllowed = false,
     composioToolkits: string[] = [],
-  ): Dot {
-    this.validateSpaceAccess(spaceId, spaceIds);
+  ): Promise<Dot> {
+    await this.validateSpaceAccess(spaceId, spaceIds);
     const dot: Dot = {
       id: randomUUID(),
       spaceId,
@@ -164,45 +122,31 @@ export class WorkspaceStore {
       composioPolicyHash: null,
       createdAt: Date.now(),
     };
-    this.db.exec('BEGIN');
-    try {
-      this.db
-        .prepare(
-          'INSERT INTO dots (id, spaceId, name, instructions, researchAllowed, memoryAllowed, createdAt, appsAllowed, composioToolkits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(
-          dot.id,
-          spaceId,
-          name,
-          instructions,
-          +researchAllowed,
-          +memoryAllowed,
-          dot.createdAt,
-          +appsAllowed,
-          JSON.stringify(dot.composioToolkits),
-        );
+    await this.db.transaction(async () => {
+      await this.db.run(
+        sql`INSERT INTO dots (id, space_id, name, instructions, research_allowed, memory_allowed, created_at, apps_allowed, composio_toolkits) VALUES (${dot.id}, ${spaceId}, ${name}, ${instructions}, ${researchAllowed}, ${memoryAllowed}, ${dot.createdAt}, ${appsAllowed}, ${JSON.stringify(dot.composioToolkits)})`,
+      );
       for (const id of dot.spaceIds)
-        this.db.prepare('INSERT INTO dot_spaces VALUES (?, ?)').run(dot.id, id);
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+        await this.db.run(
+          sql`INSERT INTO dot_spaces VALUES (${dot.id}, ${id})`,
+        );
+    });
     return dot;
   }
-  canAccessSpace(dotId: string, spaceId: string) {
-    return !!this.db
-      .prepare('SELECT 1 FROM dot_spaces WHERE dotId=? AND spaceId=?')
-      .get(dotId, spaceId);
+  async canAccessSpace(dotId: string, spaceId: string) {
+    return !!(await this.db.row(
+      sql`SELECT 1 FROM dot_spaces WHERE dot_id=${dotId} AND space_id=${spaceId}`,
+    ));
   }
-  private validateSpaceAccess(defaultSpace: string, spaceIds: string[]) {
+  private async validateSpaceAccess(defaultSpace: string, spaceIds: string[]) {
+    const spaces = await this.spaces();
     if (
       !spaceIds.includes(defaultSpace) ||
-      spaceIds.some((id) => !this.spaces().some((space) => space.id === id))
+      spaceIds.some((id) => !spaces.some((space) => space.id === id))
     )
       throw new Error('Space access must include a valid default destination.');
   }
-  updateDot(
+  async updateDot(
     id: string,
     patch: Pick<
       Dot,
@@ -216,129 +160,130 @@ export class WorkspaceStore {
       spaceId?: string;
       spaceIds?: string[];
     },
-  ): Dot {
-    const current = this.dot(id);
-    if (!current) throw new Error('Dot not found.');
-    const defaultSpace = patch.spaceId ?? current.spaceId;
-    const spaceIds = patch.spaceIds ?? current.spaceIds;
-    this.validateSpaceAccess(defaultSpace, spaceIds);
-    this.db.exec('BEGIN');
-    try {
-      this.db
-        .prepare(
-          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, appsAllowed=?, composioToolkits=? WHERE id=?',
-        )
-        .run(
-          patch.name,
-          patch.instructions,
-          +patch.researchAllowed,
-          +patch.memoryAllowed,
-          +patch.appsAllowed,
-          JSON.stringify([...new Set(patch.composioToolkits)].sort()),
-          id,
-        );
-      this.db
-        .prepare('UPDATE dots SET spaceId=? WHERE id=?')
-        .run(defaultSpace, id);
-      this.db.prepare('DELETE FROM dot_spaces WHERE dotId=?').run(id);
+  ): Promise<Dot> {
+    return this.db.transaction(async () => {
+      const current = await this.dot(id);
+      if (!current) throw new Error('Dot not found.');
+      const defaultSpace = patch.spaceId ?? current.spaceId;
+      const spaceIds = patch.spaceIds ?? current.spaceIds;
+      await this.validateSpaceAccess(defaultSpace, spaceIds);
+      await this.db.run(
+        sql`UPDATE dots SET name=${patch.name}, instructions=${patch.instructions}, research_allowed=${patch.researchAllowed}, memory_allowed=${patch.memoryAllowed}, apps_allowed=${patch.appsAllowed}, composio_toolkits=${JSON.stringify([...new Set(patch.composioToolkits)].sort())}, space_id=${defaultSpace} WHERE id=${id}`,
+      );
+      await this.db.run(sql`DELETE FROM dot_spaces WHERE dot_id=${id}`);
       for (const space of new Set(spaceIds))
-        this.db.prepare('INSERT INTO dot_spaces VALUES (?, ?)').run(id, space);
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-    return this.dot(id)!;
+        await this.db.run(sql`INSERT INTO dot_spaces VALUES (${id}, ${space})`);
+      return (await this.dot(id))!;
+    });
   }
   /** Tokens per UTC month before the Dot stops starting new turns; null removes it. */
-  setMonthlyTokenCap(id: string, cap: number | null) {
-    if (!this.dot(id)) throw new Error('Dot not found.');
-    this.db
-      .prepare('UPDATE dots SET monthlyTokenCap=? WHERE id=?')
-      .run(cap, id);
-    return this.dot(id)!;
+  async setMonthlyTokenCap(id: string, cap: number | null) {
+    if (!(await this.dot(id))) throw new Error('Dot not found.');
+    await this.db.run(
+      sql`UPDATE dots SET monthly_token_cap=${cap} WHERE id=${id}`,
+    );
+    return (await this.dot(id))!;
   }
   /** Which other Dots this one may direct. */
-  setDelegates(id: string, dotIds: string[]) {
-    if (!this.dot(id)) throw new Error('Dot not found.');
+  async setDelegates(id: string, dotIds: string[]) {
+    const dots = await this.dots();
+    if (!dots.some((dot) => dot.id === id)) throw new Error('Dot not found.');
     const unique = [...new Set(dotIds)];
     if (unique.includes(id)) throw new Error('Dot cannot direct itself.');
-    if (unique.some((other) => !this.dot(other)))
+    if (unique.some((other) => !dots.some((dot) => dot.id === other)))
       throw new Error('Dot not found.');
-    this.db
-      .prepare('UPDATE dots SET delegateDotIds=? WHERE id=?')
-      .run(JSON.stringify(unique.sort()), id);
-    return this.dot(id)!;
+    await this.db.run(
+      sql`UPDATE dots SET delegate_dot_ids=${JSON.stringify(unique.sort())} WHERE id=${id}`,
+    );
+    return (await this.dot(id))!;
   }
   /** The thread a Dot uses for requests from one coordinator conversation. */
-  delegateThread(parentThreadId: string, dotId: string) {
-    const row = this.db
-      .prepare(
-        'SELECT threadId FROM delegate_threads WHERE parentThreadId=? AND dotId=?',
+  async delegateThread(parentThreadId: string, dotId: string) {
+    return (
+      await this.db.row<{ threadId: string }>(
+        sql`SELECT thread_id FROM delegate_threads WHERE parent_thread_id=${parentThreadId} AND dot_id=${dotId}`,
       )
-      .get(parentThreadId, dotId);
-    return typeof row?.threadId === 'string' ? row.threadId : undefined;
+    )?.threadId;
   }
-  bindDelegate(parentThreadId: string, dotId: string, threadId: string) {
-    this.db
-      .prepare('INSERT INTO delegate_threads VALUES (?, ?, ?)')
-      .run(parentThreadId, dotId, threadId);
+  async bindDelegate(parentThreadId: string, dotId: string, threadId: string) {
+    await this.db.run(
+      sql`INSERT INTO delegate_threads VALUES (${parentThreadId}, ${dotId}, ${threadId})`,
+    );
   }
   /** True for threads that exist to answer another Dot. */
-  isDelegateThread(threadId: string) {
-    return !!this.db
-      .prepare('SELECT 1 FROM delegate_threads WHERE threadId=?')
-      .get(threadId);
+  async isDelegateThread(threadId: string) {
+    return !!(await this.db.row(
+      sql`SELECT 1 FROM delegate_threads WHERE thread_id=${threadId}`,
+    ));
   }
-  saveComposioSession(id: string, sessionId: string, policyHash: string) {
-    this.db
-      .prepare(
-        'UPDATE dots SET composioSessionId=?, composioPolicyHash=? WHERE id=?',
-      )
-      .run(sessionId, policyHash, id);
+  async saveComposioSession(id: string, sessionId: string, policyHash: string) {
+    await this.db.run(
+      sql`UPDATE dots SET composio_session_id=${sessionId}, composio_policy_hash=${policyHash} WHERE id=${id}`,
+    );
   }
-  conversations(): Conversation[] {
-    return this.db
-      .prepare(
-        'SELECT id, dotId, ownerId, title, createdAt, source FROM thread_bindings WHERE ownerId=? ORDER BY createdAt DESC',
-      )
-      .all(this.ownerId)
-      .map(({ source, ...row }) => ({
-        ...row,
-        ...(source ? { source } : {}),
-      })) as unknown as Conversation[];
+  async conversations(): Promise<Conversation[]> {
+    const rows = await this.db.rows<Conversation & { source: string | null }>(
+      sql`SELECT id, dot_id, owner_id, title, created_at, source FROM thread_bindings WHERE owner_id=${this.ownerId} ORDER BY created_at DESC`,
+    );
+    return rows.map(({ source, ...row }) => ({
+      ...row,
+      ...(source ? { source } : {}),
+    }));
+  }
+  /** One of the owner's conversations, if it exists. */
+  async conversation(id: string): Promise<Conversation | undefined> {
+    const row = await this.db.row<Conversation & { source: string | null }>(
+      sql`SELECT id, dot_id, owner_id, title, created_at, source FROM thread_bindings WHERE id=${id} AND owner_id=${this.ownerId}`,
+    );
+    if (!row) return undefined;
+    const { source, ...rest } = row;
+    return { ...rest, ...(source ? { source } : {}) };
   }
   /**
    * Each Dot is one continuing chat. Its main conversation is the latest
    * thread that is not answering another Dot or mirroring Slack.
    */
-  mainConversation(dotId: string): Conversation | undefined {
-    return this.conversations().find(
-      (thread) =>
-        thread.dotId === dotId &&
-        !thread.source &&
-        // Slack threads from before threads recorded their source.
-        thread.title !== 'Slack conversation' &&
-        !this.isDelegateThread(thread.id),
-    );
+  async mainConversation(dotId: string): Promise<Conversation | undefined> {
+    return (await this.mainConversationList()).get(dotId);
   }
   /** Main conversation id for every Dot that has one. */
-  mainConversations(): Record<string, string> {
+  async mainConversations(): Promise<Record<string, string>> {
     const result: Record<string, string> = {};
-    for (const dot of this.dots()) {
-      const thread = this.mainConversation(dot.id);
+    const main = await this.mainConversationList();
+    for (const dot of await this.dots()) {
+      const thread = main.get(dot.id);
       if (thread) result[dot.id] = thread.id;
     }
     return result;
   }
+  private async mainConversationList() {
+    const delegates = new Set(
+      (
+        await this.db.rows<{ threadId: string }>(
+          sql`SELECT thread_id FROM delegate_threads`,
+        )
+      ).map((row) => row.threadId),
+    );
+    const main = new Map<string, Conversation>();
+    for (const thread of await this.conversations())
+      if (
+        !main.has(thread.dotId) &&
+        !thread.source &&
+        // Slack threads from before threads recorded their source.
+        thread.title !== 'Slack conversation' &&
+        !delegates.has(thread.id)
+      )
+        main.set(thread.dotId, thread);
+    return main;
+  }
   /** `source` marks a background thread, such as one mirroring Slack. */
-  bindThread(
+  async bindThread(
     id: string,
     dotId: string,
     title: string,
     source?: string,
-  ): Conversation {
-    if (!this.dot(dotId)) throw new Error('Dot not found.');
+  ): Promise<Conversation> {
+    if (!(await this.dot(dotId))) throw new Error('Dot not found.');
     const value: Conversation = {
       id,
       dotId,
@@ -347,46 +292,43 @@ export class WorkspaceStore {
       createdAt: Date.now(),
       ...(source ? { source } : {}),
     };
-    this.db
-      .prepare(
-        'INSERT INTO thread_bindings (id, dotId, ownerId, title, createdAt, source) VALUES (?, ?, ?, ?, ?, ?)',
-      )
-      .run(id, dotId, this.ownerId, title, value.createdAt, source ?? null);
+    await this.db.run(
+      sql`INSERT INTO thread_bindings (id, dot_id, owner_id, title, created_at, source) VALUES (${id}, ${dotId}, ${this.ownerId}, ${title}, ${value.createdAt}, ${source ?? null})`,
+    );
     return value;
   }
-  retitleThread(id: string, title: string) {
-    this.db
-      .prepare('UPDATE thread_bindings SET title=? WHERE id=? AND ownerId=?')
-      .run(title, id, this.ownerId);
+  async retitleThread(id: string, title: string) {
+    await this.db.run(
+      sql`UPDATE thread_bindings SET title=${title} WHERE id=${id} AND owner_id=${this.ownerId}`,
+    );
   }
-  requireThread(id: string, dotId?: string): Conversation {
-    const thread = this.conversations().find((thread) => thread.id === id);
+  async requireThread(id: string, dotId?: string): Promise<Conversation> {
+    const thread = await this.conversation(id);
     if (!thread || (dotId && thread.dotId !== dotId))
       throw new Error('Conversation does not belong to this Dot and owner.');
     return thread;
   }
-  bindTask(taskId: string, threadId: string) {
-    this.requireThread(threadId);
-    this.db
-      .prepare('INSERT INTO task_threads VALUES (?, ?)')
-      .run(taskId, threadId);
+  async bindTask(taskId: string, threadId: string) {
+    await this.requireThread(threadId);
+    await this.db.run(
+      sql`INSERT INTO task_threads VALUES (${taskId}, ${threadId})`,
+    );
   }
-  taskThread(taskId: string): string | undefined {
-    const row = this.db
-      .prepare('SELECT threadId FROM task_threads WHERE taskId=?')
-      .get(taskId);
-    return typeof row?.threadId === 'string' ? row.threadId : undefined;
-  }
-  calls(threadId?: string): CallReceipt[] {
-    if (threadId) this.requireThread(threadId);
-    return this.db
-      .prepare(
-        `SELECT * FROM calls ${threadId ? 'WHERE threadId=?' : ''} ORDER BY startedAt DESC`,
+  async taskThread(taskId: string): Promise<string | undefined> {
+    return (
+      await this.db.row<{ threadId: string }>(
+        sql`SELECT thread_id FROM task_threads WHERE task_id=${taskId}`,
       )
-      .all(...(threadId ? [threadId] : [])) as unknown as CallReceipt[];
+    )?.threadId;
   }
-  createCall(threadId: string): CallReceipt {
-    this.requireThread(threadId);
+  async calls(threadId?: string): Promise<CallReceipt[]> {
+    if (threadId) await this.requireThread(threadId);
+    return this.db.rows<CallReceipt>(
+      sql`SELECT ${CALL} FROM calls ${threadId ? sql`WHERE thread_id=${threadId}` : sql``} ORDER BY started_at DESC`,
+    );
+  }
+  async createCall(threadId: string): Promise<CallReceipt> {
+    await this.requireThread(threadId);
     const call: CallReceipt = {
       id: randomUUID(),
       threadId,
@@ -396,73 +338,61 @@ export class WorkspaceStore {
       transcript: '',
       error: null,
     };
-    this.db
-      .prepare(
-        'INSERT INTO calls(id, threadId, startedAt, endedAt, status, transcript, error) VALUES (?, ?, ?, NULL, ?, ?, NULL)',
-      )
-      .run(call.id, threadId, call.startedAt, call.status, '');
+    await this.db.run(
+      sql`INSERT INTO calls (id, thread_id, started_at, ended_at, status, transcript, error) VALUES (${call.id}, ${threadId}, ${call.startedAt}, NULL, ${call.status}, '', NULL)`,
+    );
     return call;
   }
-  call(id: string): CallReceipt {
-    const call = this.calls().find((call) => call.id === id);
+  async call(id: string): Promise<CallReceipt> {
+    const call = await this.db.row<CallReceipt>(
+      sql`SELECT ${CALL} FROM calls WHERE id=${id}`,
+    );
     if (!call) throw new Error('Call not found.');
-    this.requireThread(call.threadId);
+    await this.requireThread(call.threadId);
     return call;
   }
-  setCall(
+  async setCall(
     id: string,
     status: CallReceipt['status'],
     transcript: string,
     error: string | null = null,
   ) {
-    const call = this.call(id);
+    const call = await this.call(id);
     if (call.endedAt) return call;
-    this.db
-      .prepare(
-        'UPDATE calls SET status=?, transcript=?, error=?, endedAt=? WHERE id=?',
-      )
-      .run(
-        status,
-        transcript,
-        error,
-        status === 'ended' || status === 'failed' ? Date.now() : null,
-        id,
-      );
+    await this.db.run(
+      sql`UPDATE calls SET status=${status}, transcript=${transcript}, error=${error}, ended_at=${status === 'ended' || status === 'failed' ? Date.now() : null} WHERE id=${id} AND ended_at IS NULL`,
+    );
     return this.call(id);
   }
-  saveLateTranscript(id: string, transcript: string) {
-    this.call(id);
+  async saveLateTranscript(id: string, transcript: string) {
+    await this.call(id);
     return (
-      this.db
-        .prepare(
-          "UPDATE calls SET transcript=? WHERE id=? AND transcript='' AND endedAt IS NOT NULL",
-        )
-        .run(transcript, id).changes > 0
+      (await this.db.run(
+        sql`UPDATE calls SET transcript=${transcript} WHERE id=${id} AND transcript='' AND ended_at IS NOT NULL`,
+      )) > 0
     );
   }
-  anchorCall(id: string, anchor: string | undefined) {
-    this.call(id);
-    this.db
-      .prepare('UPDATE calls SET anchorMessageId=? WHERE id=?')
-      .run(anchor ?? null, id);
+  async anchorCall(id: string, anchor: string | undefined) {
+    await this.call(id);
+    await this.db.run(
+      sql`UPDATE calls SET anchor_message_id=${anchor ?? null} WHERE id=${id}`,
+    );
   }
-  setCallError(id: string, error: string | null) {
-    this.call(id);
-    this.db.prepare('UPDATE calls SET error=? WHERE id=?').run(error, id);
+  async setCallError(id: string, error: string | null) {
+    await this.call(id);
+    await this.db.run(sql`UPDATE calls SET error=${error} WHERE id=${id}`);
   }
-  saveCapture(threadId: string, value: unknown) {
-    this.requireThread(threadId);
-    this.db
-      .prepare(
-        'INSERT INTO captures VALUES (?, ?) ON CONFLICT(threadId) DO UPDATE SET value=excluded.value',
-      )
-      .run(threadId, JSON.stringify(value));
+  async saveCapture(threadId: string, value: unknown) {
+    await this.requireThread(threadId);
+    await this.db.run(
+      sql`INSERT INTO captures VALUES (${threadId}, ${JSON.stringify(value)}) ON CONFLICT (thread_id) DO UPDATE SET value=excluded.value`,
+    );
   }
-  capture(threadId: string): unknown {
-    this.requireThread(threadId);
-    const row = this.db
-      .prepare('SELECT value FROM captures WHERE threadId=?')
-      .get(threadId);
-    return typeof row?.value === 'string' ? JSON.parse(row.value) : null;
+  async capture(threadId: string): Promise<unknown> {
+    await this.requireThread(threadId);
+    const row = await this.db.row<{ value: string }>(
+      sql`SELECT value FROM captures WHERE thread_id=${threadId}`,
+    );
+    return row ? JSON.parse(row.value) : null;
   }
 }
