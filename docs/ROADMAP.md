@@ -100,6 +100,30 @@ A nightly job groups finished threads by Dot and task type, asks a model to draf
 
 **Rough effort:** 3–6 weeks.
 
+## Ideas
+
+Not scheduled yet. These would make OpenDots a complete product for people other than its builder; pick from here when the build order below has room.
+
+**Before calling it a product**
+
+1. **Easy install and updates.** One installer, desktop app or hosted option instead of Node, Postgres, Docker Compose and environment variables; a setup wizard that checks each key and connection; update notices.
+2. **Proper sign-in.** Passkeys or Google and Microsoft sign-in instead of one owner token, a list of signed-in devices you can revoke, and sessions that expire.
+3. **File attachments.** Drop a PDF, image or spreadsheet into chat, and let investigations read email attachments, where most invoices and contracts arrive.
+4. **Search everything.** One box across chats, pages, inbox items and attachments ("what did Thandi say about the invoice?"), starting from the embeddings discovery already stores.
+5. **Connection health.** When a Gmail or Teams connection expires, discovery stops quietly. Show a badge, push "Reconnect Outlook", and list connection status in the morning brief.
+6. **Your data, your control.** Export everything, delete everything, choose how long mail is kept, encrypt stored credentials, and back up the database automatically.
+7. **Checks against the live services.** Live chat was last verified before the engine moved to our own code, and Slack and voice delegation still need verifying against the live services. A smoke test in CI or a release checklist.
+
+**For a smooth daily product**
+
+8. **Mobile app parity.** Pages, settings, the Activity view and rules on the phone; a share sheet ("send to my Dot" from any app); a home-screen widget for the brief.
+9. **Automations in plain words.** "When an invoice from X arrives, file it and tell me." Event triggers on the inbox engine; schedules only run on time today.
+10. **Undo.** Build autonomy level 3: an undo window for sends, and undo for changes made inside OpenDots.
+11. **The Dot can reach you.** It calls you for something urgent, and WhatsApp and SMS for people who live there.
+12. **Feedback on everything.** Thumbs up or down and "why did you do that?" on each proposal and action, answered from Jev's stored judgments; every rating feeds Learning.
+13. **Starter Dots.** Ready-made Inbox assistant, Finance, Dev team lead and Personal errands Dots with sensible permissions, so new users don't start blank.
+14. **Costs in money.** What each Dot cost this month in rand or dollars, not just tokens, with a warning before a cap.
+
 ## Autonomy levels
 
 Set per source, per action type, and optionally per rule. Defaults are the lowest level.
