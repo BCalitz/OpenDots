@@ -1,10 +1,10 @@
 import type { ConnectorService } from '../connectors/service.js';
 import type {
-  ComposioSourceConfig,
+  AccountSourceConfig,
   InboxEventView,
   McpSourceConfig,
 } from '../../shared/inbox-types.js';
-import { ComposioListSource, type ComposioExecute } from './composio-source.js';
+import { AccountListSource } from './account-source.js';
 import { McpListSource } from './mcp-source.js';
 import type { Source } from './source.js';
 import type { InboxStore, SourceRecord } from './store.js';
@@ -37,8 +37,6 @@ export class InboxEngine {
     private connectors: ConnectorService,
     private options: {
       paused: () => Promise<boolean>;
-      /** Runs Composio tools for discovery sources; unset without a key. */
-      composio?: () => ComposioExecute | undefined;
       tickMs?: number;
       pollTimeoutMs?: number;
     },
@@ -47,18 +45,12 @@ export class InboxEngine {
   sourceFor(record: SourceRecord): Source {
     if (record.type === 'webhook')
       return new WebhookSource(record.id, record.kind);
-    if (record.type === 'composio') {
-      const execute = this.options.composio?.();
-      if (!execute)
-        throw new Error(
-          'Connected apps are not set up. Add COMPOSIO_API_KEY to .env and restart OpenDots.',
-        );
-      return new ComposioListSource(
+    if (record.type === 'account')
+      return new AccountListSource(
         record.id,
-        record.config as ComposioSourceConfig,
-        execute,
+        record.config as AccountSourceConfig,
+        this.connectors,
       );
-    }
     if (!('accountId' in record.config))
       throw new Error('This source is missing its account settings.');
     return new McpListSource(

@@ -432,7 +432,7 @@ function SourceCard({
         <small>
           {source.type === 'mcp'
             ? `${'tool' in source.config ? source.config.tool : ''}${dot ? ` · ${dot.name}` : ''} · every ${Math.round(source.intervalSeconds / 60)} min`
-            : source.type === 'composio'
+            : source.type === 'account'
               ? `Discovery${dot ? ` · ${dot.name}` : ''} · every ${Math.round(source.intervalSeconds / 60)} min`
               : 'Webhook'}
         </small>

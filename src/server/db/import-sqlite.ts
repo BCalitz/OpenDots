@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { sql, type Db } from './index.js';
+import { RETIRE_COMPOSIO_SOURCES } from './migrations.js';
 
 /** Tables copied from an OpenDots SQLite file, parents before children. */
 const TABLES = [
@@ -126,6 +127,7 @@ export async function importSqlite(
       }
       if (present.has('mcp_connections'))
         reports.push(await importConnections(db, source, userId));
+      await db.exec(RETIRE_COMPOSIO_SOURCES);
       // Later task events continue after the imported ids.
       await db.exec(
         "SELECT setval(pg_get_serial_sequence('events', 'id'), GREATEST((SELECT MAX(id) FROM events), 1))",

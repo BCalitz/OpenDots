@@ -67,7 +67,6 @@ export interface PlatformConfig extends WebConfig {
   computerNamespace?: string;
   browserUrl?: string;
   browserSecret?: string;
-  composioApiKey?: string;
   /** TypeSafe API key. Discovery is inactive without it. */
   typesafeApiKey?: string;
   /** Lowest confidence — or, for a correlated item, lowest urgency — that
@@ -117,7 +116,6 @@ export function setupStatus(
     model: !!(config.apiKey && config.model),
     browser: !!(config.browserUrl && config.browserSecret),
     voice: !!(config.voiceKey && config.voiceModel && !missing.length),
-    composio: !!config.composioApiKey,
     slack:
       declared === 'configured'
         ? (slack ?? 'connecting')

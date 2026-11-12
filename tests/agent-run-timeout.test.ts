@@ -1,18 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { DotEngine } from '../src/server/engine/index.js';
-import { ThreadRunner } from '../src/server/engine/thread-runner.js';
 import {
   DEFAULT_AGENT_RUN_TIMEOUT_MS,
   agentRunTimeoutMsFromEnv,
 } from '../src/server/platform-config.js';
 import { Runner } from '../src/server/runner.js';
 import { Store } from '../src/server/store.js';
-import { testDb, testWorkspace } from './fixtures/db.js';
-
-const composio = vi.hoisted(() => ({ session: vi.fn() }));
-vi.mock('../src/server/composio.js', () => ({
-  composioSession: composio.session,
-}));
+import { testDb } from './fixtures/db.js';
 
 /** Two workers' stores on one database. */
 async function sharedStores() {
@@ -32,7 +25,6 @@ const fakeTimers = () =>
   });
 afterEach(() => {
   vi.restoreAllMocks();
-  composio.session.mockReset();
   vi.useRealTimers();
 });
 
@@ -48,69 +40,6 @@ it('rejects invalid timeout overrides at startup', () => {
     expect(() =>
       agentRunTimeoutMsFromEnv({ AGENT_RUN_TIMEOUT_MS: value }),
     ).toThrow(/AGENT_RUN_TIMEOUT_MS/);
-});
-
-async function composioEngine(timeout?: number) {
-  const { db, store, workspace } = await testWorkspace();
-  const runner = new ThreadRunner(db, 'owner');
-  const dot = (await workspace.dots())[0];
-  await store.updateSettings({ appsAllowed: true });
-  await workspace.updateDot(dot.id, { ...dot, appsAllowed: true });
-  await workspace.bindThread('thread', dot.id, 'Timeout test');
-  const engine = new DotEngine({
-    store,
-    workspace,
-    runner,
-    config: {
-      apiKey: 'fixture',
-      model: 'custom-model',
-      composioApiKey: 'fixture',
-      baseUrl: 'https://unused.invalid/v1',
-      voiceName: 'marin',
-      slackUsers: [],
-      ...(timeout ? { agentRunTimeoutMs: timeout } : {}),
-    },
-  });
-  return { engine, runner };
-}
-
-it('finishes an interactive turn when Composio startup stalls', async () => {
-  const { engine } = await composioEngine(1_250);
-  fakeTimers();
-  composio.session.mockReturnValue(new Promise(() => {}));
-  const { done } = await engine.start({
-    threadId: 'thread',
-    message: { content: 'Keep working.' },
-  });
-  await vi.waitFor(() => expect(composio.session).toHaveBeenCalled());
-  await vi.advanceTimersByTimeAsync(1_251);
-  const run = await done;
-  expect(run.status).toBe('error');
-  expect(run.error).toContain('1.25 second time limit');
-  const signal = composio.session.mock.calls[0][4] as AbortSignal;
-  expect(signal.aborted).toBe(true);
-});
-
-it('does not call the model after Composio startup is cancelled', async () => {
-  const { engine, runner } = await composioEngine();
-  let resolveSession!: (session: unknown) => void;
-  composio.session.mockReturnValue(
-    new Promise((resolve) => {
-      resolveSession = resolve;
-    }),
-  );
-  const network = vi.spyOn(globalThis, 'fetch');
-  const { done } = await engine.start({
-    threadId: 'thread',
-    message: { content: 'Keep working.' },
-  });
-  await vi.waitFor(() => expect(composio.session).toHaveBeenCalled());
-  const tools = vi.fn().mockResolvedValue([]);
-  runner.stop('thread');
-  resolveSession({ tools });
-  expect((await done).status).toBe('stopped');
-  expect(tools).not.toHaveBeenCalled();
-  expect(network).not.toHaveBeenCalled();
 });
 
 it('uses the configured timeout for scheduled/background runs', async () => {

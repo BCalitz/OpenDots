@@ -21,20 +21,21 @@ export interface McpSourceConfig {
   >;
 }
 /**
- * Discovery on an app account connected through Composio: new items are
+ * Discovery on a connected account (Gmail, Outlook or Teams): new items are
  * read on a timer, a small model flags the ones that need attention, and
  * `dotId` investigates them read-only.
  */
-export interface ComposioSourceConfig {
+export interface AccountSourceConfig {
   dotId: string;
-  /** Composio connected account id. */
+  /** The account's owner; its tools are read as this user. */
+  userId: string;
   accountId: string;
-  /** Composio toolkit slug, one of DISCOVERY_TOOLKITS. */
-  toolkit: string;
+  /** The account's connector, one of DISCOVERY_APPS. */
+  app: string;
 }
-export type SourceType = 'mcp' | 'webhook' | 'composio';
+export type SourceType = 'mcp' | 'webhook' | 'account';
 export type SourceConfig =
-  McpSourceConfig | ComposioSourceConfig | Record<string, never>;
+  McpSourceConfig | AccountSourceConfig | Record<string, never>;
 export interface InboxSourceView {
   id: string;
   name: string;
@@ -193,19 +194,19 @@ export interface LinksState {
 }
 
 /** Apps discovery can read, with what their items are. */
-export const DISCOVERY_TOOLKITS: Record<
+export const DISCOVERY_APPS: Record<
   string,
   { name: string; kind: SourceKind }
 > = {
   gmail: { name: 'Gmail', kind: 'mail' },
   outlook: { name: 'Outlook', kind: 'mail' },
-  microsoft_teams: { name: 'Microsoft Teams', kind: 'message' },
+  teams: { name: 'Microsoft Teams', kind: 'message' },
 };
 /** Discovery settings for one connected account. */
 export interface DiscoveryAccountView {
   sourceId: string;
   accountId: string;
-  toolkit: string;
+  app: string;
   dotId: string;
   enabled: boolean;
   intervalSeconds: number;
@@ -235,7 +236,7 @@ export interface DiscoverySettings {
    * original sender, only these may say an earlier item can be ignored.
    */
   trusted: string[];
-  /** Apps (Composio toolkits) where a Dot may propose actions for approval. */
+  /** Apps (see DISCOVERY_APPS) where a Dot may propose actions for approval. */
   allowedApps: string[];
 }
 /**

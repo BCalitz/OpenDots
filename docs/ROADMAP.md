@@ -4,22 +4,22 @@ OpenDots runs on its own code, Postgres and a model provider. No CopilotKit pack
 
 ## Built
 
-| Piece                                       | Code                                                            |
-| ------------------------------------------- | --------------------------------------------------------------- |
-| Conversations: storage, streaming, stop     | `src/server/engine/thread-runner.ts`, `chat-routes.ts`          |
-| Agent loop and tools (TanStack AI)          | `src/server/engine/index.ts`, `engine/tools.ts`                 |
-| Approvals                                   | `src/server/engine/approvals.ts`                                |
-| Web and mobile chat client                  | `src/shared/thread-client.ts`, `src/client/useThread.ts`        |
-| Run inspector, cost meter and audit         | **Insights**, `src/server/insight-routes.ts`, `usage-store.ts`  |
-| Event engine (MCP and webhook sources)      | `src/server/inbox/`                                             |
-| Discovery: triage with history              | `src/server/discovery/`, design in [DISCOVERY.md](DISCOVERY.md) |
-| Proposals: prepare, handle, not now         | `src/server/discovery/proposals.ts`, `proposal-store.ts`        |
-| Routing, delivery and the morning brief     | `src/server/discovery/delivery.ts`                              |
-| Replies drafted in chat, sent on approval   | `src/server/platform.ts` (`proposeReply`)                       |
-| Mail, messages and calendar actions         | Connections (Composio, MCP); writes wait for chat approval      |
-| Slack                                       | `src/server/channels/`                                          |
-| Pages, Dots, schedules, MCP, push           | `store.ts`, `workspace.ts`, `push.ts`, ...                      |
-| Postgres (pgvector, pg_trgm), SQLite import | `src/server/db/`, `npm run import-sqlite`                       |
+| Piece                                       | Code                                                                    |
+| ------------------------------------------- | ----------------------------------------------------------------------- |
+| Conversations: storage, streaming, stop     | `src/server/engine/thread-runner.ts`, `chat-routes.ts`                  |
+| Agent loop and tools (TanStack AI)          | `src/server/engine/index.ts`, `engine/tools.ts`                         |
+| Approvals                                   | `src/server/engine/approvals.ts`                                        |
+| Web and mobile chat client                  | `src/shared/thread-client.ts`, `src/client/useThread.ts`                |
+| Run inspector, cost meter and audit         | **Insights**, `src/server/insight-routes.ts`, `usage-store.ts`          |
+| Event engine (MCP and webhook sources)      | `src/server/inbox/`                                                     |
+| Discovery: triage with history              | `src/server/discovery/`, design in [DISCOVERY.md](DISCOVERY.md)         |
+| Proposals: prepare, handle, not now         | `src/server/discovery/proposals.ts`, `proposal-store.ts`                |
+| Routing, delivery and the morning brief     | `src/server/discovery/delivery.ts`                                      |
+| Replies drafted in chat, sent on approval   | `src/server/platform.ts` (`proposeReply`)                               |
+| Mail, messages and calendar actions         | Connections (Gmail, Outlook, Teams, MCP); writes wait for chat approval |
+| Slack                                       | `src/server/channels/`                                                  |
+| Pages, Dots, schedules, MCP, push           | `store.ts`, `workspace.ts`, `push.ts`, ...                              |
+| Postgres (pgvector, pg_trgm), SQLite import | `src/server/db/`, `npm run import-sqlite`                               |
 
 ## Design rules
 

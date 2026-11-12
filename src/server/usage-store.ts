@@ -17,7 +17,7 @@ export function monthStart(now = Date.now()) {
 
 /**
  * Token usage per run and a log of outside actions that have no receipt
- * table of their own (ungated MCP calls and Composio tools). Usage is
+ * table of their own (ungated connector calls). Usage is
  * recorded by the Dot as each run finishes, so it works with either
  * conversation backend.
  */
@@ -112,8 +112,8 @@ export class UsageStore {
     });
   }
   /**
-   * Every action taken outside OpenDots, newest first: approved MCP actions,
-   * ungated MCP calls, Composio tools and computer actions.
+   * Every action taken outside OpenDots, newest first: approved connector actions,
+   * ungated connector calls and computer actions.
    */
   audit(
     filter: { dotId?: string; changesOnly?: boolean; limit?: number } = {},

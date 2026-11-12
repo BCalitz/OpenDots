@@ -113,8 +113,13 @@ async function setup(script: (title: string) => Verdict) {
   const { source } = await store.create({
     name: 'Gmail',
     kind: 'mail',
-    type: 'composio',
-    config: { dotId: 'ops', accountId: 'ca_gmail', toolkit: 'gmail' },
+    type: 'account',
+    config: {
+      dotId: 'ops',
+      userId: 'owner',
+      accountId: 'ca_gmail',
+      app: 'gmail',
+    },
     notify: 'off',
     intervalSeconds: 300,
   });

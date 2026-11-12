@@ -17,8 +17,8 @@ export interface ToolContext {
 
 /**
  * A server tool the model can call. Parameters are a zod schema (validated
- * before `execute` runs) or a JSON Schema from an outside service such as an
- * MCP server or Composio, which that service validates itself.
+ * before `execute` runs) or a JSON Schema from an outside service such as a
+ * connected service, which validates it itself.
  */
 export interface Tool {
   name: string;

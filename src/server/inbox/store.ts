@@ -7,7 +7,7 @@ import {
 import { sql, type Db } from '../db/index.js';
 import type {
   Asked,
-  ComposioSourceConfig,
+  AccountSourceConfig,
   Delivery,
   FindingState,
   FindingView,
@@ -60,7 +60,7 @@ const clip = (value: string, max = MAX_TEXT) =>
   value.length > max ? `${value.slice(0, max - 1)}…` : value;
 const isWebUrl = (url: string) => /^https?:\/\//i.test(url);
 /** Sources the poller runs on a timer. */
-const POLLED = sql.raw("type IN ('mcp', 'composio')");
+const POLLED = sql.raw("type IN ('mcp', 'account')");
 const FINDING = sql.raw(
   'id, event_id, attention, category, confidence, reason, judged_by, state, dot_id, thread_id, referenced_event_id, error, urgency, asked, injection, route, delivery, note, created_at, updated_at',
 );
@@ -154,7 +154,7 @@ export class InboxStore {
     id: string,
     patch: Partial<
       Pick<SourceRecord, 'name' | 'enabled' | 'notify' | 'intervalSeconds'>
-    > & { config?: McpSourceConfig | ComposioSourceConfig },
+    > & { config?: McpSourceConfig | AccountSourceConfig },
   ) {
     return this.db.transaction(async () => {
       const current = await this.source(id);
@@ -465,16 +465,16 @@ export class InboxStore {
     return changed > 0 ? this.event(id) : undefined;
   }
   /** The discovery source for a connected account, if there is one. */
-  async composioSource(accountId: string) {
+  async accountSource(accountId: string) {
     const row = await this.db.row<SourceRow>(
-      sql`SELECT * FROM inbox_sources WHERE type='composio' AND config::jsonb->>'accountId'=${accountId} ORDER BY created_at LIMIT 1`,
+      sql`SELECT * FROM inbox_sources WHERE type='account' AND config::jsonb->>'accountId'=${accountId} ORDER BY created_at LIMIT 1`,
     );
     return row ? this.record(row) : undefined;
   }
-  async composioSources() {
+  async accountSources() {
     return (
       await this.db.rows<SourceRow>(
-        sql`SELECT * FROM inbox_sources WHERE type='composio' ORDER BY created_at`,
+        sql`SELECT * FROM inbox_sources WHERE type='account' ORDER BY created_at`,
       )
     ).map((row) => this.record(row));
   }

@@ -203,3 +203,58 @@ it('migrates a database with no connections', async () => {
   expect(await db.rows(sql`SELECT 1 FROM accounts`)).toEqual([]);
   expect(await db.rows(sql`SELECT 1 FROM grants`)).toEqual([]);
 });
+
+it('retires Composio: drops its columns and keeps its discovery sources as disabled history', async () => {
+  const db = await testDb(10);
+  await db.run(
+    sql`INSERT INTO settings VALUES (1, '{"name":"Ada","paused":false,"researchAllowed":true,"memoryAllowed":true,"appsAllowed":true}') ON CONFLICT (id) DO UPDATE SET value=excluded.value`,
+  );
+  await db.run(
+    sql`INSERT INTO discovery_settings VALUES (1, '{"allowedApps":["gmail","microsoft_teams"]}') ON CONFLICT (id) DO UPDATE SET value=excluded.value`,
+  );
+  await db.run(
+    sql`INSERT INTO inbox_sources (id, name, kind, type, config, created_at, updated_at) VALUES ('s1', 'Teams', 'message', 'composio', '{"dotId":"d1","accountId":"ca_1","toolkit":"microsoft_teams"}', 1, 1), ('s2', 'Hook', 'ticket', 'webhook', '{}', 1, 1)`,
+  );
+  await migrate(db);
+
+  const settings = await db.row<{ value: string }>(
+    sql`SELECT value FROM settings WHERE id=1`,
+  );
+  expect(JSON.parse(settings!.value)).toEqual({
+    name: 'Ada',
+    paused: false,
+    researchAllowed: true,
+    memoryAllowed: true,
+  });
+  const discovery = await db.row<{ value: string }>(
+    sql`SELECT value FROM discovery_settings WHERE id=1`,
+  );
+  expect(JSON.parse(discovery!.value).allowedApps).toEqual(['gmail', 'teams']);
+  const sources = await db.rows<{
+    id: string;
+    type: string;
+    enabled: boolean;
+    lastError: string | null;
+    config: string;
+  }>(
+    sql`SELECT id, type, enabled, last_error, config FROM inbox_sources ORDER BY id`,
+  );
+  expect(sources[0]).toMatchObject({
+    id: 's1',
+    type: 'account',
+    enabled: false,
+  });
+  expect(sources[0].lastError).toMatch(/no longer supported/);
+  expect(JSON.parse(sources[0].config)).toEqual({
+    dotId: 'd1',
+    userId: '',
+    accountId: '',
+    app: 'teams',
+  });
+  // Other sources are untouched.
+  expect(sources[1]).toMatchObject({ type: 'webhook', enabled: true });
+  const columns = await db.rows<{ columnName: string }>(
+    sql`SELECT column_name FROM information_schema.columns WHERE table_name='dots' AND table_schema=current_schema()`,
+  );
+  expect(columns.map((c) => c.columnName)).not.toContain('composio_toolkits');
+});

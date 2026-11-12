@@ -9,6 +9,20 @@ import { sql, type Db } from './index.js';
  * stores read and write it whole. `seq` columns keep insertion order where
  * SQLite's rowid used to.
  */
+/**
+ * Discovery sources that read through Composio cannot keep working: their
+ * accounts lived at Composio. They stay as disabled, labelled sources so
+ * their items and findings keep their history; turning discovery on for an
+ * account in OpenDots makes a new source. Used by migration 11 and by the
+ * SQLite importer, which can bring such sources in.
+ */
+export const RETIRE_COMPOSIO_SOURCES = `
+UPDATE inbox_sources SET type='account', enabled=false,
+  last_error='Composio is no longer supported. Connect the account in Accounts and turn discovery on there.',
+  config=jsonb_build_object('dotId', config::jsonb->>'dotId', 'userId', '', 'accountId', '',
+    'app', CASE WHEN config::jsonb->>'toolkit'='microsoft_teams' THEN 'teams' ELSE config::jsonb->>'toolkit' END)::text
+WHERE type='composio';
+`;
 const migrations: { version: number; name: string; sql: string }[] = [
   {
     version: 1,
@@ -277,6 +291,17 @@ DROP TABLE mcp_connections;
 -- comes back. state is the one-time secret in the redirect; it is deleted when
 -- used, and expires after ten minutes.
 CREATE TABLE oauth_states(state TEXT PRIMARY KEY, user_id TEXT NOT NULL, connector TEXT NOT NULL, verifier TEXT NOT NULL, dot_id TEXT, expires_at BIGINT NOT NULL);
+`,
+  },
+  {
+    version: 11,
+    name: 'remove composio',
+    sql: `
+-- Dots reach outside services through connector accounts and grants now.
+ALTER TABLE dots DROP COLUMN apps_allowed, DROP COLUMN composio_toolkits, DROP COLUMN composio_session_id, DROP COLUMN composio_policy_hash;
+UPDATE settings SET value=(value::jsonb - 'appsAllowed')::text;
+UPDATE discovery_settings SET value=replace(value, '"microsoft_teams"', '"teams"');
+${RETIRE_COMPOSIO_SOURCES}
 `,
   },
 ];

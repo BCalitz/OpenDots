@@ -169,6 +169,36 @@ export class ConnectorService {
       );
     return match;
   }
+  /**
+   * A read the system makes for itself, such as discovery watching an inbox,
+   * not one a Dot makes: no grant is involved, so it may only use tools the
+   * service calls read-only. Returns what the tool returned, or throws.
+   */
+  async read(
+    userId: string,
+    accountId: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const account = await this.accounts.get(userId, accountId);
+    if (!account) throw new Error('Account not found.');
+    if (!account.tools.find((item) => item.name === tool)?.readOnly)
+      throw new Error('Only read-only tools can be read this way.');
+    const target = await this.accounts.target(accountId);
+    const result = await this.connector(target.connector).call(
+      target,
+      tool,
+      args,
+      signal,
+    );
+    if (result.isError) throw new Error(result.text);
+    try {
+      return JSON.parse(result.text);
+    } catch {
+      return result.text;
+    }
+  }
   async call(
     exposed: ExposedTool,
     args: Record<string, unknown>,

@@ -1,6 +1,6 @@
 # Discovery: how items are judged
 
-Discovery watches your connected accounts (Gmail, Outlook, Teams through Composio), decides what needs you, and has a Dot look into it. Setup is in [SETUP.md](SETUP.md#discovery); the code is in `src/server/discovery/` and `src/server/inbox/`.
+Discovery watches your connected accounts (Gmail, Outlook and Teams), decides what needs you, and has a Dot look into it. Setup is in [SETUP.md](SETUP.md#discovery); the code is in `src/server/discovery/` and `src/server/inbox/`.
 
 It solves four problems a one-item-at-a-time triage has:
 

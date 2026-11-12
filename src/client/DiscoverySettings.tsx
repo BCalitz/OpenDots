@@ -160,10 +160,9 @@ export function DiscoverySettingsForm({
         />
       </label>
       <p className="muted small">
-        Composio app names. In these apps a Dot drafts the action for you to
-        approve; elsewhere it only tells you what is needed, where and who
-        asked. Nothing is allowed until you add it, and Connected apps must be
-        on in Settings.
+        App names: gmail, outlook or teams. In these apps a Dot drafts the
+        action for you to approve; elsewhere it only tells you what is needed,
+        where and who asked. Nothing is allowed until you add it.
       </p>
       <p className="muted small">
         Similar items:{' '}

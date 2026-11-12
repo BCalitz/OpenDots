@@ -104,15 +104,7 @@ Ask a Dot to show a draft before saving it. An approval card pauses the turn for
 
 ### Connections
 
-Give a Dot tools from any MCP server, such as email, calendar, GitHub, or your own services. Read-only tools run on their own. Any other tool pauses for an **Approve & run** card in chat, and only your approval runs it. Connect a service once, choose which Dots may use it, and set each tool to allow, ask first or block per Dot. See [Connections](docs/CONNECTIONS.md).
-
-### Connected apps
-
-Dots can use [Composio](https://composio.dev) to work with the owner's email, calendar, and other connected apps. Add `COMPOSIO_API_KEY`, restart OpenDots, then enable Connected apps in both the global settings and the Dot's settings. Adding the API key alone does not grant access.
-
-You can limit each Dot to toolkit slugs such as `gmail` or `googlecalendar`. A blank toolkit list allows every toolkit in the Composio project. OpenDots identifies the owner with `OWNER_ID`, so keep that value stable after connecting accounts. Sign in to apps on the **Accounts** page, or follow the Connect link a Dot returns in chat when a tool needs authentication.
-
-These tools act on real accounts. Start with a read-only request and use a test account before trying write actions. See [Composio setup](docs/SETUP.md#composio) for configuration, permissions, testing, and data-sharing details.
+Give a Dot tools from Gmail, Outlook or Microsoft Teams (sign in once), or from any MCP server such as GitHub or your own services. Read-only tools run on their own. Any other tool pauses for an **Approve & run** card in chat, and only your approval runs it. Connect a service once, choose which Dots may use it, and set each tool to allow, ask first or block per Dot. See [Connections](docs/CONNECTIONS.md).
 
 ### Text and calls
 
@@ -195,26 +187,26 @@ See [Setup](docs/SETUP.md) for configuration, Slack, calls, the browser service,
 
 Conversation messages, tool calls, run events and approvals are stored in your Postgres database (`DATABASE_URL`), alongside pages and workspace metadata. Back up that database to back up everything. Upgrading from a release that used SQLite: see [moving from SQLite](docs/SETUP.md#moving-from-sqlite).
 
-The configured model provider receives conversation context, including authorized page content and tool results. Public-web research sends queries and selected URLs to Parallel by default; set `WEB_SEARCH_PROVIDER=disabled` to disable those tools. When connected apps are enabled, tool arguments and results pass through Composio and the app provider. Speech and Slack send data to their providers when used.
+The configured model provider receives conversation context, including authorized page content and tool results. Public-web research sends queries and selected URLs to Parallel by default; set `WEB_SEARCH_PROVIDER=disabled` to disable those tools. Tool arguments and results of a connected service (Gmail, Outlook, Teams or an MCP server) pass to that service. Speech and Slack send data to their providers when used.
 
 OpenDots records bounded browser setup stages and first successful assistant activation with a random installation ID; no prompts, answers or keys. Set `DO_NOT_TRACK=1` or `COPILOTKIT_TELEMETRY_DISABLED=true` to opt out, which also purges pending setup events. See [browser setup telemetry](docs/SETUP-TELEMETRY.md) and [telemetry](docs/TELEMETRY.md). Review the policies and retention settings of each service you configure.
 
 ## Features
 
-| Area                       | Included                                                                                                            |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Spaces and Specialist Dots | Saved names, role instructions, and per-Dot research and memory permissions                                         |
-| Pages                      | Searchable library, visual editor, slash commands, autosave, and revision checks                                    |
-| Conversations              | Stored locally; live streaming across devices, resume after refresh, page-specific conversations, and source links  |
-| Slack                      | Socket Mode adapter, one OpenDots thread per Slack thread, workspace and user allowlists                            |
-| Calls                      | WebRTC speech, delegated compute, bounded sessions, hangup, and timeline receipts                                   |
-| Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                           |
-| Browser                    | Separate read-only public-page service with page capture and navigation limits                                      |
-| Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                   |
-| Connections                | Accounts shared across Dots, per-Dot tool policies, Composio apps, and server-side owner approval for write actions |
-| Appearance                 | System, light, and dark themes; dark colors are derived at build time from the light styles                         |
-| Memory                     | User-managed preferences that permitted Dots can use                                                                |
-| Deployment                 | Local Node setup and separate application/browser containers                                                        |
+| Area                       | Included                                                                                                                               |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Spaces and Specialist Dots | Saved names, role instructions, and per-Dot research and memory permissions                                                            |
+| Pages                      | Searchable library, visual editor, slash commands, autosave, and revision checks                                                       |
+| Conversations              | Stored locally; live streaming across devices, resume after refresh, page-specific conversations, and source links                     |
+| Slack                      | Socket Mode adapter, one OpenDots thread per Slack thread, workspace and user allowlists                                               |
+| Calls                      | WebRTC speech, delegated compute, bounded sessions, hangup, and timeline receipts                                                      |
+| Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                                              |
+| Browser                    | Separate read-only public-page service with page capture and navigation limits                                                         |
+| Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                                      |
+| Connections                | Accounts shared across Dots, per-Dot tool policies, Gmail, Outlook and Teams sign-in, and server-side owner approval for write actions |
+| Appearance                 | System, light, and dark themes; dark colors are derived at build time from the light styles                                            |
+| Memory                     | User-managed preferences that permitted Dots can use                                                                                   |
+| Deployment                 | Local Node setup and separate application/browser containers                                                                           |
 
 Scheduled tasks run in their original conversation. If a worker stops or its lease expires during a run, OpenDots marks that run **Interrupted** and waits for an explicit retry. Review its pages and computer actions, then use **Retry after review** when appropriate. Completed effects may already be present even when a run has no final result.
 

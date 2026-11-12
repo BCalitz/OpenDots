@@ -45,7 +45,6 @@ async function fixture() {
         intelligence: true,
         model: true,
         browser: false,
-        composio: false,
         slack: 'not_configured',
         missing: [],
       }),

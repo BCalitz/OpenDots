@@ -37,7 +37,6 @@ import { ChannelService } from './channels/service.js';
 import { SlackAdapter } from './channels/slack.js';
 import { SetupTelemetry } from './setup-telemetry.js';
 import { InboxEngine } from './inbox/engine.js';
-import { composioReader } from './composio.js';
 import { DiscoveryService, type Investigate } from './discovery/service.js';
 import { jevJudge, type Judge } from './discovery/classifier.js';
 import { DeliveryService } from './discovery/delivery.js';
@@ -143,19 +142,8 @@ export class Platform {
       this.connectors,
       options.publicUrl ?? 'http://127.0.0.1:4310',
     );
-    let reader: ReturnType<typeof composioReader> | undefined;
-    let readerKey: string | undefined;
     this.inbox = new InboxEngine(workspace.inbox, this.connectors, {
       paused,
-      composio: () => {
-        const key = config.composioApiKey;
-        if (!key) return undefined;
-        if (!reader || readerKey !== key) {
-          reader = composioReader(key, workspace.ownerId);
-          readerKey = key;
-        }
-        return reader;
-      },
     });
     const push = options.push;
     this.delivery = push
@@ -193,7 +181,6 @@ export class Platform {
       delivery: this.delivery,
       proposals: this.proposals,
       dotName: async (dotId) => (await workspace.dot(dotId))?.name,
-      appsAllowed: async () => (await store.settings()).appsAllowed,
       previews: () => push?.previews ?? false,
     });
     this.inbox.onEvents(this.discovery.listener);

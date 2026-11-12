@@ -576,11 +576,12 @@ async function judgeAll(sourceIds: string[]) {
         // webhook, so nothing is polled.
         source: {
           ...source,
-          type: 'composio',
+          type: 'account',
           config: {
             dotId: dot?.id ?? '',
+            userId: '',
             accountId: 'scenario',
-            toolkit: source.kind === 'mail' ? 'gmail' : 'microsoft_teams',
+            app: source.kind === 'mail' ? 'gmail' : 'teams',
           },
         },
         events: [event],

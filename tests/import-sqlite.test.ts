@@ -76,6 +76,8 @@ it('copies a legacy SQLite file and the stores read it back', async () => {
   expect(report.find((entry) => entry.table === 'dots')?.skipped).toEqual([
     'learningContainerId',
     'skillDeliveryEnabled',
+    'appsAllowed',
+    'composioToolkits',
   ]);
 
   const workspace = new WorkspaceStore(db, 'owner');
@@ -88,7 +90,6 @@ it('copies a legacy SQLite file and the stores read it back', async () => {
     spaceIds: ['s1'],
     researchAllowed: true,
     memoryAllowed: false,
-    appsAllowed: true,
   });
   expect((await workspace.conversations()).map((c) => c.id)).toEqual(['th1']);
 

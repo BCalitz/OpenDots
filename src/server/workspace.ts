@@ -9,12 +9,11 @@ import { randomUUID } from 'node:crypto';
 import { sql, type Db } from './db/index.js';
 import type { CallReceipt, Conversation, Dot, Space } from '../shared/types.js';
 
-type DotRow = Omit<Dot, 'spaceIds' | 'composioToolkits' | 'delegateDotIds'> & {
-  composioToolkits: string;
+type DotRow = Omit<Dot, 'spaceIds' | 'delegateDotIds'> & {
   delegateDotIds: string;
 };
 const DOT = sql.raw(
-  'id, space_id, name, instructions, research_allowed, memory_allowed, created_at, apps_allowed, composio_toolkits, composio_session_id, composio_policy_hash, monthly_token_cap, delegate_dot_ids',
+  'id, space_id, name, instructions, research_allowed, memory_allowed, created_at, monthly_token_cap, delegate_dot_ids',
 );
 const CALL = sql.raw(
   'id, thread_id, started_at, ended_at, status, transcript, error, anchor_message_id',
@@ -119,7 +118,6 @@ export class WorkspaceStore {
       spaceIds: grants
         .filter((grant) => grant.dotId === row.id)
         .map((grant) => grant.spaceId),
-      composioToolkits: JSON.parse(row.composioToolkits ?? '[]'),
       monthlyTokenCap: row.monthlyTokenCap ?? null,
       delegateDotIds: JSON.parse(row.delegateDotIds ?? '[]'),
     }));
@@ -134,8 +132,6 @@ export class WorkspaceStore {
     researchAllowed: boolean,
     memoryAllowed: boolean,
     spaceIds: string[] = [spaceId],
-    appsAllowed = false,
-    composioToolkits: string[] = [],
   ): Promise<Dot> {
     await this.validateSpaceAccess(spaceId, spaceIds);
     const dot: Dot = {
@@ -146,15 +142,11 @@ export class WorkspaceStore {
       instructions,
       researchAllowed,
       memoryAllowed,
-      appsAllowed,
-      composioToolkits: [...new Set(composioToolkits)].sort(),
-      composioSessionId: null,
-      composioPolicyHash: null,
       createdAt: Date.now(),
     };
     await this.db.transaction(async () => {
       await this.db.run(
-        sql`INSERT INTO dots (id, space_id, name, instructions, research_allowed, memory_allowed, created_at, apps_allowed, composio_toolkits) VALUES (${dot.id}, ${spaceId}, ${name}, ${instructions}, ${researchAllowed}, ${memoryAllowed}, ${dot.createdAt}, ${appsAllowed}, ${JSON.stringify(dot.composioToolkits)})`,
+        sql`INSERT INTO dots (id, space_id, name, instructions, research_allowed, memory_allowed, created_at) VALUES (${dot.id}, ${spaceId}, ${name}, ${instructions}, ${researchAllowed}, ${memoryAllowed}, ${dot.createdAt})`,
       );
       for (const id of dot.spaceIds)
         await this.db.run(
@@ -180,12 +172,7 @@ export class WorkspaceStore {
     id: string,
     patch: Pick<
       Dot,
-      | 'name'
-      | 'instructions'
-      | 'researchAllowed'
-      | 'memoryAllowed'
-      | 'appsAllowed'
-      | 'composioToolkits'
+      'name' | 'instructions' | 'researchAllowed' | 'memoryAllowed'
     > & {
       spaceId?: string;
       spaceIds?: string[];
@@ -198,7 +185,7 @@ export class WorkspaceStore {
       const spaceIds = patch.spaceIds ?? current.spaceIds;
       await this.validateSpaceAccess(defaultSpace, spaceIds);
       await this.db.run(
-        sql`UPDATE dots SET name=${patch.name}, instructions=${patch.instructions}, research_allowed=${patch.researchAllowed}, memory_allowed=${patch.memoryAllowed}, apps_allowed=${patch.appsAllowed}, composio_toolkits=${JSON.stringify([...new Set(patch.composioToolkits)].sort())}, space_id=${defaultSpace} WHERE id=${id}`,
+        sql`UPDATE dots SET name=${patch.name}, instructions=${patch.instructions}, research_allowed=${patch.researchAllowed}, memory_allowed=${patch.memoryAllowed}, space_id=${defaultSpace} WHERE id=${id}`,
       );
       await this.db.run(sql`DELETE FROM dot_spaces WHERE dot_id=${id}`);
       for (const space of new Set(spaceIds))
@@ -245,11 +232,6 @@ export class WorkspaceStore {
     return !!(await this.db.row(
       sql`SELECT 1 FROM delegate_threads WHERE thread_id=${threadId}`,
     ));
-  }
-  async saveComposioSession(id: string, sessionId: string, policyHash: string) {
-    await this.db.run(
-      sql`UPDATE dots SET composio_session_id=${sessionId}, composio_policy_hash=${policyHash} WHERE id=${id}`,
-    );
   }
   async conversations(): Promise<Conversation[]> {
     const rows = await this.db.rows<BindingRow>(

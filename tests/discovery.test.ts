@@ -2,10 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InboxStore } from '../src/server/inbox/store.js';
 import { InboxEngine } from '../src/server/inbox/engine.js';
 import {
-  ComposioListSource,
+  AccountListSource,
   plainText,
-  type ComposioExecute,
-} from '../src/server/inbox/composio-source.js';
+} from '../src/server/inbox/account-source.js';
 import {
   jevJudge,
   ruleVerdict,
@@ -16,8 +15,6 @@ import {
   type Investigate,
 } from '../src/server/discovery/service.js';
 import { investigationMessage } from '../src/server/discovery/investigation.js';
-import { composioTools, toolSlugs } from '../src/server/composio-tools.js';
-import { detachedContext } from '../src/server/engine/tools.js';
 import type { ConnectorService } from '../src/server/connectors/service.js';
 import type { InboxEvent } from '../src/server/inbox/source.js';
 import type { InboxEventView } from '../src/shared/inbox-types.js';
@@ -38,8 +35,13 @@ async function inbox() {
   const { source } = await store.create({
     name: 'Gmail',
     kind: 'mail',
-    type: 'composio',
-    config: { dotId: 'books', accountId: 'ca_gmail', toolkit: 'gmail' },
+    type: 'account',
+    config: {
+      dotId: 'books',
+      userId: 'owner',
+      accountId: 'ca_gmail',
+      app: 'gmail',
+    },
     notify: 'off',
     intervalSeconds: 300,
   });
@@ -424,44 +426,52 @@ describe('InboxStore.recentFrom', () => {
 });
 
 describe('discovery sources', () => {
+  /** A connected account whose tools answer from `results`, recording each call. */
   const run = (results: Record<string, unknown>) => {
-    const calls: Parameters<ComposioExecute>[0][] = [];
-    const execute: ComposioExecute = async (call) => {
-      calls.push(call);
-      return results[call.tool];
-    };
-    return { calls, execute };
+    const calls: { accountId: string; tool: string; args: unknown }[] = [];
+    const connectors = {
+      read: async (
+        _user: string,
+        accountId: string,
+        tool: string,
+        args: unknown,
+      ) => {
+        calls.push({ accountId, tool, args });
+        return results[tool];
+      },
+    } as unknown as ConnectorService;
+    return { calls, connectors };
   };
+  const config = (app: string, accountId = 'acc_1') => ({
+    dotId: 'd',
+    userId: 'owner',
+    accountId,
+    app,
+  });
+  const signal = () => new AbortController().signal;
 
   it('reads new Gmail messages since the last check', async () => {
-    const { calls, execute } = run({
-      GMAIL_FETCH_EMAILS: {
-        messages: [
-          {
-            messageId: 'm1',
-            threadId: 't1',
-            subject: 'Payment received',
-            sender: 'PayFast <noreply@payfast.co.za>',
-            messageText: '<p>R2,450.00 from Acme, ref 8812345</p>',
-            messageTimestamp: '2026-11-11T08:00:00Z',
-            labelIds: ['INBOX', 'IMPORTANT'],
-          },
-          { subject: 'no id, skipped' },
-        ],
-      },
+    const { calls, connectors } = run({
+      search_messages: [
+        {
+          id: 'm1',
+          threadId: 't1',
+          subject: 'Payment received',
+          from: 'PayFast <noreply@payfast.co.za>',
+          snippet: 'R2,450.00 from Acme, ref 8812345',
+          at: Date.parse('2026-11-11T08:00:00Z'),
+          important: true,
+        },
+        { subject: 'no id, skipped' },
+      ],
     });
-    const source = new ComposioListSource(
-      's1',
-      { dotId: 'd', accountId: 'ca_1', toolkit: 'gmail' },
-      execute,
-    );
+    const source = new AccountListSource('s1', config('gmail'), connectors);
     const since = new Date('2026-11-11T07:00:00Z');
-    const events = await source.poll(since, new AbortController().signal);
+    const events = await source.poll(since, signal());
     expect(calls[0]).toMatchObject({
-      accountId: 'ca_1',
-      toolkit: 'gmail',
-      tool: 'GMAIL_FETCH_EMAILS',
-      arguments: { query: `in:inbox after:${since.getTime() / 1000}` },
+      accountId: 'acc_1',
+      tool: 'search_messages',
+      args: { query: `in:inbox after:${since.getTime() / 1000}` },
     });
     expect(events).toEqual([
       expect.objectContaining({
@@ -471,115 +481,98 @@ describe('discovery sources', () => {
         priority: 'high',
         from: 'PayFast <noreply@payfast.co.za>',
         url: 'https://mail.google.com/mail/u/0/#all/t1',
+        occurredAt: Date.parse('2026-11-11T08:00:00Z'),
+      }),
+    ]);
+  });
+
+  it('reads Outlook, skipping what the last check already saw', async () => {
+    const outlook = new AccountListSource(
+      's1',
+      config('outlook'),
+      run({
+        search_messages: [
+          {
+            id: 'o1',
+            subject: 'Invoice 1043 overdue',
+            snippet: 'Please pay',
+            importance: 'high',
+            from: 'Acme <a@acme.test>',
+            received: '2026-11-11T08:00:00Z',
+            link: 'https://outlook.office.com/mail/o1',
+          },
+          {
+            id: 'old',
+            subject: 'Last week',
+            received: '2026-11-01T08:00:00Z',
+          },
+        ],
+      }).connectors,
+    );
+    expect(
+      await outlook.poll(new Date('2026-11-11T07:00:00Z'), signal()),
+    ).toEqual([
+      expect.objectContaining({
+        externalId: 'o1',
+        from: 'Acme <a@acme.test>',
+        priority: 'high',
+        url: 'https://outlook.office.com/mail/o1',
       }),
     ]);
   });
 
   it('looks back a day on the first check', async () => {
-    const { calls, execute } = run({ OUTLOOK_LIST_MESSAGES: { value: [] } });
-    const source = new ComposioListSource(
-      's1',
-      { dotId: 'd', accountId: 'ca_1', toolkit: 'outlook' },
-      execute,
+    const { calls, connectors } = run({ search_messages: [] });
+    await new AccountListSource('s1', config('gmail'), connectors).poll(
+      null,
+      signal(),
     );
-    await source.poll(null, new AbortController().signal);
-    const after = Date.parse(String(calls[0].arguments.received_date_time_gt));
+    const after =
+      Number(
+        String((calls[0].args as { query: string }).query).match(
+          /after:(\d+)/,
+        )![1],
+      ) * 1000;
     expect(Date.now() - after).toBeGreaterThan(23 * 3_600_000);
     expect(Date.now() - after).toBeLessThan(25 * 3_600_000);
   });
 
-  it('reads Outlook and Teams items, in Composio result wrappers', async () => {
-    const outlook = new ComposioListSource(
-      's1',
-      { dotId: 'd', accountId: 'ca_1', toolkit: 'outlook' },
-      run({
-        OUTLOOK_LIST_MESSAGES: JSON.stringify({
-          data: {
-            value: [
-              {
-                id: 'o1',
-                subject: 'Invoice 1043 overdue',
-                bodyPreview: 'Please pay',
-                importance: 'high',
-                from: {
-                  emailAddress: { name: 'Acme', address: 'a@acme.test' },
-                },
-                receivedDateTime: '2026-11-11T08:00:00Z',
-                webLink: 'https://outlook.office.com/mail/o1',
-              },
-            ],
-          },
-        }),
-      }).execute,
-    );
-    expect(
-      await outlook.poll(new Date(0), new AbortController().signal),
-    ).toEqual([
-      expect.objectContaining({
-        externalId: 'o1',
-        from: 'Acme',
-        priority: 'high',
-        url: 'https://outlook.office.com/mail/o1',
-      }),
-    ]);
-
+  it('reads Teams chats that changed, and only their new messages', async () => {
     const since = new Date('2026-11-11T07:00:00Z');
-    const teams = new ComposioListSource(
-      's2',
-      { dotId: 'd', accountId: 'ca_2', toolkit: 'microsoft_teams' },
-      run({
-        MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS: {
-          value: [
-            {
-              id: 'c1',
-              topic: 'Finance',
-              lastUpdatedDateTime: '2026-11-11T08:00:00Z',
-            },
-            { id: 'old', lastUpdatedDateTime: '2026-11-01T08:00:00Z' },
-          ],
+    const { calls, connectors } = run({
+      list_chats: [
+        { id: 'c1', topic: 'Finance', updated: '2026-11-11T08:00:00Z' },
+        { id: 'old', updated: '2026-11-01T08:00:00Z' },
+      ],
+      list_chat_messages: [
+        {
+          id: 'n1',
+          at: '2026-11-11T08:00:00Z',
+          from: 'Thandi',
+          text: 'Did the Acme payment land?',
         },
-        MICROSOFT_TEAMS_CHATS_GET_ALL_MESSAGES: {
-          value: [
-            {
-              id: 'n1',
-              messageType: 'message',
-              createdDateTime: '2026-11-11T08:00:00Z',
-              from: { user: { displayName: 'Thandi' } },
-              body: { content: '<p>Did the Acme payment land?</p>' },
-            },
-            {
-              id: 'n0',
-              messageType: 'message',
-              createdDateTime: '2026-11-10T08:00:00Z',
-              body: { content: 'old' },
-            },
-            {
-              id: 'sys',
-              messageType: 'systemEventMessage',
-              createdDateTime: '2026-11-11T08:00:00Z',
-              body: { content: 'added' },
-            },
-          ],
-        },
-      }).execute,
-    );
-    expect(await teams.poll(since, new AbortController().signal)).toEqual([
+        { id: 'n0', at: '2026-11-10T08:00:00Z', text: 'old' },
+        { id: 'empty', at: '2026-11-11T08:00:00Z', text: '' },
+      ],
+    });
+    const teams = new AccountListSource('s2', config('teams'), connectors);
+    expect(await teams.poll(since, signal())).toEqual([
       expect.objectContaining({
         externalId: 'c1:n1',
         title: 'Thandi in Finance: Did the Acme payment land?',
         from: 'Thandi',
       }),
     ]);
+    // Only the chat that changed is opened.
+    expect(calls.filter((call) => call.tool === 'list_chat_messages')).toEqual([
+      expect.objectContaining({ args: { chatId: 'c1', limit: 10 } }),
+    ]);
   });
 
   it('refuses apps it cannot read', () => {
     expect(
       () =>
-        new ComposioListSource(
-          's',
-          { dotId: 'd', accountId: 'a', toolkit: 'quickbooks' },
-          vi.fn(),
-        ),
+        new AccountListSource('s', config('quickbooks'), run({}).connectors),
     ).toThrow(/cannot read quickbooks/);
   });
 
@@ -591,28 +584,18 @@ describe('discovery sources', () => {
 
   it('polls discovery sources on the inbox timer and hands new items on', async () => {
     const { store, source } = await inbox();
-    const execute = vi.fn<ComposioExecute>(async () => ({
-      messages: [{ messageId: 'm1', subject: 'Hello' }],
-    }));
-    const engine = new InboxEngine(store, {} as ConnectorService, {
+    const { calls, connectors } = run({
+      search_messages: [{ id: 'm1', subject: 'Hello' }],
+    });
+    const engine = new InboxEngine(store, connectors, {
       paused: async () => false,
-      composio: () => execute,
     });
     const batches: unknown[] = [];
     engine.onEvents((batch) => void batches.push(batch));
     await engine.tick();
-    expect(execute).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1);
     expect(await store.events({ sourceId: source.id })).toHaveLength(1);
     expect(batches).toHaveLength(1);
-
-    const noKey = new InboxEngine(store, {} as ConnectorService, {
-      paused: async () => false,
-    });
-    await store.pollNow(source.id);
-    await noKey.tick();
-    expect((await store.source(source.id))?.lastError).toMatch(
-      /COMPOSIO_API_KEY/,
-    );
   });
 });
 
@@ -876,63 +859,6 @@ describe('discovery service', () => {
 });
 
 describe('read-only tools', () => {
-  it('names every app tool a call would run', () => {
-    expect(toolSlugs('COMPOSIO_SEARCH_TOOLS', {})).toEqual([]);
-    expect(toolSlugs('GMAIL_FETCH_EMAILS', {})).toEqual(['GMAIL_FETCH_EMAILS']);
-    expect(
-      toolSlugs('COMPOSIO_MULTI_EXECUTE_TOOL', {
-        tools: [{ tool_slug: 'A' }, { tool_slug: 'B' }],
-      }),
-    ).toEqual(['A', 'B']);
-    // A malformed call is refused rather than waved through.
-    expect(toolSlugs('COMPOSIO_MULTI_EXECUTE_TOOL', {})).toEqual(['']);
-  });
-
-  it('refuses Composio tools that can change things in read-only turns', async () => {
-    const execute = vi.fn(async () => ({ data: { ok: true }, error: null }));
-    const session = {
-      tools: async () =>
-        [
-          'COMPOSIO_SEARCH_TOOLS',
-          'COMPOSIO_MULTI_EXECUTE_TOOL',
-          'COMPOSIO_REMOTE_WORKBENCH',
-          'COMPOSIO_MANAGE_CONNECTIONS',
-        ].map((name) => ({
-          type: 'function',
-          function: { name, parameters: { type: 'object' } },
-        })),
-      execute,
-    } as unknown as Parameters<typeof composioTools>[0];
-    const tools = await composioTools(
-      session,
-      async () => {},
-      undefined,
-      undefined,
-      async (slug) => /_(FETCH|LIST|GET)_/.test(slug),
-    );
-    expect(tools.map((tool) => tool.name)).toEqual([
-      'COMPOSIO_SEARCH_TOOLS',
-      'COMPOSIO_MULTI_EXECUTE_TOOL',
-    ]);
-    const multi = tools[1];
-    const refused = (await multi.execute(
-      {
-        tools: [
-          { tool_slug: 'QUICKBOOKS_LIST_INVOICES', arguments: {} },
-          { tool_slug: 'QUICKBOOKS_CREATE_PAYMENT', arguments: {} },
-        ],
-      },
-      detachedContext(),
-    )) as { error: string };
-    expect(refused.error).toMatch(/read-only.*QUICKBOOKS_CREATE_PAYMENT/);
-    expect(execute).not.toHaveBeenCalled();
-    await multi.execute(
-      { tools: [{ tool_slug: 'QUICKBOOKS_LIST_INVOICES', arguments: {} }] },
-      detachedContext(),
-    );
-    expect(execute).toHaveBeenCalledTimes(1);
-  });
-
   it('gives a discovery turn only tools that read, and says so', async () => {
     const { db, store, workspace } = await testWorkspace();
     const runner = new ThreadRunner(db, 'owner');
@@ -997,7 +923,7 @@ describe('read-only tools', () => {
 });
 
 describe('discovery routes', () => {
-  async function routes(composioApiKey?: string) {
+  async function routes() {
     const { Platform } = await import('../src/server/platform.js');
     const { discoveryRoutes } =
       await import('../src/server/discovery/routes.js');
@@ -1008,57 +934,61 @@ describe('discovery routes', () => {
       baseUrl: 'https://unused.invalid/v1',
       voiceName: 'marin',
       slackUsers: [],
-      composioApiKey,
       typesafeApiKey: 'unused',
     });
     cleanup.push(() => platform.stop());
-    const account = (id: string, toolkit: string) => ({
-      id,
-      toolkit,
-      name: toolkit,
-      status: 'ACTIVE',
-      statusReason: null,
-      alias: null,
-      disabled: false,
-      createdAt: '2026-11-11T08:00:00.000Z',
-    });
-    const service = {
-      list: vi.fn(async () => [
-        account('ca_gmail', 'gmail'),
-        account('ca_qb', 'quickbooks'),
-      ]),
-      connect: vi.fn(),
-      disconnect: vi.fn(),
-    };
+    const account = (connector: string, name: string) =>
+      workspace.accounts.create(
+        workspace.ownerId,
+        { connector, name, config: {}, secret: 'x' },
+        [],
+      );
+    const gmail = await account('gmail', 'ana@example.com');
+    const mcp = await account('mcp', 'Tickets');
     vi.spyOn(platform.inbox, 'tick').mockResolvedValue(undefined);
-    const app = discoveryRoutes(platform, () => service);
+    const app = discoveryRoutes(platform);
     const put = (id: string, body: unknown) =>
       app.request(`/discovery/accounts/${id}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
-    return { app, put, platform, dot: (await workspace.dots())[0] };
+    return {
+      app,
+      put,
+      platform,
+      gmail,
+      mcp,
+      dot: (await workspace.dots())[0],
+    };
   }
 
   it('turns discovery on per account and reports whether Jev is configured', async () => {
-    const f = await routes('key');
-    const on = await f.put('ca_gmail', { dotId: f.dot.id, enabled: true });
+    const f = await routes();
+    const on = await f.put(f.gmail.id, { dotId: f.dot.id, enabled: true });
     expect(on.status).toBe(200);
-    // Apps are off by default, so the Dot could only read the item itself.
-    expect((await on.json()).warning).toMatch(/Connected apps/);
+    // The Dot has no grant on the account, so it could only read the item itself.
+    expect((await on.json()).warning).toMatch(/Use in this Dot/);
     const state = await (await f.app.request('/discovery')).json();
     expect(state.model).toEqual({ configured: true });
     expect(state.accounts).toEqual([
       expect.objectContaining({
-        accountId: 'ca_gmail',
-        toolkit: 'gmail',
+        accountId: f.gmail.id,
+        app: 'gmail',
         dotId: f.dot.id,
         enabled: true,
       }),
     ]);
+    // With a grant there is nothing to warn about.
+    await f.platform.connectors.grant(
+      f.platform.workspace.ownerId,
+      f.dot.id,
+      f.gmail.id,
+    );
+    const granted = await f.put(f.gmail.id, { dotId: f.dot.id, enabled: true });
+    expect((await granted.json()).warning).toBeUndefined();
     // Turning it off keeps the one source, disabled.
-    await f.put('ca_gmail', { dotId: f.dot.id, enabled: false });
+    await f.put(f.gmail.id, { dotId: f.dot.id, enabled: false });
     const after = await (await f.app.request('/discovery')).json();
     expect(after.accounts).toEqual([
       expect.objectContaining({ enabled: false }),
@@ -1068,15 +998,15 @@ describe('discovery routes', () => {
   });
 
   it('refuses apps it cannot read, unknown accounts and unknown Dots', async () => {
-    const f = await routes('key');
+    const f = await routes();
     expect(
-      (await f.put('ca_qb', { dotId: f.dot.id, enabled: true })).status,
+      (await f.put(f.mcp.id, { dotId: f.dot.id, enabled: true })).status,
     ).toBe(400);
     expect(
       (await f.put('ca_other', { dotId: f.dot.id, enabled: true })).status,
     ).toBe(404);
     expect(
-      (await f.put('ca_gmail', { dotId: 'nope', enabled: true })).status,
+      (await f.put(f.gmail.id, { dotId: 'nope', enabled: true })).status,
     ).toBe(400);
     expect(
       (
@@ -1103,7 +1033,7 @@ describe('discovery history routes', () => {
       embeddingBaseUrl: 'http://127.0.0.1:1/v1',
     });
     cleanup.push(() => platform.stop());
-    const app = discoveryRoutes(platform, () => undefined);
+    const app = discoveryRoutes(platform);
     const send = (method: string, path: string, body?: unknown) =>
       app.request(path, {
         method,

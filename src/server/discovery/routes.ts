@@ -1,11 +1,10 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
-  DISCOVERY_TOOLKITS,
-  type ComposioSourceConfig,
+  DISCOVERY_APPS,
+  type AccountSourceConfig,
   type DiscoveryState,
 } from '../../shared/inbox-types.js';
-import type { ComposioAccountService } from '../composio-accounts.js';
 import type { Platform } from '../platform.js';
 import { DISMISSALS_TO_QUIET, ProposalClosedError } from './proposals.js';
 
@@ -43,21 +42,18 @@ const settingsSchema = z
   .strict();
 
 /** Discovery settings per connected account, and starting investigations. */
-export function discoveryRoutes(
-  platform: Platform,
-  accounts: () => ComposioAccountService | undefined,
-) {
+export function discoveryRoutes(platform: Platform) {
   const app = new Hono();
   const store = platform.inbox.store;
   app.get('/discovery', async (c) => {
     const { config } = platform;
     const state: DiscoveryState = {
-      accounts: (await store.composioSources()).map((source) => {
-        const value = source.config as ComposioSourceConfig;
+      accounts: (await store.accountSources()).map((source) => {
+        const value = source.config as AccountSourceConfig;
         return {
           sourceId: source.id,
           accountId: value.accountId,
-          toolkit: value.toolkit,
+          app: value.app,
           dotId: value.dotId,
           enabled: source.enabled,
           intervalSeconds: source.intervalSeconds,
@@ -142,43 +138,25 @@ export function discoveryRoutes(
       .safeParse(await c.req.json().catch(() => null));
     if (!body.success || !/^[A-Za-z0-9_-]{1,100}$/.test(accountId))
       return c.json({ error: 'Choose a Dot to look into what it finds.' }, 400);
-    const service = accounts();
-    if (!service)
-      return c.json(
-        {
-          error:
-            'Connected apps are not set up. Add COMPOSIO_API_KEY to .env and restart OpenDots.',
-        },
-        422,
-      );
     const dot = await platform.workspace.dot(body.data.dotId);
     if (!dot) return c.json({ error: 'Dot not found.' }, 400);
-    let account;
-    try {
-      account = (await service.list(c.req.raw.signal)).find(
-        (item) => item.id === accountId,
-      );
-    } catch {
-      return c.json(
-        {
-          error: 'Composio could not complete the request. Try again shortly.',
-        },
-        502,
-      );
-    }
+    // Discovery reads the owner's accounts, as the owner.
+    const userId = platform.workspace.ownerId;
+    const account = await platform.connectors.accounts.get(userId, accountId);
     if (!account) return c.json({ error: 'Account not found.' }, 404);
-    const toolkit = DISCOVERY_TOOLKITS[account.toolkit];
-    if (!toolkit)
+    const app = DISCOVERY_APPS[account.connector];
+    if (!app)
       return c.json(
         { error: `Discovery cannot read ${account.name} yet.` },
         400,
       );
-    const config: ComposioSourceConfig = {
+    const config: AccountSourceConfig = {
       dotId: dot.id,
+      userId,
       accountId: account.id,
-      toolkit: account.toolkit,
+      app: account.connector,
     };
-    const existing = await store.composioSource(account.id);
+    const existing = await store.accountSource(account.id);
     const source = existing
       ? (await store.update(existing.id, {
           config,
@@ -189,9 +167,9 @@ export function discoveryRoutes(
         }))!
       : (
           await store.create({
-            name: `${toolkit.name}${account.alias ? ` (${account.alias})` : ''}`,
-            kind: toolkit.kind,
-            type: 'composio',
+            name: `${app.name} (${account.name})`,
+            kind: app.kind,
+            type: 'account',
             config,
             // Discovery notifies when a Dot has something to say, not per item.
             notify: 'off',
@@ -204,14 +182,15 @@ export function discoveryRoutes(
       await store.pollNow(source.id);
       void platform.inbox.tick();
     }
-    const settings = await platform.store.settings();
+    const granted = (await platform.connectors.grants(dot.id)).some(
+      (grant) => grant.accountId === account.id,
+    );
     return c.json({
       sourceId: source.id,
-      // Without app access the Dot cannot check other apps while investigating.
-      warning:
-        !settings.appsAllowed || !dot.appsAllowed
-          ? `${dot.name} cannot use connected apps yet, so it can only read the item itself. Turn on Connected apps in Settings and in ${dot.name}’s settings.`
-          : undefined,
+      // Without a grant the Dot cannot look further while investigating.
+      warning: granted
+        ? undefined
+        : `${dot.name} cannot use ${account.name} yet, so it can only read the item itself. Turn on "Use in this Dot" for it in ${dot.name}’s settings.`,
     });
   });
   /** Proposals, most important first; `?all=1` includes decided ones. */

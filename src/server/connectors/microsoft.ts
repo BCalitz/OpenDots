@@ -79,6 +79,8 @@ interface MailMessage {
   receivedDateTime?: string;
   bodyPreview?: string;
   isRead?: boolean;
+  importance?: string;
+  webLink?: string;
   body?: { content?: string };
 }
 const mail = (message: MailMessage) => ({
@@ -89,9 +91,11 @@ const mail = (message: MailMessage) => ({
   received: message.receivedDateTime,
   snippet: message.bodyPreview,
   unread: message.isRead === false,
+  importance: message.importance,
+  link: message.webLink,
 });
 const MAIL_FIELDS =
-  '$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead';
+  '$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,importance,webLink';
 
 const outlookTools = [
   tool({
@@ -247,6 +251,7 @@ interface ChatMessage {
   from?: { user?: { displayName?: string } };
   body?: { content?: string };
   deletedDateTime?: string | null;
+  messageType?: string;
 }
 const chatMessage = (message: ChatMessage) => ({
   id: message.id,
@@ -255,7 +260,14 @@ const chatMessage = (message: ChatMessage) => ({
   text: plain(message.body?.content ?? '').slice(0, 2000),
 });
 const messages = (list: { value?: ChatMessage[] }) =>
-  (list.value ?? []).filter((item) => !item.deletedDateTime).map(chatMessage);
+  (list.value ?? [])
+    // System events such as "member added" are not messages.
+    .filter(
+      (item) =>
+        !item.deletedDateTime &&
+        (!item.messageType || item.messageType === 'message'),
+    )
+    .map(chatMessage);
 const text = z.string().min(1).max(10_000);
 
 const teamsTools = [
@@ -317,15 +329,23 @@ const teamsTools = [
     input: z.object({ limit }),
     async run({ limit }, call) {
       const list = (await call.json(
-        `${GRAPH}/me/chats?$top=${Math.min(limit, 50)}&$orderby=lastMessagePreview/createdDateTime desc`,
+        `${GRAPH}/me/chats?$top=${Math.min(limit, 50)}&$expand=lastMessagePreview&$orderby=lastMessagePreview/createdDateTime desc`,
       )) as {
-        value?: { id: string; topic?: string | null; chatType?: string }[];
+        value?: {
+          id: string;
+          topic?: string | null;
+          chatType?: string;
+          lastMessagePreview?: { createdDateTime?: string };
+        }[];
       };
-      return (list.value ?? []).map(({ id, topic, chatType }) => ({
-        id,
-        topic: topic ?? undefined,
-        type: chatType,
-      }));
+      return (list.value ?? []).map(
+        ({ id, topic, chatType, lastMessagePreview }) => ({
+          id,
+          topic: topic ?? undefined,
+          type: chatType,
+          updated: lastMessagePreview?.createdDateTime,
+        }),
+      );
     },
   }),
   tool({

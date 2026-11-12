@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Calendar,
-  FileSpreadsheet,
-  HardDrive,
-  Link2,
   Mail,
   MessageSquare,
   Plug,
@@ -12,60 +8,35 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import type { ConnectedAccount, Dot } from '../shared/types';
+import type { Account } from '../shared/connection-types';
+import type { Dot } from '../shared/types';
 import {
-  DISCOVERY_TOOLKITS,
+  DISCOVERY_APPS,
   type DiscoveryAccountView,
   type DiscoveryState,
 } from '../shared/inbox-types';
 import { api } from './api';
 import { DiscoverySettingsForm } from './DiscoverySettings';
 
-/** Common apps, offered as one-click buttons. Any Composio app slug works. */
-const SUGGESTED = [
-  { toolkit: 'gmail', name: 'Gmail', icon: Mail },
-  { toolkit: 'outlook', name: 'Outlook', icon: Mail },
-  { toolkit: 'googlecalendar', name: 'Google Calendar', icon: Calendar },
-  { toolkit: 'quickbooks', name: 'QuickBooks', icon: FileSpreadsheet },
-  { toolkit: 'microsoft_teams', name: 'Microsoft Teams', icon: MessageSquare },
-  { toolkit: 'googledrive', name: 'Google Drive', icon: HardDrive },
-];
-const statusText: Record<string, string> = {
-  ACTIVE: 'Connected',
-  INITIALIZING: 'Waiting for sign-in',
-  INITIATED: 'Waiting for sign-in',
-  FAILED: 'Sign-in failed',
-  EXPIRED: 'Sign-in expired',
-  INACTIVE: 'Turned off',
-};
-const statusClass: Record<string, string> = {
-  ACTIVE: 'completed',
-  INITIALIZING: 'running',
-  INITIATED: 'running',
-  FAILED: 'failed',
-  EXPIRED: 'failed',
-  INACTIVE: 'paused',
-};
-
-function iconFor(toolkit: string) {
-  return SUGGESTED.find((app) => app.toolkit === toolkit)?.icon ?? Plug;
-}
-
-/** Apps connected for the owner through Composio. */
-export function AccountsView({
-  configured,
-  dots,
-}: {
+interface SignInProvider {
+  kind: string;
+  label: string;
   configured: boolean;
-  dots: Dot[];
-}) {
-  const [accounts, setAccounts] = useState<ConnectedAccount[]>();
+}
+const ICONS: Record<string, typeof Mail> = {
+  gmail: Mail,
+  outlook: Mail,
+  teams: MessageSquare,
+};
+
+/** Every account the owner has connected, and what discovery does with them. */
+export function AccountsView({ dots }: { dots: Dot[] }) {
+  const [accounts, setAccounts] = useState<Account[]>();
+  const [providers, setProviders] = useState<SignInProvider[]>([]);
   const [discovery, setDiscovery] = useState<DiscoveryState>();
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
-  const [custom, setCustom] = useState('');
-  const [waiting, setWaiting] = useState<string>();
   const loadDiscovery = useCallback(
     () =>
       api<DiscoveryState>('/discovery')
@@ -75,73 +46,43 @@ export function AccountsView({
   );
   const load = useCallback(
     () =>
-      api<ConnectedAccount[]>('/composio/accounts')
-        .then((value) => {
-          setAccounts(value);
+      Promise.all([
+        api<Account[]>('/accounts'),
+        api<SignInProvider[]>('/accounts/providers'),
+      ])
+        .then(([list, signIn]) => {
+          setAccounts(list);
+          setProviders(signIn);
           setError('');
-          return value;
         })
-        .catch((e) => {
-          setError(e instanceof Error ? e.message : String(e));
-          return undefined;
-        }),
+        .catch((e) => setError(e instanceof Error ? e.message : String(e))),
     [],
   );
   useEffect(() => {
-    if (!configured) return;
     void load();
     void loadDiscovery();
     const onFocus = () => void load();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [configured, load, loadDiscovery]);
-  // After opening a sign-in page, check back until the account shows up.
-  useEffect(() => {
-    if (!waiting) return;
-    const started = Date.now();
-    const timer = setInterval(() => {
-      void load().then((value) => {
-        const done = value?.some(
-          (account) =>
-            account.toolkit === waiting && account.status === 'ACTIVE',
-        );
-        if (done || Date.now() - started > 3 * 60_000) setWaiting(undefined);
-      });
-    }, 3000);
-    return () => clearInterval(timer);
-  }, [waiting, load]);
+  }, [load, loadDiscovery]);
 
-  const connect = async (toolkit: string) => {
-    const slug = toolkit.trim().toLowerCase();
-    if (!slug) return;
-    // Open the tab now, while the click still counts, so popup blockers allow it.
-    const tab = window.open('', '_blank');
-    setBusy(slug);
+  // Signing in happens on the service's own page and returns to OpenDots.
+  const connect = async (kind: string) => {
+    setBusy(kind);
     try {
-      const { redirectUrl } = await api<{ redirectUrl: string; name: string }>(
-        '/composio/accounts',
+      const { url } = await api<{ url: string }>(
+        `/accounts/sign-in/${kind}`,
         'POST',
-        { toolkit: slug },
+        {},
       );
-      const url = new URL(redirectUrl);
-      if (url.protocol !== 'https:')
-        throw new Error('The sign-in link was not a secure address.');
-      if (tab) {
-        tab.opener = null;
-        tab.location.href = url.href;
-      } else window.location.assign(url.href);
-      setWaiting(slug);
-      setCustom('');
-      setError('');
+      window.location.assign(url);
     } catch (e) {
-      tab?.close();
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
       setBusy('');
     }
   };
   const setDiscoveryFor = async (
-    account: ConnectedAccount,
+    account: Account,
     value: { enabled: boolean; dotId: string },
   ) => {
     setBusy(account.id);
@@ -160,19 +101,16 @@ export function AccountsView({
       setBusy('');
     }
   };
-  const disconnect = async (account: ConnectedAccount) => {
+  const disconnect = async (account: Account) => {
     if (
       !window.confirm(
-        `Disconnect ${account.name}? Dots will lose access until you connect it again.`,
+        `Remove ${account.name}? Every Dot that uses it loses access.`,
       )
     )
       return;
     setBusy(account.id);
     try {
-      await api(
-        `/composio/accounts/${encodeURIComponent(account.id)}`,
-        'DELETE',
-      );
+      await api(`/accounts/${encodeURIComponent(account.id)}`, 'DELETE');
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -181,28 +119,6 @@ export function AccountsView({
     }
   };
 
-  if (!configured)
-    return (
-      <main className="main-content inbox">
-        <div className="page-heading">
-          <div>
-            <span className="eyebrow">YOUR APPS</span>
-            <h1>Accounts</h1>
-            <p>
-              Connect mail, calendars, accounting and other apps so your Dots
-              can work with them. Add <code>COMPOSIO_API_KEY</code> to{' '}
-              <code>.env</code> and restart OpenDots to turn this on.
-            </p>
-          </div>
-        </div>
-      </main>
-    );
-
-  const connected = new Set(
-    accounts
-      ?.filter((account) => account.status === 'ACTIVE')
-      .map((account) => account.toolkit),
-  );
   return (
     <main className="main-content inbox">
       <div className="page-heading">
@@ -210,9 +126,9 @@ export function AccountsView({
           <span className="eyebrow">YOUR APPS</span>
           <h1>Accounts</h1>
           <p>
-            Apps you have signed in to through Composio. A Dot can use them once
-            Connected apps is on in Settings and in that Dot’s settings.
-            Sign-ins are kept by Composio, not on this server.
+            Services you have connected, such as Gmail, Outlook, Teams or an MCP
+            server. Choose which Dots may use each one, and what they may do
+            with it, in the Dot’s settings under Connections.
           </p>
         </div>
         <button
@@ -250,53 +166,29 @@ export function AccountsView({
           )}
         </p>
       )}
-      {waiting && (
-        <p className="notice" role="status">
-          Finish signing in on the page that opened. This list updates when
-          you’re done.
-        </p>
-      )}
 
       <h2 className="insight-subhead">Connected</h2>
       <div className="inbox-sources">
         {accounts?.map((account) => {
-          const Icon = iconFor(account.toolkit);
+          const Icon = ICONS[account.connector] ?? Plug;
           return (
             <article
               key={account.id}
-              className={`inbox-source-card ${account.status === 'ACTIVE' && !account.disabled ? '' : 'off'}`}
+              className={`inbox-source-card ${account.error ? 'off' : ''}`}
             >
               <header>
                 <Icon size={16} aria-hidden />
                 <strong>{account.name}</strong>
                 <small>
-                  {account.alias ? `${account.alias} · ` : ''}
-                  {account.toolkit} · added{' '}
+                  {account.detail} · added{' '}
                   {new Date(account.createdAt).toLocaleDateString()}
                 </small>
               </header>
               <div className="source-controls">
-                <span
-                  className={`status ${statusClass[account.status] ?? ''}`}
-                  title={account.statusReason ?? undefined}
-                >
-                  <span />
-                  {statusText[account.status] ?? account.status}
-                </span>
                 <span className="account-actions">
-                  {account.status !== 'ACTIVE' && (
-                    <button
-                      className="text-button"
-                      disabled={!!busy}
-                      onClick={() => void connect(account.toolkit)}
-                    >
-                      <Link2 size={14} />
-                      Reconnect
-                    </button>
-                  )}
                   <button
                     className="icon-button"
-                    aria-label={`Disconnect ${account.name}`}
+                    aria-label={`Remove ${account.name}`}
                     disabled={!!busy}
                     onClick={() => void disconnect(account)}
                   >
@@ -304,77 +196,65 @@ export function AccountsView({
                   </button>
                 </span>
               </div>
-              {DISCOVERY_TOOLKITS[account.toolkit] &&
-                account.status === 'ACTIVE' && (
-                  <DiscoveryControls
-                    account={account}
-                    dots={dots}
-                    current={discovery?.accounts.find(
-                      (item) => item.accountId === account.id,
-                    )}
-                    disabled={!!busy || !discovery}
-                    onChange={(value) => void setDiscoveryFor(account, value)}
-                  />
-                )}
+              {account.error && (
+                <p className="chat-error" role="alert">
+                  {account.error}
+                </p>
+              )}
+              {DISCOVERY_APPS[account.connector] && !account.error && (
+                <DiscoveryControls
+                  account={account}
+                  dots={dots}
+                  current={discovery?.accounts.find(
+                    (item) => item.accountId === account.id,
+                  )}
+                  disabled={!!busy || !discovery}
+                  onChange={(value) => void setDiscoveryFor(account, value)}
+                />
+              )}
             </article>
           );
         })}
         {accounts && !accounts.length && (
           <p className="muted">
-            Nothing connected yet. Pick an app below to sign in.
+            Nothing connected yet. Pick a service below to sign in.
           </p>
         )}
         {!accounts && !error && <p className="muted">Loading…</p>}
       </div>
 
-      <h2 className="insight-subhead">Connect an app</h2>
+      <h2 className="insight-subhead">Connect a service</h2>
       <div className="account-suggestions">
-        {SUGGESTED.map((app) => (
-          <button
-            key={app.toolkit}
-            className="account-suggestion"
-            disabled={!!busy}
-            onClick={() => void connect(app.toolkit)}
-          >
-            <app.icon size={16} aria-hidden />
-            <span>{app.name}</span>
-            {connected.has(app.toolkit) ? (
-              <small>Add another</small>
-            ) : busy === app.toolkit ? (
-              <small>Opening…</small>
-            ) : (
-              <Plus size={14} aria-hidden />
-            )}
-          </button>
-        ))}
+        {providers.map((provider) => {
+          const Icon = ICONS[provider.kind] ?? Plug;
+          return (
+            <button
+              key={provider.kind}
+              className="account-suggestion"
+              disabled={!!busy || !provider.configured}
+              title={
+                provider.configured
+                  ? undefined
+                  : 'Not set up on this server. See docs/CONNECTIONS.md.'
+              }
+              onClick={() => void connect(provider.kind)}
+            >
+              <Icon size={16} aria-hidden />
+              <span>{provider.label}</span>
+              {busy === provider.kind ? (
+                <small>Opening…</small>
+              ) : provider.configured ? (
+                <Plus size={14} aria-hidden />
+              ) : (
+                <small>Not set up</small>
+              )}
+            </button>
+          );
+        })}
       </div>
-      <form
-        className="account-custom"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void connect(custom);
-        }}
-      >
-        <label className="field-label" htmlFor="account-toolkit">
-          Another app
-        </label>
-        <div>
-          <input
-            id="account-toolkit"
-            value={custom}
-            pattern="[A-Za-z0-9_]+"
-            placeholder="slack, hubspot, xero…"
-            aria-describedby="account-toolkit-help"
-            onChange={(event) => setCustom(event.target.value)}
-          />
-          <button className="primary" disabled={!custom.trim() || !!busy}>
-            Connect
-          </button>
-        </div>
-        <p className="muted" id="account-toolkit-help">
-          Use the app’s Composio name, as listed at composio.dev/toolkits.
-        </p>
-      </form>
+      <p className="muted">
+        To connect an MCP server, open a Dot’s settings and use Connections.
+      </p>
       {discovery && (
         <DiscoverySettingsForm state={discovery} onSaved={loadDiscovery} />
       )}
@@ -390,7 +270,7 @@ function DiscoveryControls({
   disabled,
   onChange,
 }: {
-  account: ConnectedAccount;
+  account: Account;
   dots: Dot[];
   current?: DiscoveryAccountView;
   disabled: boolean;

@@ -18,7 +18,6 @@ const defaults: Settings = {
   paused: false,
   researchAllowed: true,
   memoryAllowed: true,
-  appsAllowed: false,
 };
 const TASK = sql.raw(
   'id, prompt, status, interval_seconds, next_run_at, created_at, updated_at, error, lease, lease_until',
@@ -62,8 +61,7 @@ export class Store {
       if (
         (!previous.paused && settings.paused) ||
         (previous.researchAllowed && !settings.researchAllowed) ||
-        (previous.memoryAllowed && !settings.memoryAllowed) ||
-        (previous.appsAllowed && !settings.appsAllowed)
+        (previous.memoryAllowed && !settings.memoryAllowed)
       ) {
         const running = (await this.tasks()).filter(
           (t) => t.status === 'running',

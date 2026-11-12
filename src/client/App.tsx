@@ -725,10 +725,7 @@ export function App() {
             }}
           />
         ) : view === 'accounts' ? (
-          <AccountsView
-            configured={workspace.setup.composio}
-            dots={workspace.dots}
-          />
+          <AccountsView dots={workspace.dots} />
         ) : view === 'space' ? (
           <SpaceWorkspace
             key={spaceId}

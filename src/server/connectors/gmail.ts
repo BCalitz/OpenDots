@@ -52,6 +52,7 @@ interface Message {
   id: string;
   threadId: string;
   snippet?: string;
+  internalDate?: string;
   labelIds?: string[];
   payload?: Part & { headers?: { name: string; value: string }[] };
 }
@@ -68,6 +69,8 @@ const summary = (message: Message) => ({
   date: headerOf(message, 'Date'),
   snippet: message.snippet,
   unread: message.labelIds?.includes('UNREAD') ?? false,
+  important: message.labelIds?.includes('IMPORTANT') ?? false,
+  at: message.internalDate ? Number(message.internalDate) : undefined,
 });
 const plainText = (part: Part | undefined): string => {
   if (!part) return '';

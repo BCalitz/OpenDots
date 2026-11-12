@@ -161,8 +161,13 @@ async function setup(
   const { source } = await store.create({
     name: 'Gmail',
     kind: 'mail',
-    type: 'composio',
-    config: { dotId: 'books', accountId: 'ca_gmail', toolkit: 'gmail' },
+    type: 'account',
+    config: {
+      dotId: 'books',
+      userId: 'owner',
+      accountId: 'ca_gmail',
+      app: 'gmail',
+    },
     notify: 'off',
     intervalSeconds: 300,
   });

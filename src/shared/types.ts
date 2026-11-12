@@ -11,7 +11,6 @@ export interface Settings {
   paused: boolean;
   researchAllowed: boolean;
   memoryAllowed: boolean;
-  appsAllowed: boolean;
 }
 export interface Task {
   id: string;
@@ -85,10 +84,6 @@ export interface Dot {
   instructions: string;
   researchAllowed: boolean;
   memoryAllowed: boolean;
-  appsAllowed: boolean;
-  composioToolkits: string[];
-  composioSessionId?: string | null;
-  composioPolicyHash?: string | null;
   createdAt: number;
   /** Tokens per UTC month; at the cap the Dot stops starting new turns. */
   monthlyTokenCap?: number | null;
@@ -123,21 +118,8 @@ export interface SetupStatus {
   model: boolean;
   browser: boolean;
   voice: boolean;
-  composio: boolean;
   slack: string;
   missing: string[];
-}
-/** An app account connected through Composio, without its credentials. */
-export interface ConnectedAccount {
-  id: string;
-  /** Composio toolkit slug, for example gmail or quickbooks. */
-  toolkit: string;
-  name: string;
-  status: string;
-  statusReason: string | null;
-  alias: string | null;
-  disabled: boolean;
-  createdAt: string;
 }
 export interface WorkspaceState {
   spaces: Space[];

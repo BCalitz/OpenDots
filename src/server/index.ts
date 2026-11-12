@@ -53,7 +53,6 @@ const config: PlatformConfig = {
   parallelApiKey: process.env.PARALLEL_API_KEY,
   browserUrl: process.env.BROWSER_URL,
   browserSecret: process.env.BROWSER_SECRET,
-  composioApiKey: process.env.COMPOSIO_API_KEY || undefined,
   typesafeApiKey: process.env.TYPESAFE_API_KEY || undefined,
   discoveryThreshold: discoveryThresholdFromEnv(process.env),
   embeddingBaseUrl: process.env.EMBEDDING_BASE_URL || undefined,

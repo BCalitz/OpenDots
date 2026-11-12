@@ -1,8 +1,8 @@
 import {
-  DISCOVERY_TOOLKITS,
+  DISCOVERY_APPS,
   URGENCIES,
   type Asked,
-  type ComposioSourceConfig,
+  type AccountSourceConfig,
   type DiscoverySettings,
   type FindingView,
   type InboxEventView,
@@ -176,8 +176,6 @@ export class DiscoveryService {
       dotName?: (dotId: string) => Promise<string | undefined>;
       /** Whether pushes may quote item text (PUSH_PREVIEWS). */
       previews?: () => boolean;
-      /** Whether connected apps are allowed at all (Settings). */
-      appsAllowed?: () => Promise<boolean>;
       /** Lowest confidence that still counts as needing attention. */
       threshold?: number;
       /** How far back the same sender counts as history. */
@@ -207,7 +205,7 @@ export class DiscoveryService {
   readonly listener = (batch: NewEvents) => {
     if (!batch.events.length) return;
     const embedder = this.options.embedder?.();
-    const judged = batch.source.type === 'composio';
+    const judged = batch.source.type === 'account';
     if (!embedder && !judged) return;
     const work = this.classifying.then(async () => {
       if (embedder) await this.embed(embedder, batch.events);
@@ -394,8 +392,8 @@ export class DiscoveryService {
   }
 
   private async judge(batch: NewEvents) {
-    const config = batch.source.config as ComposioSourceConfig;
-    const app = DISCOVERY_TOOLKITS[config.toolkit]?.name ?? config.toolkit;
+    const config = batch.source.config as AccountSourceConfig;
+    const app = DISCOVERY_APPS[config.app]?.name ?? config.app;
     const flagged: FindingView[] = [];
     for (const event of batch.events.slice(0, this.options.maxJudged ?? 25)) {
       if (this.controller.signal.aborted) return;
@@ -459,7 +457,7 @@ export class DiscoveryService {
     event: InboxEventView,
     verdict: Verdict,
     judgedBy: string,
-    context: { config: ComposioSourceConfig; settings: DiscoverySettings },
+    context: { config: AccountSourceConfig; settings: DiscoverySettings },
   ) {
     const rejected = await this.store.discovery.rejected(event.id);
     const related = verdict.related.filter(
@@ -505,9 +503,7 @@ export class DiscoveryService {
         (!!referenced?.finding?.attention &&
           asksSomething &&
           referenced.entry.resolves < YES));
-    const canAct =
-      (await (this.options.appsAllowed?.() ?? Promise.resolve(false))) &&
-      context.settings.allowedApps.includes(context.config.toolkit);
+    const canAct = context.settings.allowedApps.includes(context.config.app);
     const finding = await this.store.saveFinding({
       eventId: event.id,
       attention,
@@ -688,9 +684,9 @@ export class DiscoveryService {
     const event = finding && (await this.store.event(finding.eventId));
     if (!finding?.dotId || !event || this.controller.signal.aborted) return;
     const source = await this.store.source(event.sourceId);
-    const toolkit =
-      source?.type === 'composio'
-        ? (source.config as ComposioSourceConfig).toolkit
+    const app =
+      source?.type === 'account'
+        ? (source.config as AccountSourceConfig).app
         : undefined;
     const referencedEvent = finding.referencedEventId
       ? await this.store.event(finding.referencedEventId)
@@ -707,12 +703,11 @@ export class DiscoveryService {
       : undefined;
     await this.store.updateFinding(finding.id, { state: 'investigating' });
     try {
-      const app =
-        (toolkit && DISCOVERY_TOOLKITS[toolkit]?.name) || event.sourceName;
+      const appName = (app && DISCOVERY_APPS[app]?.name) || event.sourceName;
       const { threadId, reply } = await this.options.investigate(
         {
           dotId: finding.dotId,
-          app,
+          app: appName,
           event,
           finding,
           referencedEvent,
@@ -752,7 +747,7 @@ export class DiscoveryService {
       const proposal = await this.options.proposals?.offer(done, event, {
         threadId,
         reply,
-        app,
+        app: appName,
         sender: address(event.from),
       });
       await this.deliver(done, event, proposal);
