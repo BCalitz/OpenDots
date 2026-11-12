@@ -13,12 +13,14 @@ import type {
   InboxEventView,
   InboxNotify,
   InboxSourceView,
+  LinksState,
   McpSourceConfig,
   SourceConfig,
   SourceKind,
   SourceType,
 } from '../../shared/inbox-types.js';
 import type { InboxEvent } from './source.js';
+import { extractTags } from './tags.js';
 
 const MAX_EVENTS_PER_SOURCE = 2000;
 const MAX_TEXT = 2000;
@@ -162,6 +164,8 @@ export class InboxStore {
         sql`DELETE FROM discovery_findings WHERE event_id IN (SELECT id FROM inbox_events WHERE source_id=${id})`,
       );
       await this.db.run(sql`DELETE FROM inbox_events WHERE source_id=${id}`);
+      // Removing a source removes what was learned from it.
+      await this.db.run(sql`DELETE FROM event_tags WHERE source_id=${id}`);
       return (
         (await this.db.run(sql`DELETE FROM inbox_sources WHERE id=${id}`)) > 0
       );
@@ -246,7 +250,17 @@ export class InboxStore {
         const changes = await this.db.run(
           sql`INSERT INTO inbox_events (id, source_id, external_id, kind, title, summary, priority, sender, url, payload, occurred_at, received_at) VALUES (${id}, ${event.sourceId}, ${clip(event.externalId, 300)}, ${clip(event.kind, 80)}, ${clip(event.title || '(untitled)', 300)}, ${clip(event.summary ?? '')}, ${event.priority ?? 'normal'}, ${event.from ? clip(event.from, 200) : null}, ${url}, ${clip(payload, 50_000)}, ${event.occurredAt}, ${now}) ON CONFLICT (source_id, external_id) DO NOTHING`,
         );
-        if (changes) inserted.push(id);
+        if (changes) {
+          inserted.push(id);
+          await this.tag({
+            id,
+            sourceId: event.sourceId,
+            title: event.title,
+            summary: event.summary,
+            from: event.from,
+            occurredAt: event.occurredAt,
+          });
+        }
       }
       for (const sourceId of new Set(events.map((event) => event.sourceId)))
         await this.db.run(
@@ -262,6 +276,65 @@ export class InboxStore {
       if (event) views.push(event);
     }
     return views;
+  }
+  /** Records an item's tags. They outlive the item itself. */
+  private async tag(item: {
+    id: string;
+    sourceId: string;
+    title: string;
+    summary?: string;
+    from?: string | null;
+    occurredAt: number;
+  }) {
+    for (const tag of extractTags(item))
+      await this.db.run(
+        sql`INSERT INTO event_tags VALUES (${item.id}, ${item.sourceId}, ${tag.kind}, ${tag.normalized}, ${tag.value}, ${item.occurredAt}) ON CONFLICT DO NOTHING`,
+      );
+  }
+  /** Tags stored items that have none, such as ones from before tags. */
+  async backfillTags() {
+    const rows = await this.db.rows<{
+      id: string;
+      sourceId: string;
+      title: string;
+      summary: string;
+      from: string | null;
+      occurredAt: number;
+    }>(
+      sql`SELECT e.id, e.source_id, e.title, e.summary, e.sender AS "from", e.occurred_at FROM inbox_events e WHERE NOT EXISTS (SELECT 1 FROM event_tags t WHERE t.event_id=e.id)`,
+    );
+    for (const row of rows) await this.tag(row);
+    return rows.length;
+  }
+  /**
+   * Items from the last `days` and the tags they carry, plus tags of one
+   * kind spelled alike (trigram similarity), for the links view.
+   */
+  async links(days = 90, now = Date.now()): Promise<LinksState> {
+    const since = now - days * 86_400_000;
+    const items = await this.db.rows<LinksState['items'][number]>(
+      sql`SELECT ids.event_id AS id, ids.source_id, COALESCE(s.name, 'Removed source') AS source_name, s.kind AS source_kind, e.title, e.sender AS "from", ids.occurred_at, COALESCE(f.attention, false) AS flagged
+        FROM (SELECT DISTINCT ON (event_id) event_id, source_id, occurred_at FROM event_tags WHERE occurred_at>=${since} ORDER BY event_id) ids
+        LEFT JOIN inbox_events e ON e.id=ids.event_id
+        LEFT JOIN inbox_sources s ON s.id=ids.source_id
+        LEFT JOIN discovery_findings f ON f.event_id=ids.event_id
+        ORDER BY ids.occurred_at DESC LIMIT 400`,
+    );
+    const ids = items.map((item) => item.id);
+    if (!ids.length) return { items: [], tags: [], similar: [] };
+    const tags = await this.db.rows<LinksState['tags'][number]>(
+      sql`SELECT kind, normalized, (array_agg(value ORDER BY occurred_at))[1] AS value, array_agg(DISTINCT event_id) AS item_ids
+        FROM event_tags WHERE event_id = ANY(${ids}) GROUP BY kind, normalized
+        ORDER BY count(DISTINCT event_id) DESC, kind, normalized`,
+    );
+    const similar = await this.db.rows<LinksState['similar'][number]>(
+      sql`WITH keys AS (SELECT DISTINCT kind, normalized FROM event_tags WHERE event_id = ANY(${ids}))
+        SELECT a.kind, a.normalized AS a, b.normalized AS b, round(public.similarity(a.normalized, b.normalized)::numeric, 2) AS similarity
+        FROM keys a JOIN keys b ON a.kind=b.kind AND a.normalized<b.normalized
+        WHERE a.kind IN ('invoice', 'order', 'person') AND public.similarity(a.normalized, b.normalized)>=0.4
+        ORDER BY similarity DESC LIMIT 100`,
+    );
+    return { items, tags, similar };
   }
   private async toEvent({
     findingId,

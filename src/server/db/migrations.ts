@@ -89,6 +89,17 @@ CREATE TABLE conv_events(thread_id TEXT NOT NULL, run_id TEXT NOT NULL, seq INTE
 CREATE INDEX conv_events_run ON conv_events(run_id, seq);
 `,
   },
+  {
+    version: 2,
+    name: 'event tags',
+    sql: `
+-- Identifiers, people and companies found in each inbox item. Never pruned
+-- with inbox_events, so links can reach back years.
+CREATE TABLE event_tags(event_id TEXT NOT NULL, source_id TEXT NOT NULL, kind TEXT NOT NULL, normalized TEXT NOT NULL, value TEXT NOT NULL, occurred_at BIGINT NOT NULL, PRIMARY KEY(event_id, kind, normalized));
+CREATE INDEX event_tags_key ON event_tags(kind, normalized);
+CREATE INDEX event_tags_trgm ON event_tags USING gin (normalized public.gin_trgm_ops);
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

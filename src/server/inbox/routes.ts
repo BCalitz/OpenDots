@@ -93,6 +93,16 @@ export function inboxRoutes(platform: Platform) {
       }),
     });
   });
+  app.get('/inbox/links', async (c) => {
+    const days = z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3650)
+      .catch(90)
+      .parse(c.req.query('days') ?? 90);
+    return c.json(await store.links(days));
+  });
   app.post('/inbox/sources', async (c) => {
     const parsed = createSource.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success)

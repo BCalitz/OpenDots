@@ -106,6 +106,10 @@ Set `TYPESAFE_API_KEY` to turn discovery on — get a key from [typesafe.ai](htt
 
 Items are untrusted data: Jev and the investigating Dot are both told never to follow instructions inside them, and claims such as "payment made" are treated as claims until another source confirms them. Discovery does not change the Inbox notification setting of other sources; discovery sources notify when a Dot has something to say, not per item.
 
+### Links between items
+
+Each new inbox item is scanned for invoice and order numbers, ticket keys, amounts, email addresses, company domains and sender names. Spellings of one identifier share a key (`INV-2041`, `inv 2041` and `Invoice #2041`), and tags are kept after the item itself is pruned. The Inbox **Links** tab shows items on a timeline, one lane per source; pick a tag to join the items that carry it, and tags spelled alike (`INV-2041` and `INV-2014`) join with a dashed line, since they may be the same thing or a typo. This is code only: no model call. To try it with made-up items, run `npm run seed-demo`; `npm run seed-demo -- --remove` takes them out again.
+
 ## Persistent Dot computers
 
 For a separate browser, persistent files, and optional shell for each specialist, follow [Computer setup](COMPUTERS.md). This uses pinned OpenBot computer/supervisor services and per-Dot permissions. Parallel research tools remain available alongside configured computer tools. With the browser provider selected, Dots use their computer tools in place of the read-only public-page tool; enable each Dot's required capabilities before use.

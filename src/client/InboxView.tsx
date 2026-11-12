@@ -7,6 +7,8 @@ import {
   Copy,
   Inbox,
   KeyRound,
+  Link2,
+  List,
   Mail,
   MessageSquare,
   Plus,
@@ -27,6 +29,7 @@ import type {
   SourceKind,
 } from '../shared/inbox-types';
 import { api } from './api';
+import { InboxLinks } from './InboxLinks';
 import { relative } from './TaskPresentation';
 
 const kindIcon = {
@@ -78,6 +81,7 @@ export function InboxView({
     secret: string;
   }>();
   const [showDismissed, setShowDismissed] = useState(false);
+  const [tab, setTab] = useState<'items' | 'links'>('items');
   const load = useCallback(
     () =>
       api<InboxState>(`/inbox${showDismissed ? '?all=1' : ''}`)
@@ -124,180 +128,208 @@ export function InboxView({
         </button>
       </div>
       {error && <p className="chat-error">{error}</p>}
-      {secret && (
-        <section className="task-detail-card webhook-secret" role="status">
-          <h2>
-            <KeyRound size={16} /> {secret.name} is ready
-          </h2>
-          <p>
-            Send events to this address with the secret in an{' '}
-            <code>X-OpenDots-Secret</code> header. The secret is shown once.
-          </p>
-          <CopyField
-            label="Webhook URL"
-            value={`${location.origin}${secret.url}`}
-          />
-          <CopyField label="Secret" value={secret.secret} />
-          <pre>{`{ "events": [{ "externalId": "HD-9", "title": "Payment export failing", "priority": "urgent", "url": "https://…" }] }`}</pre>
-          <button className="text-button" onClick={() => setSecret(undefined)}>
-            Done
+      <div className="insight-tabs" role="tablist" aria-label="Inbox">
+        {(
+          [
+            ['items', 'Items', List],
+            ['links', 'Links', Link2],
+          ] as const
+        ).map(([id, label, Icon]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={tab === id}
+            className={tab === id ? 'active' : ''}
+            onClick={() => setTab(id)}
+          >
+            <Icon size={15} />
+            {label}
           </button>
-        </section>
-      )}
-      {adding && (
-        <AddSource
-          dots={dots}
-          onClose={() => setAdding(false)}
-          onCreated={(created) => {
-            setAdding(false);
-            if (created.secret)
-              setSecret({
-                name: created.source.name,
-                url: created.url!,
-                secret: created.secret,
-              });
-            void load();
-          }}
-        />
-      )}
-      <h2 className="insight-subhead">Sources</h2>
-      <div className="inbox-sources">
-        {state?.sources.map((source) => (
-          <SourceCard
-            key={source.id}
-            source={source}
-            dots={dots}
-            onAct={act}
-            onSecret={(value) =>
-              setSecret({
-                name: source.name,
-                url: value.url,
-                secret: value.secret,
-              })
-            }
-          />
         ))}
-        {state && !state.sources.length && (
-          <p className="muted">
-            No sources yet. Add a connection tool that lists your work, such as
-            “tickets assigned to me”, or a webhook another service can post to.
-          </p>
-        )}
       </div>
-      <div className="insight-toolbar">
-        <h2 className="insight-subhead">Events</h2>
-        <label className="permission-row inline">
-          <input
-            type="checkbox"
-            checked={showDismissed}
-            onChange={(e) => setShowDismissed(e.target.checked)}
-          />
-          <span>Show dismissed</span>
-        </label>
-      </div>
-      <ul className="inbox-events">
-        {state?.events.map((event) => (
-          <li key={event.id} className={`inbox-event ${event.state}`}>
-            <span className={`status ${priorityClass[event.priority]}`}>
-              <span />
-              {event.priority}
-            </span>
-            <div>
-              <strong>{event.title}</strong>
-              {event.summary && <p>{event.summary.slice(0, 280)}</p>}
-              <span>
-                {event.sourceName} · {event.kind}
-                {event.from ? ` · from ${event.from}` : ''} ·{' '}
-                {relative(event.occurredAt)}
-              </span>
-              {event.finding?.attention && (
-                <p className={`discovery-finding ${event.finding.state}`}>
-                  <Sparkles size={13} aria-hidden />
-                  <strong>{findingText[event.finding.state]}</strong> ·{' '}
-                  {event.finding.category} ·{' '}
-                  {Math.round(event.finding.confidence * 100)}% ·{' '}
-                  {event.finding.reason}
-                  {event.finding.state === 'failed' && event.finding.error
-                    ? ` (${event.finding.error})`
-                    : ''}
-                </p>
-              )}
+      {tab === 'links' && <InboxLinks />}
+      {tab === 'items' && (
+        <>
+          {secret && (
+            <section className="task-detail-card webhook-secret" role="status">
+              <h2>
+                <KeyRound size={16} /> {secret.name} is ready
+              </h2>
+              <p>
+                Send events to this address with the secret in an{' '}
+                <code>X-OpenDots-Secret</code> header. The secret is shown once.
+              </p>
+              <CopyField
+                label="Webhook URL"
+                value={`${location.origin}${secret.url}`}
+              />
+              <CopyField label="Secret" value={secret.secret} />
+              <pre>{`{ "events": [{ "externalId": "HD-9", "title": "Payment export failing", "priority": "urgent", "url": "https://…" }] }`}</pre>
+              <button
+                className="text-button"
+                onClick={() => setSecret(undefined)}
+              >
+                Done
+              </button>
+            </section>
+          )}
+          {adding && (
+            <AddSource
+              dots={dots}
+              onClose={() => setAdding(false)}
+              onCreated={(created) => {
+                setAdding(false);
+                if (created.secret)
+                  setSecret({
+                    name: created.source.name,
+                    url: created.url!,
+                    secret: created.secret,
+                  });
+                void load();
+              }}
+            />
+          )}
+          <h2 className="insight-subhead">Sources</h2>
+          <div className="inbox-sources">
+            {state?.sources.map((source) => (
+              <SourceCard
+                key={source.id}
+                source={source}
+                dots={dots}
+                onAct={act}
+                onSecret={(value) =>
+                  setSecret({
+                    name: source.name,
+                    url: value.url,
+                    secret: value.secret,
+                  })
+                }
+              />
+            ))}
+            {state && !state.sources.length && (
+              <p className="muted">
+                No sources yet. Add a connection tool that lists your work, such
+                as “tickets assigned to me”, or a webhook another service can
+                post to.
+              </p>
+            )}
+          </div>
+          <div className="insight-toolbar">
+            <h2 className="insight-subhead">Events</h2>
+            <label className="permission-row inline">
+              <input
+                type="checkbox"
+                checked={showDismissed}
+                onChange={(e) => setShowDismissed(e.target.checked)}
+              />
+              <span>Show dismissed</span>
+            </label>
+          </div>
+          <ul className="inbox-events">
+            {state?.events.map((event) => (
+              <li key={event.id} className={`inbox-event ${event.state}`}>
+                <span className={`status ${priorityClass[event.priority]}`}>
+                  <span />
+                  {event.priority}
+                </span>
+                <div>
+                  <strong>{event.title}</strong>
+                  {event.summary && <p>{event.summary.slice(0, 280)}</p>}
+                  <span>
+                    {event.sourceName} · {event.kind}
+                    {event.from ? ` · from ${event.from}` : ''} ·{' '}
+                    {relative(event.occurredAt)}
+                  </span>
+                  {event.finding?.attention && (
+                    <p className={`discovery-finding ${event.finding.state}`}>
+                      <Sparkles size={13} aria-hidden />
+                      <strong>{findingText[event.finding.state]}</strong> ·{' '}
+                      {event.finding.category} ·{' '}
+                      {Math.round(event.finding.confidence * 100)}% ·{' '}
+                      {event.finding.reason}
+                      {event.finding.state === 'failed' && event.finding.error
+                        ? ` (${event.finding.error})`
+                        : ''}
+                    </p>
+                  )}
+                </div>
+                <div className="inbox-event-actions">
+                  {event.finding?.threadId && (
+                    <button
+                      className="text-button"
+                      onClick={() => onThread(event.finding!.threadId!)}
+                    >
+                      Open findings
+                    </button>
+                  )}
+                  {event.finding &&
+                    ['flagged', 'failed', 'ignored'].includes(
+                      event.finding.state,
+                    ) && (
+                      <button
+                        className="icon-button"
+                        aria-label={`Have a Dot look into ${event.title}`}
+                        title="Have a Dot look into this (read-only)"
+                        onClick={() =>
+                          void act(() =>
+                            api(
+                              `/inbox/findings/${event.finding!.id}/investigate`,
+                              'POST',
+                            ),
+                          )
+                        }
+                      >
+                        <Search size={15} />
+                      </button>
+                    )}
+                  {event.url && (
+                    <a
+                      className="icon-button"
+                      href={event.url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      aria-label={`Open ${event.title} in its service`}
+                    >
+                      <ArrowUpRight size={15} />
+                    </a>
+                  )}
+                  {event.state === 'new' && (
+                    <button
+                      className="icon-button"
+                      aria-label={`Mark ${event.title} as seen`}
+                      onClick={() => void setEventState(event, 'seen')}
+                    >
+                      <Check size={15} />
+                    </button>
+                  )}
+                  {event.state !== 'dismissed' ? (
+                    <button
+                      className="icon-button"
+                      aria-label={`Dismiss ${event.title}`}
+                      onClick={() => void setEventState(event, 'dismissed')}
+                    >
+                      <X size={15} />
+                    </button>
+                  ) : (
+                    <button
+                      className="text-button"
+                      onClick={() => void setEventState(event, 'seen')}
+                    >
+                      Restore
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+          {state && !state.events.length && (
+            <div className="large-empty">
+              <Inbox size={32} />
+              <h2>All quiet.</h2>
+              <p>New tickets and messages from your sources will land here.</p>
             </div>
-            <div className="inbox-event-actions">
-              {event.finding?.threadId && (
-                <button
-                  className="text-button"
-                  onClick={() => onThread(event.finding!.threadId!)}
-                >
-                  Open findings
-                </button>
-              )}
-              {event.finding &&
-                ['flagged', 'failed', 'ignored'].includes(
-                  event.finding.state,
-                ) && (
-                  <button
-                    className="icon-button"
-                    aria-label={`Have a Dot look into ${event.title}`}
-                    title="Have a Dot look into this (read-only)"
-                    onClick={() =>
-                      void act(() =>
-                        api(
-                          `/inbox/findings/${event.finding!.id}/investigate`,
-                          'POST',
-                        ),
-                      )
-                    }
-                  >
-                    <Search size={15} />
-                  </button>
-                )}
-              {event.url && (
-                <a
-                  className="icon-button"
-                  href={event.url}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  aria-label={`Open ${event.title} in its service`}
-                >
-                  <ArrowUpRight size={15} />
-                </a>
-              )}
-              {event.state === 'new' && (
-                <button
-                  className="icon-button"
-                  aria-label={`Mark ${event.title} as seen`}
-                  onClick={() => void setEventState(event, 'seen')}
-                >
-                  <Check size={15} />
-                </button>
-              )}
-              {event.state !== 'dismissed' ? (
-                <button
-                  className="icon-button"
-                  aria-label={`Dismiss ${event.title}`}
-                  onClick={() => void setEventState(event, 'dismissed')}
-                >
-                  <X size={15} />
-                </button>
-              ) : (
-                <button
-                  className="text-button"
-                  onClick={() => void setEventState(event, 'seen')}
-                >
-                  Restore
-                </button>
-              )}
-            </div>
-          </li>
-        ))}
-      </ul>
-      {state && !state.events.length && (
-        <div className="large-empty">
-          <Inbox size={32} />
-          <h2>All quiet.</h2>
-          <p>New tickets and messages from your sources will land here.</p>
-        </div>
+          )}
+        </>
       )}
     </main>
   );

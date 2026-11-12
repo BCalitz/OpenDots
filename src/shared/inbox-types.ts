@@ -103,6 +103,41 @@ export interface InboxState {
   events: InboxEventView[];
 }
 
+/** What a tag identifies. */
+export type TagKind =
+  'invoice' | 'order' | 'ticket' | 'amount' | 'email' | 'domain' | 'person';
+/** An item on the links view. Pruned items keep their tags, not their text. */
+export interface LinkItem {
+  id: string;
+  sourceId: string;
+  sourceName: string;
+  sourceKind: SourceKind | null;
+  title: string | null;
+  from: string | null;
+  occurredAt: number;
+  flagged: boolean;
+}
+/** One normalized tag and every item that carries it. */
+export interface LinkTag {
+  kind: TagKind;
+  normalized: string;
+  /** How it was written the first time. */
+  value: string;
+  itemIds: string[];
+}
+/** Two tags of one kind that are spelled alike (pg_trgm similarity). */
+export interface SimilarTags {
+  kind: TagKind;
+  a: string;
+  b: string;
+  similarity: number;
+}
+export interface LinksState {
+  items: LinkItem[];
+  tags: LinkTag[];
+  similar: SimilarTags[];
+}
+
 /** Apps discovery can read, with what their items are. */
 export const DISCOVERY_TOOLKITS: Record<
   string,

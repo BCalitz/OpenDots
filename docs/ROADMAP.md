@@ -389,7 +389,7 @@ Discovery moves to Postgres along with the rest of OpenDots; see the build order
 3. **Move the 11 stores** (built: `store.ts`, `workspace.ts`, `pages.ts`, `inbox/store.ts`, `engine/thread-runner.ts`, `engine/approvals.ts`, `connection-store.ts`, `usage-store.ts`, `computer-store.ts`, `push.ts`, `channels/service.ts`) from synchronous `node:sqlite` to async Postgres.
 4. **Import SQLite** (built): a one-time copy of an existing `DATABASE_PATH` file (`npm run import-sqlite`).
 5. **Jev upgrades:** store raw answers, and add the injection, urgency and "what is asked" questions.
-6. **Tags and lookup:** `event_tags`, regex extraction, code lookup, Jev match, judging in context, and updating earlier items.
+6. **Tags and lookup:** `event_tags`, regex extraction, code lookup, Jev match, judging in context, and updating earlier items. Built so far: `event_tags`, regex extraction and normalization (`src/server/inbox/tags.ts`), trigram matching of similar tags, and the Inbox **Links** view that shows them; `npm run seed-demo` loads made-up items to try it.
 7. **Similar items:** embed every item and add the closest to the history.
 8. **Routing and delivery:** the "what the Dot does" table, the allowed list, urgency rules, quiet hours, the hold window, the morning brief, and drafts.
 

@@ -15,6 +15,7 @@
     "db": "cross-env OWNER_TOKEN=not-used-when-only-the-database-starts docker compose up -d --wait postgres",
     "test:db": "cross-env OWNER_TOKEN=not-used-when-only-the-database-starts docker compose --profile test up -d --wait postgres-test",
     "import-sqlite": "node --env-file-if-exists=.env --import tsx src/server/db/import-cli.ts",
+    "seed-demo": "node --env-file-if-exists=.env --import tsx src/server/db/seed-demo.ts",
     "test": "cross-env DO_NOT_TRACK=1 vitest run",
     "typecheck": "tsc --noEmit",
     "knip": "knip",

@@ -39,9 +39,10 @@ describe('database', () => {
   it('runs migrations once', async () => {
     const db = await testDb();
     const { migrate } = await import('../src/server/db/migrations.js');
+    const applied = () => db.rows(sql`SELECT version FROM schema_migrations`);
+    const before = await applied();
     await migrate(db);
-    expect(
-      (await db.rows(sql`SELECT version FROM schema_migrations`)).length,
-    ).toBe(1);
+    expect(await applied()).toEqual(before);
+    expect(before.length).toBeGreaterThan(0);
   });
 });

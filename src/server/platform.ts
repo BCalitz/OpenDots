@@ -74,6 +74,10 @@ export class Platform {
     );
     await platform.runner.recoverInterruptedRuns();
     await platform.approvals.expireStale();
+    // Items stored before tags existed get theirs in the background.
+    void workspace.inbox
+      .backfillTags()
+      .catch(() => console.error('Could not tag earlier inbox items.'));
     return platform;
   }
   private constructor(
