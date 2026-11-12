@@ -239,7 +239,14 @@ export function extractNames(text: string, skip: string[] = []): Tag[] {
     const before = text.slice(0, match.index);
     const sentenceStart = /(?:^|[.!?:;]|\n)\s*$/.test(before);
     for (const segment of segments(match[0].split(/[ \t]+/)))
-      if (!(sentenceStart && segment.start === 0 && segment.words.length === 1))
+      if (!(
+        sentenceStart &&
+        segment.start === 0 &&
+        segment.words.length === 1 &&
+        // A capital inside the word (ShelfLife, GreenBasket) marks a name
+        // wherever it stands.
+        !/\p{Ll}\p{Lu}/u.test(segment.words[0])
+      ))
         add('name', segment.words);
   }
   return [...tags.values()].filter(Boolean);

@@ -142,10 +142,10 @@ const URGENCY_LEVELS = [
 ] as const;
 const ASKED_CRITERIA = {
   information:
-    'facts or a document the owner has, such as a date, a figure or a file',
+    'facts the owner knows, such as a date, a figure or a status; preparing and sending a document is an action',
   reply: 'a written answer to the sender, such as confirming or explaining',
   action:
-    'something done in an app or system, such as granting access, paying, booking or fixing',
+    'something done or prepared and sent, such as a contract, an invoice or a quote, granting access, paying, booking or fixing',
   decision:
     'a choice only the owner can make, such as approving terms, a budget or a hire',
 };

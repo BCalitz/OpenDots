@@ -186,3 +186,11 @@ it('links a name only once two items carry it, under its most specific kind', as
   expect(falcon[0].itemIds).toHaveLength(2);
   expect(tags.some((tag) => tag.normalized === 'globex')).toBe(false);
 });
+
+it('keeps a name with a capital inside it, even at the start of a sentence', () => {
+  expect(names('Name ideas: ShelfLife. ShelfLife +1.')).toEqual([
+    'name:shelflife',
+  ]);
+  // An ordinary first word still says nothing.
+  expect(names('Restock soon.')).toEqual([]);
+});
