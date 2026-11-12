@@ -1219,3 +1219,72 @@ describe('discovery history routes', () => {
     expect(brief).toEqual({ next: [], last: null });
   });
 });
+
+describe('owner organisation', () => {
+  it('tells Jev a sender is a colleague only when the owner listed their domains', async () => {
+    const { fromOwner } = await import('../src/server/discovery/service.js');
+    expect(fromOwner('Jo <jo@brightlane.co.za>', ['brightlane.co.za'])).toBe(
+      true,
+    );
+    expect(fromOwner('x@mail.brightlane.co.za', ['brightlane.co.za'])).toBe(
+      true,
+    );
+    expect(fromOwner('me@gmail.com', ['me@gmail.com'])).toBe(true);
+    expect(fromOwner('naledi@greenbasket.co.za', ['brightlane.co.za'])).toBe(
+      false,
+    );
+    const states: unknown[] = [];
+    const fetch = (async (_url: string, init?: RequestInit) => {
+      states.push(JSON.parse(String(init?.body)).state);
+      return new Response(
+        JSON.stringify({
+          model: 'jev',
+          usage: {},
+          answers: {
+            attention: { type: 'noul', noul: 0.2 },
+            category: {
+              type: 'choice',
+              choice: 'other',
+              confidence: 1,
+              probabilities: {},
+            },
+            urgency: {
+              type: 'score',
+              score: 0,
+              confidence: 1,
+              legend: {},
+              probabilities: { 0: 1 },
+            },
+            asks_anything: { type: 'noul', noul: 0.1 },
+            what_asked: {
+              type: 'choice',
+              choice: 'reply',
+              confidence: 1,
+              probabilities: {},
+            },
+            injection: { type: 'noul', noul: 0 },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+    const judge = jevJudge({ apiKey: 'unused', fetch, compression: false });
+    const item = {
+      app: 'Teams',
+      kind: 'message',
+      from: 'jo@brightlane.co.za',
+      title: 'Hi',
+      summary: 'Hi',
+    };
+    await judge.judge({ ...item, fromOwner: true }, [], signal);
+    await judge.judge(item, [], signal);
+    expect(states).toEqual([
+      { new_item: expect.objectContaining({ from_owner_organisation: true }) },
+      {
+        new_item: expect.not.objectContaining({
+          from_owner_organisation: expect.anything(),
+        }),
+      },
+    ]);
+  });
+});

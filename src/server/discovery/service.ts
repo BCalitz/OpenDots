@@ -95,15 +95,24 @@ export function mayDowngrade(
 ) {
   const later = address(laterFrom);
   if (!later) return false;
-  if (later === address(earlierFrom)) return true;
-  const domain = later.split('@')[1] ?? '';
+  return later === address(earlierFrom) || fromOwner(laterFrom, trusted);
+}
+
+/** Whether a sender is the owner or in the owner's organisation. */
+export function fromOwner(from: string | null, trusted: string[]) {
+  const sender = address(from);
+  if (!sender) return false;
+  const domain = sender.split('@')[1] ?? '';
   return trusted.some((entry) => {
     const value = entry.trim().toLowerCase().replace(/^@/, '');
     return value.includes('@')
-      ? value === later
+      ? value === sender
       : !!domain && (domain === value || domain.endsWith(`.${value}`));
   });
 }
+/** Set only when the owner listed their addresses, so an empty list says nothing. */
+const ownerFact = (from: string | null, trusted: string[]) =>
+  trusted.length ? fromOwner(from, trusted) : undefined;
 
 const raise = (a: Urgency | null, b: Urgency | null): Urgency => {
   const index = Math.max(
@@ -160,6 +169,8 @@ export class DiscoveryService {
       maxJudged?: number;
       /** Investigations started per check; the rest wait for the owner. */
       maxInvestigations?: number;
+      /** false: flag items but never start a Dot on its own (tests, scenarios). */
+      autoInvestigate?: boolean;
       investigationTimeoutMs?: number;
     },
   ) {}
@@ -356,6 +367,7 @@ export class DiscoveryService {
         history.push({
           event: earlier,
           app: earlier.sourceName,
+          fromOwner: ownerFact(earlier.from, settings.trusted),
           why: entry.why,
         });
     }
@@ -377,7 +389,11 @@ export class DiscoveryService {
       if (!verdict) {
         const model = this.options.judge();
         if (!model) return;
-        const item: JudgeItem = { ...event, app };
+        const item: JudgeItem = {
+          ...event,
+          app,
+          fromOwner: ownerFact(event.from, settings.trusted),
+        };
         try {
           const history = await this.gather(event, item, model, settings);
           verdict = await model.judge(item, history, this.controller.signal);
@@ -398,7 +414,12 @@ export class DiscoveryService {
     }
     for (const finding of flagged
       .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, this.options.maxInvestigations ?? 5))
+      .slice(
+        0,
+        this.options.autoInvestigate === false
+          ? 0
+          : (this.options.maxInvestigations ?? 5),
+      ))
       await this.investigate(finding.id);
   }
 
@@ -546,9 +567,10 @@ export class DiscoveryService {
           : {}),
       });
       if (!updated) return;
-      if (updated.state === 'flagged' && updated.route !== 'tell')
-        await this.investigate(updated.id);
-      else if (updated.state === 'ready' || updated.route === 'tell') {
+      if (updated.state === 'flagged' && updated.route !== 'tell') {
+        if (this.options.autoInvestigate !== false)
+          await this.investigate(updated.id);
+      } else if (updated.state === 'ready' || updated.route === 'tell') {
         // Already delivered or waiting: deliver again at the new urgency.
         await this.options.delivery?.cancel(updated.id);
         await this.deliver(updated, earlier);

@@ -50,6 +50,8 @@ export type JudgeItem = Pick<
 > & {
   app: string;
   occurredAt?: number;
+  /** Sent by the owner or their organisation; unset when not known. */
+  fromOwner?: boolean;
 };
 /** An earlier item gathered for a new one, and why code picked it. */
 export interface HistoryItem {
@@ -57,6 +59,8 @@ export interface HistoryItem {
   app: string;
   /** Such as "invoice INV-2041", "same sender" or "similar wording". */
   why: string[];
+  /** Sent by the owner or their organisation; unset when not known. */
+  fromOwner?: boolean;
 }
 export interface Judge {
   /** Shown on findings, for example "jev". */
@@ -291,6 +295,9 @@ export function jevJudge(options: {
             text: summarize(entry.event),
             // Facts code already knows, so Jev needn't work them out.
             found_by: entry.why.join('; '),
+            ...(entry.fromOwner === undefined
+              ? {}
+              : { from_owner_organisation: entry.fromOwner }),
           },
         ]),
       );
@@ -299,6 +306,10 @@ export function jevJudge(options: {
           app: item.app,
           kind: item.kind,
           from: item.from ?? null,
+          // A fact code knows: colleagues' messages read differently.
+          ...(item.fromOwner === undefined
+            ? {}
+            : { from_owner_organisation: item.fromOwner }),
           ...(item.occurredAt
             ? { received: new Date(item.occurredAt).toISOString() }
             : {}),
