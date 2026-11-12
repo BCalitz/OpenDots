@@ -263,13 +263,141 @@ Routes: `GET /api/chat/:threadId/events?after=<seq>` (Server-Sent Events: histor
 
 **Status, discovery correlation today:** narrow on purpose. `recentFrom()` (`src/server/inbox/store.ts`) matches candidates by exact sender string within a 72-hour window (`DiscoveryService.windowMs`), and that's the only thing `referencedEventId` is ever set from. Each judged item's `category` is stored in `discovery_findings`, but nothing queries by it — it's display text in the Inbox, not a search index. A new source's first check only backfills 24 hours (`FIRST_LOOKBACK_MS`), and events are capped at 2,000 per source (`MAX_EVENTS_PER_SOURCE`), with findings pruned alongside them. None of this reaches back further than a few days; something from a year or five years ago is structurally outside what discovery looks at today.
 
-**Proposed: entity tags, so correlation survives category drift and long gaps (not implemented).** A single real thread — a request, then its invoice, then a payment reminder about it — drifts across Jev's categories over time, and a fixed time window misses it once it's older than a few days. A specific identifier (an invoice number, a project code, a person's name) is a far stronger join key than sender+window or category, because it's stable across both. Three stages, each following a documented pattern from [docs.typesafe.ai/cookbooks](https://docs.typesafe.ai/cookbooks):
+### Proposed: discovery with history (not implemented)
 
-1. **Extract.** A recall-tuned regex finds candidate spans (over-inclusive on purpose: amounts, invoice/PO numbers, names), then Jev's `choice` picks which span is the real one from the regex's own hits — it cannot invent a value (*Pre-parsed value extraction*). Stored in a new, unpruned `event_tags` table, not capped at 2,000 like events — the whole point is surviving longer than that.
-2. **Match within today's small candidate set.** Extends the existing `references_any`/`is_ask` bundle with a `Score` question (different / possibly-same / definitely-same) plus a couple of supporting `Noul` field checks, thresholded into auto-link / review-queue / leave-unlinked (*Knowledge graph entity alignment*).
-3. **Match against the full tag history.** For when the candidate set is the whole archive, not just the last 72 hours. The *Infinite cardinality choice* cookbook casts its first, cheapest net with a `Noul` question per catalog item — but our tags are already short, normalized identifiers (not messy free text), so that first net can be free instead: fuzzy string matching (SQLite FTS5 or trigram similarity) for formatting variants, run in parallel with embedding similarity for genuine rewordings (`Marc` vs `Marcus Johnson-Smith`) that share no characters at all. Neither channel's own ranking is trusted past "is it in the candidate pool" — TypeSafe's own benchmark has plain embedding search at only 33% top-1 accuracy on this kind of task, which is exactly why the next two steps exist: re-read the top ~80 candidates (from either channel) with more context, then a final `Choice` ranking over the top ~20, gated at 0.8+ confidence before auto-linking and otherwise surfaced as a few candidates for review. Only this last, calibrated step is allowed to decide an order; raw search rank (lexical or embedding) is recall only, never the final word on how close something is to the truth.
+Today each item is judged alone, links only to the same sender within 72 hours, every finished investigation pushes at once, and the Dot investigates every flagged item the same way. That leaves four problems:
 
-A match from any of these still only feeds the same `attention`/`urgency` gate `DiscoveryService.judge()` already applies — it's additional signal into the existing decision, not a bypass of it. Matching something from three years ago doesn't itself notify the owner; it only changes the odds that this item crosses the threshold, exactly like today's same-sender correlation already does. This is a real build (new schema, an extraction pass in the judge pipeline, gates tuned against real data) — not a tweak to the existing window.
+1. **Threads drift and age.** A request, its invoice and a payment reminder drift across Jev's categories, and the 72-hour window misses anything older. Identifiers such as invoice numbers, email addresses and domains stay the same across both.
+2. **Items are judged without their history.** An email is flagged, then a Teams message says "ignore that email". Today the Teams message is judged on its own and the email stays flagged.
+3. **Everything interrupts.** Something that can wait until tomorrow pushes now, just like an outage.
+4. **The Dot treats every item alike.** It should draft a reply, propose an action you approve, or only tell you, depending on what's asked and what it's allowed to do.
+
+The design follows the TypeSafe skill (`.claude/skills/typesafe-ai/SKILL.md`): **Jev makes judgments, code makes decisions.** Jev never decides what to do or what the Dot may do. It answers small questions, and code maps the answers to an outcome through the tables below.
+
+```mermaid
+flowchart LR
+  subgraph Gather["Gather (every item)"]
+    New[New item] --> Rules[Rules]
+    Rules --> Lookup[Code lookup:<br/>exact, then trigram]
+    Lookup --> Similar[Similar past items:<br/>embeddings]
+    Similar --> Match[Jev match:<br/>only if unsettled]
+  end
+  subgraph Act["Judge with history, then act"]
+    Judge[Jev judges in context:<br/>one call] --> Update[Update earlier items]
+    Update --> Route[Route:<br/>what the Dot does]
+    Route --> Dot[Dot works]
+    Dot --> Deliver[Delivery rules]
+    Deliver --> You[Push now or<br/>morning brief]
+  end
+  Match --> Judge
+```
+
+#### 1. Gather: find every earlier item this could relate to
+
+This runs for every item that passes the rules, before any judgment. Otherwise "ignore that email" is never connected to the email.
+
+- **Rules** (built): mail the app filed as promotions, social, forums or spam is dropped with no Jev call.
+- **Code lookup**: a recall-tuned regex finds possible identifiers (invoice and PO numbers, amounts, email addresses, domains, names). Each is normalized (`INV-2041`, `inv 2041` and `Invoice #2041` become one key) and looked up exactly in `event_tags`, then by trigram similarity (`pg_trgm`) for typos and partial names. This is free and reaches back years.
+- **Similar past items**: the item's text is embedded and the ~12 closest past items are added. This catches references with no shared identifier or sender, such as a Teams message about an email.
+- **Jev match**: only when code finds several or no clear matches for a person or company tag. It follows TypeSafe's [infinite cardinality choice](https://docs.typesafe.ai/cookbooks/infinite_cardinality_choice.md) cookbook:
+  1. One yes/no question per known entity of that type, about 300 per call.
+  2. A re-read of the top ~80 with longer text, only when more than ~20 remain.
+  3. One Choice over the top ~20.
+
+  In that cookbook, Jev's yes/no pass got the right answer into the final pick 82% of the time, against 35% for embedding search (OpenAI `text-embedding-3-small`). The re-read raised that to 88%, and a Choice confidence of 0.8 or more was right in all 48 such cases. Embeddings are therefore used to find similar items, never to decide that two tags are the same thing.
+
+#### 2. Judge with that history
+
+**Jev judges in context**: one call per item, with the item and the gathered earlier items in its state. Questions that share this state are bundled into the call, including ones whose answers are only needed in some cases ("ask speculatively" in the skill).
+
+| About             | Question                                                                                                                                                               | Type                                                                                                                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The item          | Does the owner need to look at it?                                                                                                                                     | Noul                                                                                                                                                  |
+| The item          | What kind is it?                                                                                                                                                       | Choice                                                                                                                                                |
+| The item          | How urgent is it? Levels: can wait days, by tomorrow, today, within hours                                                                                              | Score                                                                                                                                                 |
+| The item          | What is asked? Information, a reply, an action, a decision only the owner can make                                                                                     | Choice, with a Noul for "anything asked at all"                                                                                                       |
+| The item          | Does it try to instruct an AI assistant? (prompt injection)                                                                                                            | Noul                                                                                                                                                  |
+| The item          | Which regex span is the real invoice number, person and so on                                                                                                          | Choice per tag, from the regex's own hits ([pre-parsed value extraction](https://docs.typesafe.ai/cookbooks/pre_parsed_value_extraction_cookbook.md)) |
+| Each earlier item | Same thing? Different, possibly, or definitely ([entity alignment](https://docs.typesafe.ai/cookbooks/entity_alignment.md))                                            | Score                                                                                                                                                 |
+| Each earlier item | Does the new item say it no longer needs the owner?                                                                                                                    | Noul                                                                                                                                                  |
+| Each earlier item | Does the new item make it more urgent?                                                                                                                                 | Noul                                                                                                                                                  |
+| Each earlier item | Does it hold facts useful for answering? Does it contradict the new item? ([classifying RAG passages](https://docs.typesafe.ai/cookbooks/classifying_rag_passages.md)) | Noul each                                                                                                                                             |
+
+Nouls use 0.7 and 0.3 as starting thresholds; the band between counts as unsettled. Every raw answer is stored in `discovery_findings`, so thresholds can be retuned on past items without new calls.
+
+**Update earlier items** (code): a "same thing" link at 0.8 or more is recorded. Lower scores go to a review queue, or are left unlinked below 0.5.
+
+- **"No longer needed":** marks the earlier finding resolved and cancels its queued push. If the push already went out, a short correction follows.
+- **"More urgent":** escalates the earlier item. This is accepted from anyone.
+- **Downgrades and cancels:** only accepted from the owner, the earlier item's sender (same address), or someone in the owner's organisation (same domain or Teams tenant). From anyone else the item stays flagged with a note ("X says this can be ignored"). This stops a scam or injection email from hiding a real invoice. It's fixed for now and can become a setting later.
+
+#### 3. Route: what the Dot does
+
+Code combines "what is asked" with two checks: whether a connected tool can do the action, and whether the owner allows it. The owner sets the allowed list per app, and nothing is allowed until they add it.
+
+| What is asked                              | Can the Dot do it? | What happens                                               | Example                     |
+| ------------------------------------------ | ------------------ | ---------------------------------------------------------- | --------------------------- |
+| Nothing, it's information                  | Nothing to do      | Tell the owner; no investigation                           | Deploy finished             |
+| A reply                                    | Yes, as a draft    | Investigate, draft it, the owner approves sending          | A client's question         |
+| An action a connected tool can do          | Yes, if allowed    | Investigate, propose it, the owner approves with one tap   | Someone asks for app access |
+| An action it can't do, or isn't allowed to | No                 | Tell the owner what, where and who, with read-only context | A bug on prod               |
+| A decision only the owner can make         | No                 | Gather the facts and options, propose nothing              | Contract terms              |
+
+The Dot stays read-only until the owner approves. Replies go to the mailbox's drafts folder, and other changes become proposals.
+
+#### 4. Delivery: now, or the morning brief
+
+| Urgency              | Needs the owner's decision? | What happens                                     |
+| -------------------- | --------------------------- | ------------------------------------------------ |
+| Within hours         | Either                      | Push now; a draft follows if possible            |
+| Today                | No                          | Draft it, then push "draft ready"                |
+| Today                | Yes                         | Push now with the options                        |
+| By tomorrow or later | No                          | Draft overnight; approve it in the morning brief |
+| By tomorrow or later | Yes                         | Morning brief, under decisions                   |
+
+- **Quiet hours:** during quiet hours, "today" items wait for the morning brief, and only "within hours" breaks through.
+- **Hold window:** non-urgent pushes wait a few minutes so a quick follow-up can cancel them.
+
+This replaces today's behaviour, where every finished investigation pushes at once (`src/server/index.ts`, `discovery.onReady`).
+
+#### Jev calls per item
+
+| Situation                                         | Jev calls                                             |
+| ------------------------------------------------- | ----------------------------------------------------- |
+| Dropped by the rules                              | 0                                                     |
+| Every item past the rules                         | 1                                                     |
+| A tag code can't settle                           | +1 to 6                                               |
+| More than 20 candidates left after the first pass | +1 to 2                                               |
+| Item that needs the owner                         | 0 extra (its context questions are in the first call) |
+
+#### Storage: one Postgres database
+
+Discovery moves to Postgres along with the rest of OpenDots; see the build order. New and changed tables:
+
+- **`event_tags`**: one row per normalized identifier, person or company per item. Never pruned, unlike `inbox_events` (capped at 2,000 per source), so links reach back years. Backfill older mail into it.
+- **Item embeddings**: one vector per item, in pgvector, for similar-item search.
+- **`discovery_findings`**: also stores Jev's raw answers per item.
+- **Link feedback**: the owner's confirmations and rejections of links, to measure and tune matching.
+- **Indexes**: `pg_trgm` on tag values; pgvector on embeddings. At one person's volume (tens to hundreds of thousands of items) an exact vector scan is fast enough; add an HNSW index only if it isn't.
+
+**Embedding model:** any OpenAI-compatible embeddings endpoint (`EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`). The default is a local model through Ollama, for example `nomic-embed-text`, so mail text isn't sent to a third provider. The TypeSafe SDK has no embeddings. Changing the model later means re-embedding stored items.
+
+#### Build order
+
+1. **Postgres in Compose:** the `pgvector/pgvector` image, `DATABASE_URL`, and the `vector` and `pg_trgm` extensions.
+2. **Async data layer:** a connection pool, migrations, and a test database for the test suite.
+3. **Move the 11 stores** (`store.ts`, `workspace.ts`, `pages.ts`, `inbox/store.ts`, `engine/thread-runner.ts`, `engine/approvals.ts`, `connection-store.ts`, `usage-store.ts`, `computer-store.ts`, `push.ts`, `channels/service.ts`) from synchronous `node:sqlite` to async Postgres, one at a time, with tests after each.
+4. **Import SQLite:** a one-time copy of an existing `DATABASE_PATH` file.
+5. **Jev upgrades:** store raw answers, and add the injection, urgency and "what is asked" questions.
+6. **Tags and lookup:** `event_tags`, regex extraction, code lookup, Jev match, judging in context, and updating earlier items.
+7. **Similar items:** embed every item and add the closest to the history.
+8. **Routing and delivery:** the "what the Dot does" table, the allowed list, urgency rules, quiet hours, the hold window, the morning brief, and drafts.
+
+Step 8 doesn't need the Postgres move and could ship earlier on top of step 5.
+
+**Not decided yet:** the morning brief time, quiet hours, how long the hold window is, and whether drafts go to the mailbox's drafts folder (through Composio) or stay in the OpenDots thread.
+
+Before relying on any threshold, test the questions against real items through the live API. This sends mail text to TypeSafe with `TYPESAFE_API_KEY`, so ask the owner first.
 
 **Goal:** the scenario that started this plan.
 

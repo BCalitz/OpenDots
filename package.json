@@ -82,5 +82,8 @@
   },
   "overrides": {
     "undici": "^6.29.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }
