@@ -110,7 +110,7 @@ export class DiscoveryStore {
    */
   related(
     eventId: string,
-    options: { limit?: number; ignoreDomains?: string[] } = {},
+    options: { limit?: number; ignoreDomains?: string[]; before?: number } = {},
   ): Promise<TagMatch[]> {
     const ignore = options.ignoreDomains ?? [];
     return this.db.rows<TagMatch>(
@@ -129,6 +129,7 @@ export class DiscoveryStore {
         )
         SELECT h.event_id, sum(h.weight)::float AS score, array_agg(h.label ORDER BY h.weight DESC) AS shared
         FROM hits h JOIN inbox_events e ON e.id=h.event_id
+        WHERE e.occurred_at <= ${options.before ?? Number.MAX_SAFE_INTEGER}
         GROUP BY h.event_id ORDER BY score DESC, max(e.occurred_at) DESC LIMIT ${options.limit ?? 12}`,
     );
   }
@@ -301,7 +302,7 @@ export class DiscoveryStore {
   nearest(
     eventId: string,
     model: string,
-    options: { limit?: number; maxDistance?: number } = {},
+    options: { limit?: number; maxDistance?: number; before?: number } = {},
   ) {
     return this.db.rows<{ eventId: string; distance: number }>(
       sql`SELECT b.event_id, (a.embedding OPERATOR(public.<=>) b.embedding)::float AS distance
@@ -309,6 +310,7 @@ export class DiscoveryStore {
         JOIN inbox_events e ON e.id=b.event_id
         WHERE a.event_id=${eventId} AND a.model=${model}
           AND (a.embedding OPERATOR(public.<=>) b.embedding) <= ${options.maxDistance ?? 0.5}
+          AND e.occurred_at <= ${options.before ?? Number.MAX_SAFE_INTEGER}
         ORDER BY distance LIMIT ${options.limit ?? 12}`,
     );
   }

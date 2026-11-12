@@ -596,3 +596,36 @@ describe('embeddings', () => {
     );
   });
 });
+
+describe('history order', () => {
+  it('gives an item only earlier items as history, even when later ones are stored', async () => {
+    const f = await setup(() => verdict({ attention: false }));
+    const now = Date.now();
+    const [first] = await f.store.ingest([
+      f.item('Invoice INV-3001', { occurredAt: now - 60_000 }),
+      f.item('Reminder: INV-3001 overdue', { occurredAt: now }),
+    ]);
+    const settings = await f.store.discovery.settings();
+    expect(
+      await f.discovery.gather(
+        first,
+        { ...first, app: 'Gmail' },
+        undefined,
+        settings,
+      ),
+    ).toEqual([]);
+    const later = (await f.store.events({})).find((e) =>
+      e.title.startsWith('Reminder'),
+    )!;
+    expect(
+      (
+        await f.discovery.gather(
+          later,
+          { ...later, app: 'Gmail' },
+          undefined,
+          settings,
+        )
+      ).map((entry) => entry.event.title),
+    ).toEqual(['Invoice INV-3001']);
+  });
+});

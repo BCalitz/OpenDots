@@ -316,6 +316,8 @@ export class DiscoveryService {
     for (const match of await this.store.discovery.related(event.id, {
       limit: size,
       ignoreDomains,
+      // History is what came before; never a later item.
+      before: event.occurredAt,
     }))
       for (const [index, shared] of match.shared.entries())
         add(match.eventId, index ? 0 : match.score, `both mention ${shared}`);
@@ -337,7 +339,7 @@ export class DiscoveryService {
         for (const near of await this.store.discovery.nearest(
           event.id,
           embedder.model,
-          { limit: size },
+          { limit: size, before: event.occurredAt },
         ))
           add(near.eventId, (1 - near.distance) * 2, 'similar wording');
       } catch (error) {
