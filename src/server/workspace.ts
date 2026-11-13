@@ -221,20 +221,15 @@ export class WorkspaceStore {
   /** The thread a Dot uses for requests from one coordinator conversation. */
   async delegateThread(parentThreadId: string, dotId: string) {
     return (
-      await this.db.row<{ threadId: string }>(
-        sql`SELECT thread_id FROM delegate_threads WHERE parent_thread_id=${parentThreadId} AND dot_id=${dotId}`,
+      await this.db.row<{ id: string }>(
+        sql`SELECT id FROM thread_bindings WHERE delegated_from=${parentThreadId} AND dot_id=${dotId}`,
       )
-    )?.threadId;
-  }
-  async bindDelegate(parentThreadId: string, dotId: string, threadId: string) {
-    await this.db.run(
-      sql`INSERT INTO delegate_threads VALUES (${parentThreadId}, ${dotId}, ${threadId})`,
-    );
+    )?.id;
   }
   /** True for threads that exist to answer another Dot. */
   async isDelegateThread(threadId: string) {
     return !!(await this.db.row(
-      sql`SELECT 1 FROM delegate_threads WHERE thread_id=${threadId}`,
+      sql`SELECT 1 FROM thread_bindings WHERE id=${threadId} AND delegated_from IS NOT NULL`,
     ));
   }
   async conversations(): Promise<Conversation[]> {
@@ -277,10 +272,10 @@ export class WorkspaceStore {
   private async mainConversationList() {
     const delegates = new Set(
       (
-        await this.db.rows<{ threadId: string }>(
-          sql`SELECT thread_id FROM delegate_threads`,
+        await this.db.rows<{ id: string }>(
+          sql`SELECT id FROM thread_bindings WHERE owner_id=${this.ownerId} AND delegated_from IS NOT NULL`,
         )
-      ).map((row) => row.threadId),
+      ).map((row) => row.id),
     );
     const main = new Map<string, Conversation>();
     for (const thread of await this.conversations())
@@ -297,14 +292,19 @@ export class WorkspaceStore {
   }
   /**
    * `source` marks a background thread, such as one mirroring Slack;
-   * `parentId` makes it a topic thread in that main chat.
+   * `parentId` makes it a topic thread in that main chat; `delegatedFrom`
+   * marks a thread answering another Dot's conversation.
    */
   async bindThread(
     id: string,
     dotId: string,
     title: string,
     source?: string,
-    topic?: { parentId: string; anchorMessageId?: string },
+    topic?: {
+      parentId?: string;
+      anchorMessageId?: string;
+      delegatedFrom?: string;
+    },
   ): Promise<Conversation> {
     if (!(await this.dot(dotId))) throw new Error('Dot not found.');
     const value: Conversation = {
@@ -320,7 +320,7 @@ export class WorkspaceStore {
         : {}),
     };
     await this.db.run(
-      sql`INSERT INTO thread_bindings (id, dot_id, owner_id, title, created_at, source, parent_id, anchor_message_id) VALUES (${id}, ${dotId}, ${this.ownerId}, ${title}, ${value.createdAt}, ${source ?? null}, ${topic?.parentId ?? null}, ${topic?.anchorMessageId ?? null})`,
+      sql`INSERT INTO thread_bindings (id, dot_id, owner_id, title, created_at, source, parent_id, anchor_message_id, delegated_from) VALUES (${id}, ${dotId}, ${this.ownerId}, ${title}, ${value.createdAt}, ${source ?? null}, ${topic?.parentId ?? null}, ${topic?.anchorMessageId ?? null}, ${topic?.delegatedFrom ?? null})`,
     );
     return value;
   }

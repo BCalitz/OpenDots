@@ -330,6 +330,18 @@ ${PAGE_REVIEW_CALLS('page_reviews')}
 DROP TABLE page_reviews;
 `,
   },
+  {
+    version: 13,
+    name: 'delegation threads in thread_bindings',
+    sql: `
+-- A thread answering another Dot records the coordinator thread it answers.
+-- One such thread per coordinator thread and Dot.
+ALTER TABLE thread_bindings ADD COLUMN delegated_from TEXT;
+UPDATE thread_bindings b SET delegated_from=d.parent_thread_id FROM delegate_threads d WHERE d.thread_id=b.id;
+CREATE UNIQUE INDEX thread_bindings_delegated ON thread_bindings(delegated_from, dot_id) WHERE delegated_from IS NOT NULL;
+DROP TABLE delegate_threads;
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

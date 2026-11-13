@@ -126,7 +126,9 @@ export async function importSqlite(
         reports.push(
           table === 'page_reviews'
             ? await importPageReviews(db, source)
-            : await copyTable(db, source, table),
+            : table === 'delegate_threads'
+              ? await importDelegateThreads(db, source)
+              : await copyTable(db, source, table),
         );
       }
       if (present.has('mcp_connections'))
@@ -141,6 +143,23 @@ export async function importSqlite(
   } finally {
     source.close();
   }
+}
+
+/** Delegation threads are marked on thread_bindings now (see migration 13). */
+async function importDelegateThreads(
+  db: Db,
+  source: DatabaseSync,
+): Promise<ImportReport> {
+  const rows = source
+    .prepare('SELECT * FROM delegate_threads ORDER BY rowid')
+    .all() as Record<string, unknown>[];
+  const field = (row: Record<string, unknown>, name: string) =>
+    String(row[name] ?? row[snake(name)]);
+  for (const row of rows)
+    await db.run(
+      sql`UPDATE thread_bindings SET delegated_from=${field(row, 'parentThreadId')} WHERE id=${field(row, 'threadId')}`,
+    );
+  return { table: 'delegate_threads', rows: rows.length, skipped: [] };
 }
 
 /** Reviewed page saves became once-only tool calls (see migration 12). */

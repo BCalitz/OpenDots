@@ -223,7 +223,7 @@ export class Platform {
           dotId,
           paused,
           createThread: async (id, title) =>
-            (await this.createConversation(id, title, 'slack')).id,
+            (await this.createConversation(id, title, { source: 'slack' })).id,
           turn: (threadId, prompt, signal) =>
             this.turn(threadId, prompt, signal, { opendotsSource: 'slack' }),
         },
@@ -404,19 +404,14 @@ export class Platform {
       };
     }
     if (route.kind === 'new') {
-      const id = randomUUID();
       const title = clip(text, 60) || 'New thread';
-      await this.conversations.createThread({
-        threadId: id,
-        dotId: thread.dotId,
-      });
       // The chat shows the exchange itself, labelled with this thread, so
       // the thread needs no card of its own.
-      await this.workspace.bindThread(id, thread.dotId, title, undefined, {
-        parentId: threadId,
+      const topic = await this.createConversation(thread.dotId, title, {
+        topic: { parentId: threadId },
       });
       return {
-        threadId: id,
+        threadId: topic.id,
         moved: { to: 'new', title },
       };
     }
@@ -464,8 +459,7 @@ export class Platform {
         await this.createConversation(
           input.dotId,
           `${input.app}: ${input.event.title}`.slice(0, 80),
-          'discovery',
-          true,
+          { source: 'discovery', topic: true },
         )
       ).id;
     let reply: string;
@@ -488,29 +482,35 @@ export class Platform {
     return { threadId, reply };
   };
   /**
-   * A new thread; `source` marks background threads such as Slack's.
-   * `topic` makes it a topic thread in the Dot's main chat.
+   * Every new thread starts here, whatever it is for.
+   * - `source` marks background threads such as Slack's.
+   * - `topic` makes it a topic thread: `true` in the Dot's main chat, or in
+   *   the given chat.
+   * - `delegatedFrom` is the coordinator thread it answers, for delegation.
    */
   async createConversation(
     dotId: string,
     title: string,
-    source?: string,
-    topic?: boolean,
+    options: {
+      source?: string;
+      topic?: true | { parentId: string };
+      delegatedFrom?: string;
+    } = {},
   ): Promise<Conversation> {
     this.requireReady();
     if (!(await this.workspace.dot(dotId))) throw new Error('Dot not found.');
-    const parentId: string | undefined = topic
-      ? (await this.dotConversation(dotId)).conversation.id
-      : undefined;
+    const parentId =
+      options.topic === true
+        ? (await this.dotConversation(dotId)).conversation.id
+        : options.topic?.parentId;
     const id = randomUUID();
     await this.conversations.createThread({ threadId: id, dotId });
-    return this.workspace.bindThread(
-      id,
-      dotId,
-      title,
-      source,
-      parentId ? { parentId } : undefined,
-    );
+    return this.workspace.bindThread(id, dotId, title, options.source, {
+      ...(parentId ? { parentId } : {}),
+      ...(options.delegatedFrom
+        ? { delegatedFrom: options.delegatedFrom }
+        : {}),
+    });
   }
   /**
    * Splits a conversation at a message into a new topic thread in the same
@@ -654,10 +654,8 @@ export class Platform {
       const conversation = await this.createConversation(
         to.id,
         `From ${from.name}: ${request.replace(/\s+/g, ' ').slice(0, 60)}`,
-        undefined,
-        true,
+        { topic: true, delegatedFrom: parentThreadId },
       );
-      await this.workspace.bindDelegate(parentThreadId, to.id, conversation.id);
       threadId = conversation.id;
     }
     const target = threadId;
