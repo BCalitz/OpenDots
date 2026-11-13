@@ -34,7 +34,7 @@ flowchart LR
 This runs for every item that passes the rules, before any judgment. Otherwise "ignore that email" is never connected to the email.
 
 - **Rules**: mail the app filed as promotions, social, forums or spam is dropped with no Jev call.
-- **Code lookup**: a recall-tuned regex finds possible identifiers (invoice and PO numbers, amounts, email addresses, domains, names). Each is normalized (`INV-2041`, `inv 2041` and `Invoice #2041` become one key) and looked up exactly in `event_tags`, then by trigram similarity (`pg_trgm`) for typos and partial names. This is free and reaches back years.
+- **Code lookup**: a recall-tuned regex finds possible identifiers (invoice and PO numbers, amounts, email addresses, domains, names). Each is normalized (`INV-2041`, `inv 2041` and `Invoice #2041` become one key) and looked up exactly in `event_tags`, then by trigram similarity (`pg_trgm`) for typos and partial names. This is free, and reaches back as far as items are kept (see [MEMORY.md](MEMORY.md) for what is kept after that).
 - **Similar past items**: the item's text is embedded and the ~12 closest past items are added. This catches references with no shared identifier or sender, such as a Teams message about an email.
 - **Jev match**: only when code finds several or no clear matches for a person or company tag. It follows TypeSafe's [infinite cardinality choice](https://docs.typesafe.ai/cookbooks/infinite_cardinality_choice.md) cookbook:
   1. One yes/no question per known entity of that type, about 300 per call.
@@ -107,7 +107,7 @@ The Dot stays read-only until the owner approves. Replies are drafted in the Ope
 
 ## Storage
 
-- **`event_tags`**: one row per normalized identifier, person or company per item. Never pruned, unlike `inbox_events` (capped at 2,000 per source), so links reach back as far as discovery has seen mail (older mail is not backfilled yet).
+- **`event_tags`**: one row per normalized identifier, person or company per item. Pruned with the item. What outlives the item is in its entities ([MEMORY.md](MEMORY.md)).
 - **Item embeddings**: one vector per item, in pgvector, for similar-item search.
 - **`discovery_findings`**: also stores Jev's raw answers per item.
 - **Link feedback**: the owner's confirmations and rejections of links, to measure and tune matching.

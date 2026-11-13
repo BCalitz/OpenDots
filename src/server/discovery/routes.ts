@@ -37,6 +37,7 @@ const settingsSchema = z
       )
       .max(50),
     allowedApps: z.array(z.string().regex(/^[a-z0-9_]{1,60}$/)).max(50),
+    retentionDays: z.number().int().min(1).max(365),
   })
   .partial()
   .strict();

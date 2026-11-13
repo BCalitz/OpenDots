@@ -15,6 +15,7 @@ export const DEFAULT_DISCOVERY_SETTINGS: DiscoverySettings = {
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   trusted: [],
   allowedApps: [],
+  retentionDays: 14,
 };
 
 /** An earlier item found by code, and why. */

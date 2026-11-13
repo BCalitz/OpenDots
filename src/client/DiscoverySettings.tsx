@@ -164,6 +164,21 @@ export function DiscoverySettingsForm({
         action for you to approve; elsewhere it only tells you what is needed,
         where and who asked. Nothing is allowed until you add it.
       </p>
+      <label>
+        <span className="field-label">Keep full item text for (days)</span>
+        <input
+          type="number"
+          min={1}
+          max={365}
+          value={form.retentionDays}
+          onChange={(e) => set('retentionDays', Number(e.target.value))}
+        />
+      </label>
+      <p className="muted small">
+        Every day OpenDots notes what each item said about the people,
+        companies, invoices and projects in it, then removes the item’s full
+        text after this many days. Items still waiting on you are kept.
+      </p>
       <p className="muted small">
         Similar items:{' '}
         {state.embeddings.configured

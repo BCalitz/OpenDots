@@ -10,7 +10,7 @@ export interface Tag {
 }
 
 // Mailbox providers say nothing about who sent something.
-const SHARED_DOMAINS = new Set([
+export const SHARED_DOMAINS = new Set([
   'gmail.com',
   'googlemail.com',
   'outlook.com',

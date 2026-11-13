@@ -40,6 +40,7 @@ import { InboxEngine } from './inbox/engine.js';
 import { DiscoveryService, type Investigate } from './discovery/service.js';
 import { jevJudge, type Judge } from './discovery/classifier.js';
 import { DeliveryService } from './discovery/delivery.js';
+import { MemoryService } from './memory/service.js';
 import { ProposalService } from './discovery/proposals.js';
 import { openAiEmbedder, type Embedder } from './discovery/embeddings.js';
 import type { PushService } from './push.js';
@@ -67,6 +68,8 @@ export class Platform {
   readonly discovery: DiscoveryService;
   /** Discovery's pushes: now, after a hold, or in the morning brief. */
   readonly delivery?: DeliveryService;
+  /** Distills items into entities, and prunes them once a day. */
+  readonly memory: MemoryService;
   /** The owner's three choices on what a Dot looked into. */
   readonly proposals: ProposalService;
   /** Similar items by wording, when EMBEDDING_BASE_URL is set. */
@@ -152,6 +155,8 @@ export class Platform {
           (message) => push.send(message),
           {
             previews: () => push.previews,
+            memoryLine: (day) =>
+              workspace.inbox.memory.report(workspace.ownerId, day),
           },
         )
       : undefined;
@@ -184,6 +189,11 @@ export class Platform {
       previews: () => push?.previews ?? false,
     });
     this.inbox.onEvents(this.discovery.listener);
+    this.memory = new MemoryService(workspace.inbox, {
+      ownerId: workspace.ownerId,
+      judge: () => this.jev(),
+      paused,
+    });
     // After an email is looked into, the Dot proposes the reply in the main
     // chat and sends it only once the owner approves the exact text.
     this.discovery.onReady((finding, event) => {
@@ -243,6 +253,7 @@ export class Platform {
     await this.discovery.start();
     await this.proposals.start();
     this.delivery?.start();
+    this.memory.start();
     if (!this.channel) return;
     try {
       await this.channel.start();
@@ -261,6 +272,7 @@ export class Platform {
     this.discovery.stop();
     this.proposals.stop();
     this.delivery?.stop();
+    this.memory.stop();
     await this.setupTelemetry.stop();
     await this.channel?.stop();
     this.approvals.close();

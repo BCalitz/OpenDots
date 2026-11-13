@@ -113,7 +113,12 @@ export class DeliveryService {
   constructor(
     private store: DiscoveryStore,
     private send: (message: PushMessage) => Promise<unknown>,
-    private options: { previews?: () => boolean; now?: () => number } = {},
+    private options: {
+      previews?: () => boolean;
+      now?: () => number;
+      /** Today's line from memory's daily run, for the brief. */
+      memoryLine?: (day: string) => Promise<string | undefined>;
+    } = {},
   ) {}
   private now() {
     return this.options.now?.() ?? Date.now();
@@ -307,7 +312,12 @@ export class DeliveryService {
         proposalId: null,
         kind: 'brief',
         title: 'Your morning brief',
-        body: `${parts.join(', ')}. Open the OpenDots inbox to go through them.`,
+        body: [
+          `${parts.join(', ')}. Open the OpenDots inbox to go through them.`,
+          await this.options.memoryLine?.(today.date),
+        ]
+          .filter(Boolean)
+          .join(' '),
         threadId: null,
         section: null,
         urgent: false,

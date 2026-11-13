@@ -342,6 +342,42 @@ CREATE UNIQUE INDEX thread_bindings_delegated ON thread_bindings(delegated_from,
 DROP TABLE delegate_threads;
 `,
   },
+  {
+    version: 14,
+    name: 'entities and the daily prune',
+    sql: `
+-- What OpenDots remembers about each real thing the owner's items mention: a
+-- person, company, project, place, invoice, order or ticket. facts is a JSON
+-- list, newest first, of what items said about it; it outlives the items.
+CREATE TABLE entities(id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, facts TEXT NOT NULL DEFAULT '[]', mentions INTEGER NOT NULL DEFAULT 0, first_seen_at BIGINT NOT NULL, last_seen_at BIGINT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, seq BIGINT GENERATED ALWAYS AS IDENTITY);
+CREATE INDEX entities_owner ON entities(owner_id, last_seen_at DESC);
+-- Every name and identifier an entity goes by, for exact lookup. family
+-- groups tag kinds that name the same sort of thing (project, place and name
+-- are all 'name'). One entity per owner, family and spelling.
+CREATE TABLE entity_aliases(owner_id TEXT NOT NULL, family TEXT NOT NULL, normalized TEXT NOT NULL, value TEXT NOT NULL, entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, created_at BIGINT NOT NULL, PRIMARY KEY(owner_id, family, normalized));
+CREATE INDEX entity_aliases_entity ON entity_aliases(entity_id);
+CREATE INDEX entity_aliases_trgm ON entity_aliases USING gin (normalized public.gin_trgm_ops) WHERE family IN ('person','name');
+-- How entities relate: works_at (a person to a company) or mentioned_with
+-- (stored once per pair, smaller id first). weight counts the items.
+CREATE TABLE entity_edges(owner_id TEXT NOT NULL, entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, other_entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, relation TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 1, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY(entity_id, other_entity_id, relation));
+CREATE INDEX entity_edges_other ON entity_edges(other_entity_id);
+-- Which item mentioned which entity, and how it was matched: alias, sender,
+-- fuzzy, jev, new or owner. Pruned with the item.
+CREATE TABLE event_entity_links(event_id TEXT NOT NULL, entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE, owner_id TEXT NOT NULL, how TEXT NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY(event_id, entity_id));
+CREATE INDEX event_entity_links_entity ON event_entity_links(entity_id);
+
+-- An item is pruned only after its facts are in its entities.
+ALTER TABLE inbox_events ADD COLUMN distilled_at BIGINT;
+CREATE INDEX inbox_events_undistilled ON inbox_events(occurred_at) WHERE distilled_at IS NULL;
+CREATE INDEX inbox_events_distilled ON inbox_events(received_at) WHERE distilled_at IS NOT NULL;
+-- The later item that said this one no longer needs the owner.
+ALTER TABLE discovery_findings ADD COLUMN resolved_by TEXT;
+CREATE INDEX discovery_findings_resolved_by ON discovery_findings(resolved_by) WHERE resolved_by IS NOT NULL;
+
+-- One line a day: what was distilled and pruned. day is the owner's local date.
+CREATE TABLE memory_runs(owner_id TEXT NOT NULL, day TEXT NOT NULL, distilled INTEGER NOT NULL, pruned INTEGER NOT NULL, entities INTEGER NOT NULL, report TEXT NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY(owner_id, day));
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

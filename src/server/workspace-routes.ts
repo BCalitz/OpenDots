@@ -3,6 +3,7 @@ import { pageRoutes } from './page-routes.js';
 import { insightRoutes } from './insight-routes.js';
 import { inboxRoutes } from './inbox/routes.js';
 import { discoveryRoutes } from './discovery/routes.js';
+import { memoryRoutes } from './memory/routes.js';
 import { chatRoutes } from './chat-routes.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -33,6 +34,7 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   app.route('/', insightRoutes(platform));
   app.route('/', inboxRoutes(platform));
   app.route('/', discoveryRoutes(platform));
+  app.route('/', memoryRoutes(platform));
   app.post('/setup-telemetry', async (c) => {
     const parsed = setupInputSchema.safeParse(
       await c.req.json().catch(() => null),

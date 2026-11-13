@@ -238,6 +238,11 @@ export interface DiscoverySettings {
   trusted: string[];
   /** Apps (see DISCOVERY_APPS) where a Dot may propose actions for approval. */
   allowedApps: string[];
+  /**
+   * Days an item's full text is kept once its facts are remembered. Items
+   * still waiting on the owner are kept however old.
+   */
+  retentionDays: number;
 }
 /**
  * A flagged item a Dot has looked into, waiting for the owner's choice:

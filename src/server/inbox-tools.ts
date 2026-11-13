@@ -138,5 +138,77 @@ export function inboxTools(
         };
       },
     }),
+    defineTool({
+      name: 'search_memory',
+      description: `Look up what OpenDots remembers about a person, company, project, place, invoice, order or ticket: every name it goes by, what recent items said about it (newest first), and what it is related to. Memory keeps these facts after the items themselves are cleared, so use it for anything older than the inbox holds, or to see everything about one thing at once. A fact's item_id can be read with read_inbox_item while the item is still kept; after that its link opens it in the app. ${UNTRUSTED}`,
+      parameters: z.object({
+        query: z
+          .string()
+          .max(200)
+          .optional()
+          .describe(
+            'A name or identifier, such as "Thandi", "Acme" or "INV-2041". Leave out to list recently seen things.',
+          ),
+        kind: z
+          .enum([
+            'person',
+            'company',
+            'project',
+            'place',
+            'name',
+            'invoice',
+            'order',
+            'ticket',
+          ])
+          .optional(),
+        limit: z.number().int().min(1).max(10).optional(),
+      }),
+      execute: async ({ query, kind, limit }) => {
+        await check();
+        const owner = workspace.ownerId;
+        const found = await inbox.memory.search(owner, {
+          query,
+          kind,
+          limit: limit ?? 5,
+        });
+        const things = [];
+        for (const entity of found) {
+          const detail = await inbox.memory.entity(owner, entity.id);
+          if (!detail) continue;
+          things.push({
+            kind: detail.kind,
+            name: detail.name,
+            also_known_as: detail.aliases
+              .map((alias) => alias.value)
+              .filter((value) => value !== detail.name),
+            items: detail.mentions,
+            first_seen: new Date(detail.firstSeenAt).toISOString(),
+            last_seen: new Date(detail.lastSeenAt).toISOString(),
+            facts: detail.facts.slice(0, 8).map((fact) => ({
+              when: new Date(fact.at).toISOString(),
+              app: fact.app,
+              from: fact.from,
+              title: fact.title,
+              ...(fact.amounts ? { amounts: fact.amounts } : {}),
+              ...(fact.status ? { status: fact.status } : {}),
+              item_id: fact.eventId,
+              ...(fact.url ? { link: fact.url } : {}),
+            })),
+            related: detail.related.slice(0, 6).map((other) => ({
+              kind: other.kind,
+              name: other.name,
+              how: other.relation.replace('_', ' '),
+              items: other.weight,
+            })),
+          });
+        }
+        return {
+          things,
+          note: things.length
+            ? UNTRUSTED
+            : 'Nothing remembered by that name. Try part of it, or search_inbox.',
+        };
+      },
+    }),
   ];
 }

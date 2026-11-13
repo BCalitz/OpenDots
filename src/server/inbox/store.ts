@@ -26,6 +26,7 @@ import type {
 import type { InboxEvent } from './source.js';
 import { extractTags } from './tags.js';
 import { DiscoveryStore } from '../discovery/store.js';
+import { MemoryStore } from '../memory/store.js';
 
 const MAX_EVENTS_PER_SOURCE = 2000;
 const MAX_TEXT = 2000;
@@ -67,13 +68,24 @@ const FINDING = sql.raw(
 type EventRow = Omit<InboxEventView, 'finding'> & {
   findingId: string | null;
 };
+/**
+ * Items that may be removed: their facts are in their entities, and nothing
+ * still waits on the owner (an open finding, choice or queued push).
+ */
+const PRUNABLE = sql.raw(`e.distilled_at IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM discovery_findings f WHERE f.event_id=e.id AND f.state IN ('flagged','investigating'))
+  AND NOT EXISTS (SELECT 1 FROM proposals p WHERE p.event_id=e.id AND p.state IN ('open','preparing','prepared','handling','snoozed','failed'))
+  AND NOT EXISTS (SELECT 1 FROM discovery_pushes d JOIN discovery_findings f ON f.id=d.finding_id WHERE f.event_id=e.id AND d.state IN ('queued','brief'))`);
 const EVENT_QUERY = sql`SELECT e.id, e.source_id, COALESCE(s.name, 'Removed source') AS source_name, e.external_id, e.kind, e.title, e.summary, e.priority, e.sender AS "from", e.url, e.occurred_at, e.received_at, e.state, f.id AS finding_id FROM inbox_events e LEFT JOIN inbox_sources s ON s.id=e.source_id LEFT JOIN discovery_findings f ON f.event_id=e.id`;
 
 export class InboxStore {
   /** Links, embeddings, delivery and settings for discovery with history. */
   readonly discovery: DiscoveryStore;
+  /** Entities: what items said, kept after the items are pruned. */
+  readonly memory: MemoryStore;
   constructor(private db: Db) {
     this.discovery = new DiscoveryStore(db);
+    this.memory = new MemoryStore(db);
   }
   private row(id: string) {
     return this.db.row<SourceRow>(
@@ -170,6 +182,7 @@ export class InboxStore {
   remove(id: string) {
     return this.db.transaction(async () => {
       await this.discovery.forgetSource(id);
+      await this.memory.forgetSource(id);
       await this.db.run(
         sql`DELETE FROM discovery_findings WHERE event_id IN (SELECT id FROM inbox_events WHERE source_id=${id})`,
       );
@@ -272,13 +285,12 @@ export class InboxStore {
           });
         }
       }
+      // A cap behind the daily prune, for a source that floods; it too only
+      // removes what memory has kept.
       for (const sourceId of new Set(events.map((event) => event.sourceId)))
-        await this.db.run(
-          sql`DELETE FROM inbox_events WHERE source_id=${sourceId} AND id NOT IN (SELECT id FROM inbox_events WHERE source_id=${sourceId} ORDER BY received_at DESC, seq DESC LIMIT ${MAX_EVENTS_PER_SOURCE})`,
+        await this.drop(
+          sql`e.source_id=${sourceId} AND e.id NOT IN (SELECT id FROM inbox_events WHERE source_id=${sourceId} ORDER BY received_at DESC, seq DESC LIMIT ${MAX_EVENTS_PER_SOURCE})`,
         );
-      await this.db.run(
-        sql`DELETE FROM discovery_findings f WHERE NOT EXISTS (SELECT 1 FROM inbox_events e WHERE e.id=f.event_id)`,
-      );
     });
     const views: InboxEventView[] = [];
     for (const id of inserted) {
@@ -287,7 +299,43 @@ export class InboxStore {
     }
     return views;
   }
-  /** Records an item's tags. They outlive the item itself. */
+  /**
+   * Removes items received before `before` whose facts are in their
+   * entities, with their tags, links, embeddings and findings. Items still
+   * waiting on the owner stay. Returns how many went.
+   */
+  prune(before: number) {
+    return this.db.transaction(() => this.drop(sql`e.received_at<${before}`));
+  }
+  private async drop(where: ReturnType<typeof sql>) {
+    const ids = (
+      await this.db.rows<{ id: string }>(
+        sql`SELECT e.id FROM inbox_events e WHERE ${where} AND ${PRUNABLE}`,
+      )
+    ).map((row) => row.id);
+    if (!ids.length) return 0;
+    const findings = sql`SELECT id FROM discovery_findings WHERE event_id = ANY(${ids})`;
+    await this.db.run(
+      sql`DELETE FROM event_links WHERE event_id = ANY(${ids}) OR other_event_id = ANY(${ids})`,
+    );
+    for (const table of [
+      'item_embeddings',
+      'event_tags',
+      'event_entity_links',
+    ] as const)
+      await this.db.run(
+        sql`DELETE FROM ${sql.raw(table)} WHERE event_id = ANY(${ids})`,
+      );
+    await this.db.run(
+      sql`DELETE FROM discovery_pushes WHERE finding_id IN (${findings})`,
+    );
+    await this.db.run(
+      sql`DELETE FROM discovery_findings WHERE event_id = ANY(${ids})`,
+    );
+    await this.db.run(sql`DELETE FROM inbox_events WHERE id = ANY(${ids})`);
+    return ids.length;
+  }
+  /** Records an item's tags; they go when the item is pruned. */
   private async tag(item: {
     id: string;
     sourceId: string;
@@ -527,6 +575,8 @@ export class InboxStore {
       route?: Route;
       delivery?: Delivery;
       note?: string;
+      /** The later item that said this one no longer needs the owner. */
+      resolvedBy?: string;
     },
   ) {
     const sets = [sql`updated_at=${Date.now()}`];
@@ -543,6 +593,7 @@ export class InboxStore {
     if (patch.route) sets.push(sql`route=${patch.route}`);
     if (patch.delivery) sets.push(sql`delivery=${patch.delivery}`);
     if (patch.note) sets.push(sql`note=${clip(patch.note, 500)}`);
+    if (patch.resolvedBy) sets.push(sql`resolved_by=${patch.resolvedBy}`);
     await this.db.run(
       sql`UPDATE discovery_findings SET ${sql.join(sets, ', ')} WHERE id=${id}`,
     );

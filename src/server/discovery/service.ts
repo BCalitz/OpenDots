@@ -69,7 +69,7 @@ const safeError = (error: unknown) =>
     : 'The investigation did not finish.'
   ).slice(0, 300);
 /** A sender's bare address, lower case. */
-const address = (from: string | null | undefined) =>
+export const address = (from: string | null | undefined) =>
   (/<([^>]+)>/.exec(from ?? '')?.[1] ?? from ?? '').trim().toLowerCase();
 
 /**
@@ -602,6 +602,7 @@ export class DiscoveryService {
         await this.store.updateFinding(finding.id, {
           state: 'resolved',
           note: `A later item says this no longer needs you: ${event.title}`,
+          resolvedBy: event.id,
         });
         await this.store.discovery.proposals.close(finding.id);
         await this.options.delivery?.cancel(finding.id, {
