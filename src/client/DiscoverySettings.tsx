@@ -179,12 +179,6 @@ export function DiscoverySettingsForm({
         companies, invoices and projects in it, then removes the item’s full
         text after this many days. Items still waiting on you are kept.
       </p>
-      <p className="muted small">
-        Similar items:{' '}
-        {state.embeddings.configured
-          ? `on, with ${state.embeddings.model}.`
-          : 'off. Set EMBEDDING_BASE_URL (for example a local Ollama) to find items with similar wording.'}
-      </p>
       <div className="discovery-settings-actions">
         <button className="primary" type="submit">
           Save

@@ -42,7 +42,6 @@ import { jevJudge, type Judge } from './discovery/classifier.js';
 import { DeliveryService } from './discovery/delivery.js';
 import { MemoryService } from './memory/service.js';
 import { ProposalService } from './discovery/proposals.js';
-import { openAiEmbedder, type Embedder } from './discovery/embeddings.js';
 import type { PushService } from './push.js';
 import { investigationMessage } from './discovery/investigation.js';
 
@@ -73,7 +72,6 @@ export class Platform {
   /** The owner's three choices on what a Dot looked into. */
   readonly proposals: ProposalService;
   /** Similar items by wording, when EMBEDDING_BASE_URL is set. */
-  readonly embedder?: Embedder;
   /** Threads, runs and their events, in this server's database. */
   readonly runner: ThreadRunner;
   /** Runs every turn: chat, mobile, voice, schedules, delegation, Slack. */
@@ -118,10 +116,6 @@ export class Platform {
     );
     await platform.runner.recoverInterruptedRuns();
     await platform.approvals.expireStale();
-    // Items stored before tags existed get theirs in the background.
-    void workspace.inbox
-      .backfillTags()
-      .catch(() => console.error('Could not tag earlier inbox items.'));
     return platform;
   }
   private constructor(
@@ -160,15 +154,11 @@ export class Platform {
           },
         )
       : undefined;
-    const embedder = config.embeddingBaseUrl
-      ? openAiEmbedder({
-          baseUrl: config.embeddingBaseUrl,
-          model: config.embeddingModel ?? 'nomic-embed-text',
-          apiKey: config.embeddingApiKey,
-          fetch: options.fetch,
-        })
-      : undefined;
-    this.embedder = embedder;
+    this.memory = new MemoryService(workspace.inbox, {
+      ownerId: workspace.ownerId,
+      judge: () => this.jev(),
+      paused,
+    });
     this.proposals = new ProposalService(workspace.inbox.discovery.proposals, {
       run: (threadId, prompt, metadata, signal) =>
         this.turn(threadId, prompt, signal, metadata),
@@ -182,18 +172,13 @@ export class Platform {
       judge: () => this.jev(),
       investigate: (input, signal) => this.investigate(input, signal),
       threshold: config.discoveryThreshold,
-      embedder: () => embedder,
+      memory: this.memory,
       delivery: this.delivery,
       proposals: this.proposals,
       dotName: async (dotId) => (await workspace.dot(dotId))?.name,
       previews: () => push?.previews ?? false,
     });
     this.inbox.onEvents(this.discovery.listener);
-    this.memory = new MemoryService(workspace.inbox, {
-      ownerId: workspace.ownerId,
-      judge: () => this.jev(),
-      paused,
-    });
     // After an email is looked into, the Dot proposes the reply in the main
     // chat and sends it only once the owner approves the exact text.
     this.discovery.onReady((finding, event) => {

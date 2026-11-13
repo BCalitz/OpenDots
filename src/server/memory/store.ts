@@ -28,6 +28,8 @@ export interface Fact {
   app: string;
   title: string;
   from: string | null;
+  /** The item's kind, such as `mail.received`; unset on older facts. */
+  kind?: string;
   /** Amounts in the item, such as "ZAR 1200.00". */
   amounts?: string[];
   /** What discovery made of it: category and state. */
@@ -79,6 +81,15 @@ export interface PendingItem {
   /** The earlier item this one said no longer needs the owner. */
   resolvesEventId: string | null;
 }
+/** A known entity a new item mentions, and how it was matched. */
+export interface Resolved {
+  id: string;
+  kind: EntityKind;
+  name: string;
+  how: MatchHow;
+  role?: 'sender' | 'employer';
+  facts: Fact[];
+}
 /** One entity an item mentions: a known one, or one to create. */
 export type Mention = {
   aliases: Alias[];
@@ -97,6 +108,15 @@ const view = ({ facts, ...row }: EntityRow): EntityView => ({
   ...row,
   facts: JSON.parse(facts) as Fact[],
 });
+const pendingSelect = (defaultOwner: string) =>
+  sql`SELECT e.id, COALESCE(a.user_id, ${defaultOwner}) AS owner_id, e.source_id, COALESCE(s.name, 'Removed source') AS source_name,
+      e.external_id, e.kind, e.title, e.summary, e.sender AS "from", e.url, e.occurred_at, e.received_at,
+      f.category, f.state AS finding_state,
+      (SELECT r.event_id FROM discovery_findings r WHERE r.resolved_by=e.id LIMIT 1) AS resolves_event_id
+    FROM inbox_events e
+    LEFT JOIN inbox_sources s ON s.id=e.source_id
+    LEFT JOIN accounts a ON s.type='account' AND a.id=(s.config::jsonb->>'accountId')
+    LEFT JOIN discovery_findings f ON f.event_id=e.id`;
 const addFact = (facts: Fact[], fact: Fact) =>
   [fact, ...facts.filter((f) => f.eventId !== fact.eventId)]
     .sort((a, b) => b.at - a.at)
@@ -111,27 +131,59 @@ export class MemoryStore {
 
   /**
    * Items whose facts are not yet in their entities, oldest first. An item
-   * from a judged source waits for discovery's verdict, or `settleMs`.
-   * `defaultOwner` owns items from sources with no account (webhooks).
+   * from a judged source waits for discovery's verdict, or `settleMs`;
+   * items that happened before `before` don't wait, since a later item is
+   * being judged against them. `defaultOwner` owns items from sources with
+   * no account (webhooks).
    */
   pending(
     defaultOwner: string,
-    options: { limit?: number; settleMs?: number; now?: number } = {},
+    options: {
+      limit?: number;
+      settleMs?: number;
+      now?: number;
+      before?: number;
+    } = {},
   ) {
     const now = options.now ?? Date.now();
     return this.db.rows<PendingItem>(
-      sql`SELECT e.id, COALESCE(a.user_id, ${defaultOwner}) AS owner_id, e.source_id, COALESCE(s.name, 'Removed source') AS source_name,
-          e.external_id, e.kind, e.title, e.summary, e.sender AS "from", e.url, e.occurred_at, e.received_at,
-          f.category, f.state AS finding_state,
-          (SELECT r.event_id FROM discovery_findings r WHERE r.resolved_by=e.id LIMIT 1) AS resolves_event_id
-        FROM inbox_events e
-        LEFT JOIN inbox_sources s ON s.id=e.source_id
-        LEFT JOIN accounts a ON s.type='account' AND a.id=(s.config::jsonb->>'accountId')
-        LEFT JOIN discovery_findings f ON f.event_id=e.id
-        WHERE e.distilled_at IS NULL
-          AND (f.id IS NOT NULL OR s.type IS DISTINCT FROM 'account' OR e.received_at<=${now - (options.settleMs ?? 3_600_000)})
+      sql`${pendingSelect(defaultOwner)} WHERE e.distilled_at IS NULL
+          AND (f.id IS NOT NULL OR s.type IS DISTINCT FROM 'account' OR e.received_at<=${now - (options.settleMs ?? 3_600_000)}
+            OR e.occurred_at<${options.before ?? 0})
         ORDER BY e.occurred_at, e.seq LIMIT ${options.limit ?? 200}`,
     );
+  }
+  /** One item, distilled or not, as matching needs it. */
+  item(defaultOwner: string, eventId: string) {
+    return this.db.row<PendingItem>(
+      sql`${pendingSelect(defaultOwner)} WHERE e.id=${eventId}`,
+    );
+  }
+  /** Known entities by id, with their facts. */
+  async entities(ownerId: string, ids: string[]) {
+    if (!ids.length) return [];
+    return (
+      await this.db.rows<EntityRow>(
+        sql`SELECT ${ENTITY} FROM entities WHERE owner_id=${ownerId} AND id = ANY(${ids})`,
+      )
+    ).map(view);
+  }
+  /** Items still stored that mention any of these entities. */
+  async eventsFor(entityIds: string[]) {
+    if (!entityIds.length) return [];
+    return (
+      await this.db.rows<{ eventId: string }>(
+        sql`SELECT DISTINCT event_id FROM event_entity_links WHERE entity_id = ANY(${entityIds})`,
+      )
+    ).map((row) => row.eventId);
+  }
+  /** The entities one stored item was distilled into. */
+  async entitiesOf(eventId: string) {
+    return (
+      await this.db.rows<{ entityId: string }>(
+        sql`SELECT entity_id FROM event_entity_links WHERE event_id=${eventId}`,
+      )
+    ).map((row) => row.entityId);
   }
 
   /** The entity an exact name or identifier belongs to. */
@@ -397,10 +449,19 @@ export class MemoryStore {
     await this.db.run(sql`DELETE FROM entities WHERE facts='[]'`);
   }
 
-  /** Whether a plain name also appears in another item: lone ones are noise. */
+  /**
+   * Whether a plain name also appears in another stored item, as whole
+   * words: lone ones are noise.
+   */
   async recurs(eventId: string, normalized: string) {
+    const words = normalized
+      .split(' ')
+      .filter(Boolean)
+      .map((word) => word.replace(/[\\^$.|?*+()[\]{}]/g, '\\$&'));
+    if (!words.length) return false;
+    const pattern = `\\m${words.join("[\\s_'’-]+")}\\M`;
     return !!(await this.db.row(
-      sql`SELECT 1 FROM event_tags WHERE event_id<>${eventId} AND normalized=${normalized} AND kind IN ('project','place','name') LIMIT 1`,
+      sql`SELECT 1 FROM inbox_events WHERE id<>${eventId} AND (title ~* ${pattern} OR summary ~* ${pattern}) LIMIT 1`,
     ));
   }
 

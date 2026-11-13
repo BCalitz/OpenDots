@@ -378,6 +378,16 @@ CREATE INDEX discovery_findings_resolved_by ON discovery_findings(resolved_by) W
 CREATE TABLE memory_runs(owner_id TEXT NOT NULL, day TEXT NOT NULL, distilled INTEGER NOT NULL, pruned INTEGER NOT NULL, entities INTEGER NOT NULL, report TEXT NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY(owner_id, day));
 `,
   },
+  {
+    version: 15,
+    name: 'discovery reads entities',
+    sql: `
+-- Discovery now gathers history from entities and their facts. Tags and
+-- per-item embeddings are no longer read or written.
+DROP TABLE IF EXISTS event_tags;
+DROP TABLE IF EXISTS item_embeddings;
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

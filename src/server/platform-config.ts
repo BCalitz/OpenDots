@@ -72,11 +72,6 @@ export interface PlatformConfig extends WebConfig {
   /** Lowest confidence — or, for a correlated item, lowest urgency — that
    * still flags an item. Default 0.6. */
   discoveryThreshold?: number;
-  /** OpenAI-compatible embeddings endpoint for similar items; off when unset. */
-  embeddingBaseUrl?: string;
-  /** Default nomic-embed-text. */
-  embeddingModel?: string;
-  embeddingApiKey?: string;
   voiceKey?: string;
   voiceModel?: string;
   voiceName: string;

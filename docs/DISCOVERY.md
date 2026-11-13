@@ -15,9 +15,9 @@ The design follows the TypeSafe skill (`.claude/skills/typesafe-ai/SKILL.md`): *
 flowchart LR
   subgraph Gather["Gather (every item)"]
     New[New item] --> Rules[Rules]
-    Rules --> Lookup[Code lookup:<br/>exact, then trigram]
-    Lookup --> Similar[Similar past items:<br/>embeddings]
-    Similar --> Match[Jev match:<br/>only if unsettled]
+    Rules --> Lookup[Its entities:<br/>exact, sender, trigram]
+    Lookup --> Match[Jev match:<br/>only if unsettled]
+    Match --> Facts[Earlier items<br/>in those entities]
   end
   subgraph Act["Judge with history, then act"]
     Judge[Jev judges in context:<br/>one call] --> Update[Update earlier items]
@@ -26,7 +26,7 @@ flowchart LR
     Dot --> Deliver[Delivery rules]
     Deliver --> You[Push now or<br/>morning brief]
   end
-  Match --> Judge
+  Facts --> Judge
 ```
 
 ## 1. Gather: find every earlier item this could relate to
@@ -34,14 +34,15 @@ flowchart LR
 This runs for every item that passes the rules, before any judgment. Otherwise "ignore that email" is never connected to the email.
 
 - **Rules**: mail the app filed as promotions, social, forums or spam is dropped with no Jev call.
-- **Code lookup**: a recall-tuned regex finds possible identifiers (invoice and PO numbers, amounts, email addresses, domains, names). Each is normalized (`INV-2041`, `inv 2041` and `Invoice #2041` become one key) and looked up exactly in `event_tags`, then by trigram similarity (`pg_trgm`) for typos and partial names. This is free, and reaches back as far as items are kept (see [MEMORY.md](MEMORY.md) for what is kept after that).
-- **Similar past items**: the item's text is embedded and the ~12 closest past items are added. This catches references with no shared identifier or sender, such as a Teams message about an email.
-- **Jev match**: only when code finds several or no clear matches for a person or company tag. It follows TypeSafe's [infinite cardinality choice](https://docs.typesafe.ai/cookbooks/infinite_cardinality_choice.md) cookbook:
+- **Catch up memory**: every earlier item not yet in memory is distilled first ([MEMORY.md](MEMORY.md)), so an item is judged against everything that came before it, even a minute before.
+- **Its entities**: a recall-tuned regex finds possible identifiers (invoice and PO numbers, amounts, email addresses, domains, names). Each is normalized (`INV-2041`, `inv 2041` and `Invoice #2041` become one key) and matched to the owner's entities the way memory matches them: exact names and identifiers, then the sender's address and company domain, then near spellings by trigram similarity (`pg_trgm`). This is free. Names seen for the first time have no history and are left out.
+- **Earlier items**: every earlier item in those entities' facts, scored by what links them: an invoice, order or ticket 3, a project, place or name 1.5, a person 1, the same sender 1 (0.5 after three days), a company 0.5. The ~12 strongest go to Jev, each with why it was picked, strongest reason first. Items already pruned come from their facts alone (title, sender, date, amounts and outcome), so history reaches back past the retention window; they can inform the judgment but can't be linked or updated.
+- **Jev match**: only when code finds several or no clear matches for a person or name. It follows TypeSafe's [infinite cardinality choice](https://docs.typesafe.ai/cookbooks/infinite_cardinality_choice.md) cookbook:
   1. One yes/no question per known entity of that type, about 300 per call.
   2. A re-read of the top ~80 with longer text, only when more than ~20 remain.
   3. One Choice over the top ~20.
 
-  In that cookbook, Jev's yes/no pass got the right answer into the final pick 82% of the time, against 35% for embedding search (OpenAI `text-embedding-3-small`). The re-read raised that to 88%, and a Choice confidence of 0.8 or more was right in all 48 such cases. Embeddings are therefore used to find similar items, never to decide that two tags are the same thing.
+  In that cookbook, Jev's yes/no pass got the right answer into the final pick 82% of the time, against 35% for embedding search (OpenAI `text-embedding-3-small`). The re-read raised that to 88%, and a Choice confidence of 0.8 or more was right in all 48 such cases. That is why Jev, not embeddings, decides that two names are the same thing. Jev's answer is kept for the item, so distilling it later doesn't ask again.
 
 ## 2. Judge with that history
 
@@ -64,7 +65,7 @@ Nouls use 0.7 and 0.3 as starting thresholds; the band between counts as unsettl
 
 **Update earlier items** (code): a "same thing" link at 0.8 or more is recorded. Lower scores go to a review queue, or are left unlinked below 0.5.
 
-- **"No longer needed":** marks the earlier finding resolved and cancels its queued push. If the push already went out, a short correction follows.
+- **"No longer needed":** marks the earlier finding resolved and cancels its queued push. If the push already went out, a short correction follows. Other open items about the same invoice, order or ticket, which both items mention, are resolved with it: "INV-2041 is paid" closes the invoice and its reminder.
 - **"More urgent":** escalates the earlier item. This is accepted from anyone.
 - **Downgrades and cancels:** only accepted from the owner, the earlier item's sender (same address), or someone in the owner's organisation (same domain or Teams tenant). From anyone else the item stays flagged with a note ("X says this can be ignored"). This stops a scam or injection email from hiding a real invoice. It's fixed for now and can become a setting later.
 
@@ -107,20 +108,18 @@ The Dot stays read-only until the owner approves. Replies are drafted in the Ope
 
 ## Storage
 
-- **`event_tags`**: one row per normalized identifier, person or company per item. Pruned with the item. What outlives the item is in its entities ([MEMORY.md](MEMORY.md)).
-- **Item embeddings**: one vector per item, in pgvector, for similar-item search.
-- **`discovery_findings`**: also stores Jev's raw answers per item.
-- **Link feedback**: the owner's confirmations and rejections of links, to measure and tune matching.
-- **Indexes**: `pg_trgm` on tag values; pgvector on embeddings. At one person's volume (tens to hundreds of thousands of items) an exact vector scan is fast enough; add an HNSW index only if it isn't.
+- **Entities** (`entities`, `entity_aliases`, `entity_edges`, `event_entity_links`): where history comes from. See [MEMORY.md](MEMORY.md).
+- **`discovery_findings`**: also stores Jev's raw answers per item, and why each earlier item was gathered.
+- **`event_links`**: items Jev found to be the same thing, and the owner's confirmations and rejections, to measure and tune matching. Pruned with the item.
+- **Indexes**: `pg_trgm` on person and name aliases.
 
-**Embedding model:** any OpenAI-compatible embeddings endpoint (`EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`). The default is a local model through Ollama, for example `nomic-embed-text`, so mail text isn't sent to a third provider. The TypeSafe SDK has no embeddings. Changing the model later means re-embedding stored items.
+Tags (`event_tags`) and per-item embeddings (`item_embeddings`) were dropped in migration 15: entities replace both.
 
 ## Where it lives
 
 - Jev questions: `src/server/discovery/classifier.ts`
-- Tags and free-form names: `src/server/inbox/tags.ts`; lookup by exact and near tags: `src/server/discovery/store.ts`
-- Judging in context and updating earlier items: `src/server/discovery/service.ts`
-- Similar items: `src/server/discovery/embeddings.ts`, vectors in `item_embeddings`
+- Tags and free-form names: `src/server/inbox/tags.ts`; matching them to entities: `src/server/memory/service.ts`
+- Gathering history, judging in context, and deciding in three steps (link earlier items, save the finding, follow up on earlier items): `src/server/discovery/service.ts`
 - Routing, delivery, quiet hours, hold window, morning brief and corrections: `src/server/discovery/delivery.ts`
 - Proposals (prepare, handle, not now): `src/server/discovery/proposals.ts`, `proposal-store.ts`
 

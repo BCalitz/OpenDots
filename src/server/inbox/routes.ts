@@ -101,7 +101,7 @@ export function inboxRoutes(platform: Platform) {
       .max(3650)
       .catch(90)
       .parse(c.req.query('days') ?? 90);
-    return c.json(await store.links(days));
+    return c.json(await store.links(platform.workspace.ownerId, days));
   });
   app.post('/inbox/sources', async (c) => {
     const parsed = createSource.safeParse(await c.req.json().catch(() => null));

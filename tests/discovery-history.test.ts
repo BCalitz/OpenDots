@@ -18,11 +18,7 @@ import {
   localTime,
   planDelivery,
 } from '../src/server/discovery/delivery.js';
-import {
-  embedderFromEnv,
-  openAiEmbedder,
-  type Embedder,
-} from '../src/server/discovery/embeddings.js';
+import { MemoryService } from '../src/server/memory/service.js';
 import { DEFAULT_DISCOVERY_SETTINGS } from '../src/server/discovery/store.js';
 import type { PushMessage } from '../src/server/push.js';
 import { testDb } from './fixtures/db.js';
@@ -152,7 +148,6 @@ function scriptedJudge(
 async function setup(
   script: (title: string, history: HistoryItem[]) => Verdict,
   options: {
-    embedder?: Embedder;
     match?: Judge['match'];
     now?: () => number;
   } = {},
@@ -200,7 +195,11 @@ async function setup(
       return { threadId: existingThreadId ?? `thread-${event.externalId}` };
     },
     delivery,
-    embedder: options.embedder ? () => options.embedder : undefined,
+    memory: new MemoryService(store, {
+      ownerId: 'owner',
+      judge: () => judge,
+      now,
+    }),
     dotName: async () => 'Books',
   });
   let n = 0;
@@ -289,42 +288,14 @@ describe('gathering history', () => {
     ]);
     await f.store.discovery.link(fresh.id, order.id, 0.6, 'review');
     await f.store.discovery.decideLink(fresh.id, order.id, 'rejected');
-    const history = await f.discovery.gather(
+    const { history } = await f.discovery.gather(
       fresh,
-      { ...fresh, app: 'Gmail' },
-      undefined,
       await f.store.discovery.settings(),
     );
     expect(history).toEqual([]);
   });
 
-  it('adds items similar in wording when an embedder is set', async () => {
-    const vectors: Record<string, number[]> = {
-      'The server room is too hot': [1, 0, 0],
-      'Aircon in the data centre failed': [0.95, 0.1, 0],
-      'Lunch menu': [0, 0, 1],
-    };
-    const embedder: Embedder = {
-      model: 'fake',
-      embed: async (texts) =>
-        texts.map((text) => vectors[text.split('\n')[0]] ?? [0, 1, 0]),
-    };
-    const f = await setup(() => verdict({ attention: false }), { embedder });
-    await f.deliver([
-      f.item('Aircon in the data centre failed', { from: 'a@one.example' }),
-      f.item('Lunch menu', { from: 'b@two.example' }),
-    ]);
-    await f.deliver([
-      f.item('The server room is too hot', { from: 'c@three.example' }),
-    ]);
-    const history = f.seen.get('The server room is too hot')!;
-    expect(history.map((entry) => entry.event.title)).toEqual([
-      'Aircon in the data centre failed',
-    ]);
-    expect(history[0].why).toEqual(['similar wording']);
-  });
-
-  it('asks Jev to match a name code cannot settle, and remembers the answer as a tag', async () => {
+  it('asks Jev to match a name code cannot settle, and finds the earlier item through it', async () => {
     const asked: string[] = [];
     const f = await setup(() => verdict({ attention: false }), {
       match: async (entity) => {
@@ -346,6 +317,73 @@ describe('gathering history', () => {
 });
 
 describe('judging with history', () => {
+  it('reaches back past the retention window through entities', async () => {
+    const f = await setup((_title, history) =>
+      verdict({
+        attention: false,
+        related: history.map((h) => related(h.event.id, { same: 1 })),
+      }),
+    );
+    const month = 30 * 86_400_000;
+    await f.store.ingest(
+      [
+        f.item('Invoice INV-5150 for April', {
+          occurredAt: Date.now() - month,
+        }),
+      ],
+      Date.now() - month,
+    );
+    await new MemoryService(f.store, { ownerId: 'owner' }).distill(
+      await f.store.discovery.settings(),
+    );
+    expect(await f.store.prune(Date.now() - 14 * 86_400_000)).toBe(1);
+    const [reminder] = await f.deliver([
+      f.item('Reminder: INV-5150 still unpaid'),
+    ]);
+    const history = f.seen.get('Reminder: INV-5150 still unpaid')!;
+    expect(history).toEqual([
+      expect.objectContaining({
+        pruned: true,
+        app: 'Gmail',
+        why: [
+          'both mention invoice INV-5150',
+          'same sender',
+          'both involve acme.example',
+        ],
+      }),
+    ]);
+    expect(history[0].event).toMatchObject({
+      title: 'Invoice INV-5150 for April',
+      summary: expect.stringMatching(/^Only a note/),
+    });
+    // Nothing is left to link to.
+    expect(await f.store.discovery.links(reminder.id)).toEqual([]);
+  });
+
+  it('closes every open item about the same invoice once its sender says it is done', async () => {
+    const f = await setup((title, history) =>
+      title.startsWith('Paid')
+        ? verdict({
+            attention: false,
+            asked: 'nothing',
+            related: history
+              .filter((h) => h.event.title.startsWith('Reminder'))
+              .map((h) => related(h.event.id, { same: 1, resolves: 0.95 })),
+          })
+        : verdict({ urgency: 'today', asked: 'reply' }),
+    );
+    await f.deliver([f.item('Invoice INV-6200')]);
+    await f.deliver([f.item('Reminder: INV-6200 is due')]);
+    await f.deliver([f.item('Paid INV-6200, thanks')]);
+    expect((await f.finding('Reminder: INV-6200 is due')).state).toBe(
+      'resolved',
+    );
+    expect(await f.finding('Invoice INV-6200')).toMatchObject({
+      state: 'resolved',
+      note: 'A later item says this no longer needs you: Paid INV-6200, thanks',
+    });
+  });
+
   it('links the same thing, queues unsure links for review, and resolves on the sender word', async () => {
     const f = await setup((title, history) => {
       if (title.startsWith('Invoice'))
@@ -565,48 +603,6 @@ describe('delivery', () => {
   });
 });
 
-describe('embeddings', () => {
-  it('calls an OpenAI-compatible endpoint and checks the vectors', async () => {
-    const requests: unknown[] = [];
-    const embedder = openAiEmbedder({
-      baseUrl: 'http://127.0.0.1:11434/v1/',
-      model: 'nomic-embed-text',
-      fetch: (async (url: string, init?: RequestInit) => {
-        requests.push([url, JSON.parse(String(init?.body))]);
-        return new Response(
-          JSON.stringify({
-            data: [
-              { index: 1, embedding: [0, 1] },
-              { index: 0, embedding: [1, 0] },
-            ],
-          }),
-        );
-      }) as typeof fetch,
-    });
-    expect(await embedder.embed(['a', 'b'])).toEqual([
-      [1, 0],
-      [0, 1],
-    ]);
-    expect(requests).toEqual([
-      [
-        'http://127.0.0.1:11434/v1/embeddings',
-        { model: 'nomic-embed-text', input: ['a', 'b'] },
-      ],
-    ]);
-    const broken = openAiEmbedder({
-      baseUrl: 'http://x',
-      model: 'm',
-      fetch: (async () =>
-        new Response(JSON.stringify({ data: [] }))) as unknown as typeof fetch,
-    });
-    await expect(broken.embed(['a'])).rejects.toThrow(/no usable vectors/);
-    expect(embedderFromEnv({})).toBeUndefined();
-    expect(embedderFromEnv({ EMBEDDING_BASE_URL: 'http://x' })?.model).toBe(
-      'nomic-embed-text',
-    );
-  });
-});
-
 describe('history order', () => {
   it('gives an item only earlier items as history, even when later ones are stored', async () => {
     const f = await setup(() => verdict({ attention: false }));
@@ -616,26 +612,14 @@ describe('history order', () => {
       f.item('Reminder: INV-3001 overdue', { occurredAt: now }),
     ]);
     const settings = await f.store.discovery.settings();
-    expect(
-      await f.discovery.gather(
-        first,
-        { ...first, app: 'Gmail' },
-        undefined,
-        settings,
-      ),
-    ).toEqual([]);
+    expect((await f.discovery.gather(first, settings)).history).toEqual([]);
     const later = (await f.store.events({})).find((e) =>
       e.title.startsWith('Reminder'),
     )!;
     expect(
-      (
-        await f.discovery.gather(
-          later,
-          { ...later, app: 'Gmail' },
-          undefined,
-          settings,
-        )
-      ).map((entry) => entry.event.title),
+      (await f.discovery.gather(later, settings)).history.map(
+        (entry) => entry.event.title,
+      ),
     ).toEqual(['Invoice INV-3001']);
   });
 });

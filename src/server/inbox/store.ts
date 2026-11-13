@@ -21,12 +21,23 @@ import type {
   SourceConfig,
   SourceKind,
   SourceType,
+  TagKind,
   Urgency,
 } from '../../shared/inbox-types.js';
 import type { InboxEvent } from './source.js';
-import { extractTags } from './tags.js';
 import { DiscoveryStore } from '../discovery/store.js';
-import { MemoryStore } from '../memory/store.js';
+import { MemoryStore, type Fact } from '../memory/store.js';
+
+// Kinds that link on the name alone, and kinds whose spellings are compared.
+const NAME_KINDS = new Set<TagKind>(['project', 'place', 'name']);
+const ALIKE_KINDS = new Set<TagKind>([
+  'invoice',
+  'order',
+  'person',
+  'project',
+  'place',
+  'name',
+]);
 
 const MAX_EVENTS_PER_SOURCE = 2000;
 const MAX_TEXT = 2000;
@@ -187,8 +198,6 @@ export class InboxStore {
         sql`DELETE FROM discovery_findings WHERE event_id IN (SELECT id FROM inbox_events WHERE source_id=${id})`,
       );
       await this.db.run(sql`DELETE FROM inbox_events WHERE source_id=${id}`);
-      // Removing a source removes what was learned from it.
-      await this.db.run(sql`DELETE FROM event_tags WHERE source_id=${id}`);
       return (
         (await this.db.run(sql`DELETE FROM inbox_sources WHERE id=${id}`)) > 0
       );
@@ -273,17 +282,7 @@ export class InboxStore {
         const changes = await this.db.run(
           sql`INSERT INTO inbox_events (id, source_id, external_id, kind, title, summary, priority, sender, url, payload, occurred_at, received_at) VALUES (${id}, ${event.sourceId}, ${clip(event.externalId, 300)}, ${clip(event.kind, 80)}, ${clip(event.title || '(untitled)', 300)}, ${clip(event.summary ?? '')}, ${event.priority ?? 'normal'}, ${event.from ? clip(event.from, 200) : null}, ${url}, ${clip(payload, 50_000)}, ${event.occurredAt}, ${now}) ON CONFLICT (source_id, external_id) DO NOTHING`,
         );
-        if (changes) {
-          inserted.push(id);
-          await this.tag({
-            id,
-            sourceId: event.sourceId,
-            title: event.title,
-            summary: event.summary,
-            from: event.from,
-            occurredAt: event.occurredAt,
-          });
-        }
+        if (changes) inserted.push(id);
       }
       // A cap behind the daily prune, for a source that floods; it too only
       // removes what memory has kept.
@@ -301,7 +300,7 @@ export class InboxStore {
   }
   /**
    * Removes items received before `before` whose facts are in their
-   * entities, with their tags, links, embeddings and findings. Items still
+   * entities, with their links and findings. Items still
    * waiting on the owner stay. Returns how many went.
    */
   prune(before: number) {
@@ -318,14 +317,9 @@ export class InboxStore {
     await this.db.run(
       sql`DELETE FROM event_links WHERE event_id = ANY(${ids}) OR other_event_id = ANY(${ids})`,
     );
-    for (const table of [
-      'item_embeddings',
-      'event_tags',
-      'event_entity_links',
-    ] as const)
-      await this.db.run(
-        sql`DELETE FROM ${sql.raw(table)} WHERE event_id = ANY(${ids})`,
-      );
+    await this.db.run(
+      sql`DELETE FROM event_entity_links WHERE event_id = ANY(${ids})`,
+    );
     await this.db.run(
       sql`DELETE FROM discovery_pushes WHERE finding_id IN (${findings})`,
     );
@@ -335,70 +329,108 @@ export class InboxStore {
     await this.db.run(sql`DELETE FROM inbox_events WHERE id = ANY(${ids})`);
     return ids.length;
   }
-  /** Records an item's tags; they go when the item is pruned. */
-  private async tag(item: {
-    id: string;
-    sourceId: string;
-    title: string;
-    summary?: string;
-    from?: string | null;
-    occurredAt: number;
-  }) {
-    for (const tag of extractTags(item))
-      await this.db.run(
-        sql`INSERT INTO event_tags VALUES (${item.id}, ${item.sourceId}, ${tag.kind}, ${tag.normalized}, ${tag.value}, ${item.occurredAt}) ON CONFLICT DO NOTHING`,
-      );
-  }
-  /** Tags stored items that have none, such as ones from before tags. */
-  async backfillTags() {
+  /**
+   * The owner's entities seen in the last `days` and the items that mention
+   * them, for the links view. Items still stored are read live; pruned ones
+   * from the facts their entities keep. Plain names are noisy one at a
+   * time, so only names found in two or more items are kept.
+   */
+  async links(
+    ownerId: string,
+    days = 90,
+    now = Date.now(),
+  ): Promise<LinksState> {
+    const since = now - days * 86_400_000;
     const rows = await this.db.rows<{
       id: string;
-      sourceId: string;
-      title: string;
-      summary: string;
-      from: string | null;
-      occurredAt: number;
+      kind: string;
+      name: string;
+      key: string | null;
+      facts: string;
     }>(
-      sql`SELECT e.id, e.source_id, e.title, e.summary, e.sender AS "from", e.occurred_at FROM inbox_events e WHERE NOT EXISTS (SELECT 1 FROM event_tags t WHERE t.event_id=e.id)`,
+      sql`SELECT e.id, e.kind, e.name, e.facts,
+          (SELECT min(a.normalized) FROM entity_aliases a WHERE a.entity_id=e.id AND a.family=(CASE e.kind WHEN 'company' THEN 'domain' WHEN 'project' THEN 'name' WHEN 'place' THEN 'name' ELSE e.kind END)) AS key
+        FROM entities e WHERE e.owner_id=${ownerId} AND e.last_seen_at>=${since}
+        ORDER BY e.last_seen_at DESC LIMIT 400`,
     );
-    for (const row of rows) await this.tag(row);
-    return rows.length;
+    const facts = new Map<string, Fact>();
+    const tags: LinksState['tags'] = [];
+    for (const row of rows) {
+      const ids = new Set<string>();
+      for (const fact of JSON.parse(row.facts) as Fact[])
+        if (fact.at >= since) {
+          ids.add(fact.eventId);
+          if (!facts.has(fact.eventId)) facts.set(fact.eventId, fact);
+        }
+      const kind = (row.kind === 'company' ? 'domain' : row.kind) as TagKind;
+      if (!ids.size || (NAME_KINDS.has(kind) && ids.size < 2)) continue;
+      tags.push({
+        kind,
+        normalized: row.key ?? row.name.toLowerCase(),
+        value: row.name,
+        itemIds: [...ids],
+      });
+    }
+    const recent = [...facts.values()]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 400);
+    if (!recent.length) return { items: [], tags: [], similar: [] };
+    const live = new Map(
+      (
+        await this.db.rows<LinksState['items'][number]>(
+          sql`SELECT e.id, e.source_id, COALESCE(s.name, 'Removed source') AS source_name, s.kind AS source_kind, e.title, e.sender AS "from", e.occurred_at, COALESCE(f.attention, false) AS flagged
+            FROM inbox_events e LEFT JOIN inbox_sources s ON s.id=e.source_id LEFT JOIN discovery_findings f ON f.event_id=e.id
+            WHERE e.id = ANY(${recent.map((fact) => fact.eventId)})`,
+        )
+      ).map((item) => [item.id, item]),
+    );
+    const kinds = new Map(
+      (
+        await this.db.rows<{ id: string; kind: SourceKind }>(
+          sql`SELECT id, kind FROM inbox_sources`,
+        )
+      ).map((source) => [source.id, source.kind]),
+    );
+    const items = recent.map(
+      (fact) =>
+        live.get(fact.eventId) ?? {
+          id: fact.eventId,
+          sourceId: fact.sourceId,
+          sourceName: fact.app,
+          sourceKind: kinds.get(fact.sourceId) ?? null,
+          title: fact.title,
+          from: fact.from,
+          occurredAt: fact.at,
+          flagged: false,
+        },
+    );
+    const shown = new Set(items.map((item) => item.id));
+    const kept = tags
+      .map((tag) => ({
+        ...tag,
+        itemIds: tag.itemIds.filter((id) => shown.has(id)),
+      }))
+      .filter((tag) => tag.itemIds.length)
+      .sort(
+        (a, b) =>
+          b.itemIds.length - a.itemIds.length ||
+          a.kind.localeCompare(b.kind) ||
+          a.normalized.localeCompare(b.normalized),
+      );
+    const similar = await this.alike(kept);
+    return { items, tags: kept, similar };
   }
-  /**
-   * Items from the last `days` and the tags they carry, plus tags of one
-   * kind spelled alike (trigram similarity), for the links view.
-   */
-  async links(days = 90, now = Date.now()): Promise<LinksState> {
-    const since = now - days * 86_400_000;
-    const items = await this.db.rows<LinksState['items'][number]>(
-      sql`SELECT ids.event_id AS id, ids.source_id, COALESCE(s.name, 'Removed source') AS source_name, s.kind AS source_kind, e.title, e.sender AS "from", ids.occurred_at, COALESCE(f.attention, false) AS flagged
-        FROM (SELECT DISTINCT ON (event_id) event_id, source_id, occurred_at FROM event_tags WHERE occurred_at>=${since} ORDER BY event_id) ids
-        LEFT JOIN inbox_events e ON e.id=ids.event_id
-        LEFT JOIN inbox_sources s ON s.id=ids.source_id
-        LEFT JOIN discovery_findings f ON f.event_id=ids.event_id
-        ORDER BY ids.occurred_at DESC LIMIT 400`,
-    );
-    const ids = items.map((item) => item.id);
-    if (!ids.length) return { items: [], tags: [], similar: [] };
-    // Projects, places and plain names link on the name alone and take the
-    // most specific kind any item gave it. They are noisy one at a time, so
-    // only names found in two or more items are kept.
-    const merged = sql`SELECT CASE WHEN family='name' THEN (array_agg(kind ORDER BY array_position(ARRAY['project','place','name']::text[], kind)))[1] ELSE family END AS kind,
-        normalized, (array_agg(value ORDER BY occurred_at))[1] AS value, array_agg(DISTINCT event_id) AS item_ids, count(DISTINCT event_id) AS n
-      FROM (SELECT event_id, kind, normalized, value, occurred_at, CASE WHEN kind IN ('project','place','name') THEN 'name' ELSE kind END AS family
-        FROM event_tags WHERE event_id = ANY(${ids})) t
-      GROUP BY family, normalized HAVING family<>'name' OR count(DISTINCT event_id)>=2`;
-    const tags = await this.db.rows<LinksState['tags'][number]>(
-      sql`SELECT kind, normalized, value, item_ids FROM (${merged}) m ORDER BY n DESC, kind, normalized`,
-    );
-    const similar = await this.db.rows<LinksState['similar'][number]>(
-      sql`WITH keys AS (${merged})
+  /** Pairs of shown entities of one kind spelled alike. */
+  private async alike(tags: LinksState['tags']) {
+    const keys = tags.filter((tag) => ALIKE_KINDS.has(tag.kind));
+    if (keys.length < 2) return [];
+    return this.db.rows<LinksState['similar'][number]>(
+      sql`WITH keys AS (SELECT * FROM unnest(${keys.map((tag) => tag.kind)}::text[], ${keys.map((tag) => tag.normalized)}::text[]) AS k(kind, normalized))
         SELECT a.kind, a.normalized AS a, b.normalized AS b, round(public.similarity(a.normalized, b.normalized)::numeric, 2) AS similarity
         FROM keys a JOIN keys b ON a.kind=b.kind AND a.normalized<b.normalized
-        WHERE a.kind IN ('invoice', 'order', 'person', 'project', 'place', 'name') AND public.similarity(a.normalized, b.normalized)>=0.4
+        WHERE public.similarity(a.normalized, b.normalized)>=0.4
         ORDER BY similarity DESC LIMIT 100`,
     );
-    return { items, tags, similar };
   }
   private async toEvent({
     findingId,
@@ -419,25 +451,6 @@ export class InboxStore {
       sql`${EVENT_QUERY} WHERE e.id=${id}`,
     );
     return row ? this.toEvent(row) : undefined;
-  }
-  /**
-   * Recent events from the same sender, looking backward from `beforeMs`
-   * within `windowMs` — candidates for discovery's cross-item correlation.
-   * No per-source-pair logic: any source that labels an event's `sender`
-   * participates.
-   */
-  async recentFrom(
-    from: string,
-    beforeMs: number,
-    windowMs: number,
-    excludeId: string,
-    limit = 10,
-  ): Promise<InboxEventView[]> {
-    return this.toEvents(
-      await this.db.rows<EventRow>(
-        sql`${EVENT_QUERY} WHERE e.sender=${from} AND e.id<>${excludeId} AND e.occurred_at BETWEEN ${beforeMs - windowMs} AND ${beforeMs} ORDER BY e.occurred_at DESC LIMIT ${limit}`,
-      ),
-    );
   }
   /** The stored raw payload, as untrusted data. */
   async payload(id: string): Promise<unknown> {

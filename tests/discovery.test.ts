@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryService } from '../src/server/memory/service.js';
 import { InboxStore } from '../src/server/inbox/store.js';
 import { InboxEngine } from '../src/server/inbox/engine.js';
 import {
@@ -344,87 +345,6 @@ describe('discovery model', () => {
   });
 });
 
-describe('InboxStore.recentFrom', () => {
-  const HOUR = 60 * 60_000;
-  const event = (
-    sourceId: string,
-    id: string,
-    from: string,
-    occurredAt: number,
-  ): InboxEvent => ({
-    sourceId,
-    externalId: id,
-    kind: 'mail.received',
-    title: id,
-    summary: '',
-    from,
-    raw: {},
-    occurredAt,
-  });
-
-  it('finds a prior event from the same sender within the window', async () => {
-    const { store, source } = await inbox();
-    const [earlier] = await store.ingest([
-      event(source.id, 'm1', 'jane@client.com', 10 * HOUR),
-    ]);
-    const [later] = await store.ingest([
-      event(source.id, 'm2', 'jane@client.com', 11 * HOUR),
-    ]);
-    expect(
-      (
-        await store.recentFrom(
-          'jane@client.com',
-          later.occurredAt,
-          48 * HOUR,
-          later.id,
-        )
-      ).map((e) => e.id),
-    ).toEqual([earlier.id]);
-  });
-
-  it('excludes events outside the window', async () => {
-    const { store, source } = await inbox();
-    await store.ingest([event(source.id, 'm1', 'jane@client.com', 0)]);
-    const [later] = await store.ingest([
-      event(source.id, 'm2', 'jane@client.com', 100 * HOUR),
-    ]);
-    expect(
-      await store.recentFrom(
-        'jane@client.com',
-        later.occurredAt,
-        HOUR,
-        later.id,
-      ),
-    ).toEqual([]);
-  });
-
-  it('does not match a different sender', async () => {
-    const { store, source } = await inbox();
-    await store.ingest([event(source.id, 'm1', 'jane@client.com', 0)]);
-    const [later] = await store.ingest([
-      event(source.id, 'm2', 'other@client.com', HOUR),
-    ]);
-    expect(
-      await store.recentFrom(
-        'other@client.com',
-        later.occurredAt,
-        48 * HOUR,
-        later.id,
-      ),
-    ).toEqual([]);
-  });
-
-  it('never returns the event itself', async () => {
-    const { store, source } = await inbox();
-    const [only] = await store.ingest([
-      event(source.id, 'm1', 'jane@client.com', 0),
-    ]);
-    expect(
-      await store.recentFrom('jane@client.com', only.occurredAt, HOUR, only.id),
-    ).toEqual([]);
-  });
-});
-
 describe('discovery sources', () => {
   /** A connected account whose tools answer from `results`, recording each call. */
   const run = (results: Record<string, unknown>) => {
@@ -727,7 +647,11 @@ describe('discovery service', () => {
         };
       },
     });
-    const discovery = new DiscoveryService(store, { judge, investigate });
+    const discovery = new DiscoveryService(store, {
+      judge,
+      investigate,
+      memory: new MemoryService(store, { ownerId: 'owner' }),
+    });
     const deliver = async (events: InboxEvent[]) => {
       const fresh = await store.ingest(events);
       discovery.listener({
@@ -1030,7 +954,6 @@ describe('discovery history routes', () => {
       baseUrl: 'https://unused.invalid/v1',
       voiceName: 'marin',
       slackUsers: [],
-      embeddingBaseUrl: 'http://127.0.0.1:1/v1',
     });
     cleanup.push(() => platform.stop());
     const app = discoveryRoutes(platform);
@@ -1046,10 +969,6 @@ describe('discovery history routes', () => {
   it('reads and validates delivery settings', async () => {
     const f = await routes();
     const state = await (await f.app.request('/discovery')).json();
-    expect(state.embeddings).toEqual({
-      configured: true,
-      model: 'nomic-embed-text',
-    });
     expect(state.settings).toMatchObject({
       briefTime: '07:30',
       holdMinutes: 5,

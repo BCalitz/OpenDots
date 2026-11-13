@@ -11,7 +11,6 @@ import {
   type InboxEventView,
   type Urgency,
 } from '../../shared/inbox-types.js';
-import type { UnsettledEntity } from './store.js';
 
 /** Jev's answers about one earlier item, each 0 to 1. */
 export interface RelatedVerdict {
@@ -53,9 +52,22 @@ export type JudgeItem = Pick<
   /** Sent by the owner or their organisation; unset when not known. */
   fromOwner?: boolean;
 };
+/** A person or name in an item that code can't match on its own. */
+interface UnsettledEntity {
+  kind: 'person' | 'name';
+  normalized: string;
+  value: string;
+  candidates: { normalized: string; value: string }[];
+}
 /** An earlier item gathered for a new one, and why code picked it. */
 export interface HistoryItem {
-  event: InboxEventView;
+  /** The item, or for one already pruned, what its facts say. */
+  event: Pick<
+    InboxEventView,
+    'id' | 'title' | 'summary' | 'from' | 'kind' | 'occurredAt'
+  >;
+  /** Only a note of the item is kept; it can't be linked or updated. */
+  pruned?: boolean;
   app: string;
   /** Such as "invoice INV-2041", "same sender" or "similar wording". */
   why: string[];

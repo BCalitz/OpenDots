@@ -63,10 +63,6 @@ export function discoveryRoutes(platform: Platform) {
         };
       }),
       model: { configured: !!config.typesafeApiKey },
-      embeddings: {
-        configured: !!platform.embedder,
-        model: platform.embedder?.model ?? null,
-      },
       settings: await store.discovery.settings(),
     };
     return c.json(state);

@@ -5,7 +5,6 @@ import type {
   BriefEntry,
   DiscoverySettings,
   EventLinkView,
-  TagKind,
 } from '../../shared/inbox-types.js';
 
 export const DEFAULT_DISCOVERY_SETTINGS: DiscoverySettings = {
@@ -18,20 +17,6 @@ export const DEFAULT_DISCOVERY_SETTINGS: DiscoverySettings = {
   retentionDays: 14,
 };
 
-/** An earlier item found by code, and why. */
-export interface TagMatch {
-  eventId: string;
-  score: number;
-  /** What the two items share, such as "invoice INV-2041". */
-  shared: string[];
-}
-/** A person or name in a new item that code can't match on its own. */
-export interface UnsettledEntity {
-  kind: TagKind;
-  normalized: string;
-  value: string;
-  candidates: { normalized: string; value: string }[];
-}
 export interface QueuedPush {
   id: string;
   findingId: string | null;
@@ -50,25 +35,13 @@ export interface QueuedPush {
   sentAt: number | null;
 }
 
-const NAME_KINDS = sql.raw("('project','place','name')");
-const family = (column: string) =>
-  sql.raw(
-    `CASE WHEN ${column} IN ('project','place','name') THEN 'name' ELSE ${column} END`,
-  );
-// How much one shared tag says about two items being related.
-const WEIGHT = sql.raw(
-  "CASE m.family WHEN 'invoice' THEN 3 WHEN 'order' THEN 3 WHEN 'ticket' THEN 3 WHEN 'name' THEN 1.5 WHEN 'person' THEN 1 WHEN 'email' THEN 1 ELSE 0.5 END",
-);
 const PUSH = sql.raw(
   'id, finding_id, proposal_id, kind, title, body, thread_id, section, urgent, due_at, state, created_at, sent_at',
 );
-const vector = (values: number[]) =>
-  `[${values.map((value) => (Number.isFinite(value) ? value : 0)).join(',')}]`;
 
 /**
- * Discovery with history: earlier items related by tags or wording, links
- * between items, pushes waiting to go out, and the owner's delivery
- * settings.
+ * Discovery with history: links between items, pushes waiting to go out,
+ * and the owner's delivery settings. Earlier items come from memory.
  */
 export class DiscoveryStore {
   /** Proposals: flagged items with the owner's three choices. */
@@ -103,92 +76,7 @@ export class DiscoveryStore {
       sql`DELETE FROM event_links WHERE event_id IN (${events}) OR other_event_id IN (${events})`,
     );
     await this.db.run(
-      sql`DELETE FROM item_embeddings WHERE event_id IN (${events})`,
-    );
-    await this.db.run(
       sql`DELETE FROM discovery_pushes WHERE finding_id IN (SELECT f.id FROM discovery_findings f WHERE f.event_id IN (${events}))`,
-    );
-  }
-
-  /** The names, projects, places and other keys tagged in one item. */
-  tags(eventId: string) {
-    return this.db.rows<{ kind: string; value: string }>(
-      sql`SELECT kind, value FROM event_tags WHERE event_id=${eventId} ORDER BY kind, value`,
-    );
-  }
-
-  /**
-   * Earlier items still in the inbox that share a tag with this one: exact
-   * keys, plus near spellings of invoice, order, person and name tags at
-   * half weight. Tags on the owner's own domains say nothing and are left
-   * out.
-   */
-  related(
-    eventId: string,
-    options: { limit?: number; ignoreDomains?: string[]; before?: number } = {},
-  ): Promise<TagMatch[]> {
-    const ignore = options.ignoreDomains ?? [];
-    return this.db.rows<TagMatch>(
-      sql`WITH mine AS (
-          SELECT ${family('kind')} AS family, kind, normalized, value FROM event_tags
-          WHERE event_id=${eventId} AND NOT (kind='domain' AND normalized = ANY(${ignore}))
-        ), hits AS (
-          SELECT DISTINCT ON (t.event_id, m.family, m.normalized) t.event_id,
-            ${WEIGHT} * CASE WHEN t.normalized=m.normalized THEN 1 ELSE 0.5 END AS weight,
-            (CASE WHEN m.family='name' THEN m.kind || ' ' || m.value ELSE m.kind || ' ' || m.normalized END) AS label
-          FROM mine m JOIN event_tags t ON ${family('t.kind')}=m.family
-            AND (t.normalized=m.normalized OR (m.family IN ('invoice','order','person','name')
-              AND t.normalized OPERATOR(public.%) m.normalized AND public.similarity(t.normalized, m.normalized)>=0.6))
-          WHERE t.event_id<>${eventId}
-          ORDER BY t.event_id, m.family, m.normalized, weight DESC
-        )
-        SELECT h.event_id, sum(h.weight)::float AS score, array_agg(h.label ORDER BY h.weight DESC) AS shared
-        FROM hits h JOIN inbox_events e ON e.id=h.event_id
-        WHERE e.occurred_at <= ${options.before ?? Number.MAX_SAFE_INTEGER}
-        GROUP BY h.event_id ORDER BY score DESC, max(e.occurred_at) DESC LIMIT ${options.limit ?? 12}`,
-    );
-  }
-  /**
-   * People and names in this item that match no other item exactly but
-   * resemble some: code can't settle these, so Jev is asked.
-   */
-  async unsettled(eventId: string, limit = 300): Promise<UnsettledEntity[]> {
-    const mine = await this.db.rows<{
-      kind: TagKind;
-      normalized: string;
-      value: string;
-    }>(
-      sql`SELECT m.kind, m.normalized, m.value FROM event_tags m
-        WHERE m.event_id=${eventId} AND (m.kind='person' OR m.kind IN ${NAME_KINDS})
-          AND NOT EXISTS (SELECT 1 FROM event_tags t WHERE t.event_id<>${eventId} AND t.normalized=m.normalized
-            AND ${family('t.kind')}=${family('m.kind')})`,
-    );
-    const out: UnsettledEntity[] = [];
-    for (const tag of mine) {
-      const candidates = await this.db.rows<{
-        normalized: string;
-        value: string;
-      }>(
-        sql`SELECT normalized, (array_agg(value))[1] AS value FROM event_tags
-          WHERE event_id<>${eventId} AND ${family('kind')}=${tag.kind === 'person' ? 'person' : 'name'}
-            AND public.similarity(normalized, ${tag.normalized})>=0.3
-          GROUP BY normalized ORDER BY max(public.similarity(normalized, ${tag.normalized})) DESC LIMIT ${limit}`,
-      );
-      if (candidates.length) out.push({ ...tag, candidates });
-    }
-    return out;
-  }
-  /** Records that a tag in an item is the same as a known one. */
-  async alias(
-    eventId: string,
-    kind: TagKind,
-    normalized: string,
-    value: string,
-  ) {
-    await this.db.run(
-      sql`INSERT INTO event_tags (event_id, source_id, kind, normalized, value, occurred_at)
-        SELECT ${eventId}, source_id, ${kind}, ${normalized}, ${value}, occurred_at FROM event_tags WHERE event_id=${eventId} LIMIT 1
-        ON CONFLICT DO NOTHING`,
     );
   }
 
@@ -288,45 +176,6 @@ export class DiscoveryStore {
             FROM event_links WHERE status='rejected' AND (event_id=${eventId} OR other_event_id=${eventId})`,
         )
       ).map((row) => row.other),
-    );
-  }
-
-  /** Items in the inbox with no embedding from this model yet. */
-  unembedded(model: string, limit = 32) {
-    return this.db.rows<{ id: string; title: string; summary: string }>(
-      sql`SELECT e.id, e.title, e.summary FROM inbox_events e
-        WHERE NOT EXISTS (SELECT 1 FROM item_embeddings v WHERE v.event_id=e.id AND v.model=${model})
-        ORDER BY e.occurred_at DESC LIMIT ${limit}`,
-    );
-  }
-  async hasEmbedding(eventId: string, model: string) {
-    return !!(await this.db.row(
-      sql`SELECT 1 FROM item_embeddings WHERE event_id=${eventId} AND model=${model}`,
-    ));
-  }
-  async saveEmbedding(eventId: string, model: string, values: number[]) {
-    await this.db.run(
-      sql`INSERT INTO item_embeddings VALUES (${eventId}, ${model}, ${vector(values)}::public.vector, ${Date.now()})
-        ON CONFLICT (event_id) DO UPDATE SET model=excluded.model, embedding=excluded.embedding, created_at=excluded.created_at`,
-    );
-  }
-  /**
-   * The items closest in wording, by cosine distance. An exact scan: fast
-   * enough at one person's volume.
-   */
-  nearest(
-    eventId: string,
-    model: string,
-    options: { limit?: number; maxDistance?: number; before?: number } = {},
-  ) {
-    return this.db.rows<{ eventId: string; distance: number }>(
-      sql`SELECT b.event_id, (a.embedding OPERATOR(public.<=>) b.embedding)::float AS distance
-        FROM item_embeddings a JOIN item_embeddings b ON b.model=a.model AND b.event_id<>a.event_id
-        JOIN inbox_events e ON e.id=b.event_id
-        WHERE a.event_id=${eventId} AND a.model=${model}
-          AND (a.embedding OPERATOR(public.<=>) b.embedding) <= ${options.maxDistance ?? 0.5}
-          AND e.occurred_at <= ${options.before ?? Number.MAX_SAFE_INTEGER}
-        ORDER BY distance LIMIT ${options.limit ?? 12}`,
     );
   }
 

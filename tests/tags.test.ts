@@ -1,7 +1,16 @@
 import { expect, it } from 'vitest';
 import { extractNames, extractTags } from '../src/server/inbox/tags.js';
 import { InboxStore } from '../src/server/inbox/store.js';
+import { MemoryService } from '../src/server/memory/service.js';
 import { testDb } from './fixtures/db.js';
+
+/** The links view, once memory has distilled what is stored. */
+async function links(store: InboxStore) {
+  await new MemoryService(store, { ownerId: 'owner' }).distill(
+    await store.discovery.settings(),
+  );
+  return store.links('owner');
+}
 
 const keys = (item: Parameters<typeof extractTags>[0]) =>
   extractTags(item).map((tag) => `${tag.kind}:${tag.normalized}`);
@@ -51,7 +60,7 @@ it('skips mailbox-provider domains and invoice keys posing as tickets', () => {
   expect(keys({ title: 'PR 2024 review' })).toEqual([]);
 });
 
-it('tags items on ingest, links them, finds similar keys and drops tags with the source', async () => {
+it('links items through their entities, finds similar keys and forgets them with the source', async () => {
   const store = new InboxStore(await testDb());
   const { source } = await store.create({
     name: 'Mail',
@@ -91,17 +100,16 @@ it('tags items on ingest, links them, finds similar keys and drops tags with the
       occurredAt: now,
     },
   ]);
-  const links = await store.links();
-  expect(links.items).toHaveLength(3);
-  const invoice = links.tags.find((tag) => tag.normalized === 'INV-2041');
-  expect(invoice).toMatchObject({ kind: 'invoice', value: 'Invoice INV-2041' });
+  const view = await links(store);
+  expect(view.items).toHaveLength(3);
+  const invoice = view.tags.find((tag) => tag.normalized === 'INV-2041');
+  expect(invoice).toMatchObject({ kind: 'invoice', value: 'INV-2041' });
   expect(invoice?.itemIds).toHaveLength(2);
-  expect(links.similar).toEqual([
+  expect(view.similar).toEqual([
     expect.objectContaining({ kind: 'invoice', a: 'INV-2014', b: 'INV-2041' }),
   ]);
-  expect(await store.backfillTags()).toBe(0);
   await store.remove(source.id);
-  expect((await store.links()).items).toEqual([]);
+  expect((await links(store)).items).toEqual([]);
 });
 
 const names = (text: string) =>
@@ -178,7 +186,7 @@ it('links a name only once two items carry it, under its most specific kind', as
     item('2', 'Notes on the #falcon designs'),
     item('1', 'Lunch with the Globex people'),
   ]);
-  const { tags } = await store.links();
+  const { tags } = await links(store);
   const falcon = tags.filter((tag) => tag.normalized === 'falcon');
   expect(falcon).toEqual([
     expect.objectContaining({ kind: 'project', value: 'Falcon' }),

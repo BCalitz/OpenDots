@@ -161,7 +161,7 @@ export type TagKind =
   | 'project'
   | 'place'
   | 'name';
-/** An item on the links view. Pruned items keep their tags, not their text. */
+/** An item on the links view. Pruned items are shown from their facts. */
 export interface LinkItem {
   id: string;
   sourceId: string;
@@ -172,15 +172,16 @@ export interface LinkItem {
   occurredAt: number;
   flagged: boolean;
 }
-/** One normalized tag and every item that carries it. */
+/** One remembered entity and every item that mentions it. */
 export interface LinkTag {
   kind: TagKind;
+  /** Its key: an invoice number, an address, a name in lower case. */
   normalized: string;
-  /** How it was written the first time. */
+  /** Its name, as written. */
   value: string;
   itemIds: string[];
 }
-/** Two tags of one kind that are spelled alike (pg_trgm similarity). */
+/** Two entities of one kind whose names are spelled alike (pg_trgm). */
 export interface SimilarTags {
   kind: TagKind;
   a: string;
@@ -217,8 +218,6 @@ export interface DiscoveryState {
   accounts: DiscoveryAccountView[];
   /** Whether Jev (TYPESAFE_API_KEY) is set up to decide what needs attention. */
   model: { configured: boolean };
-  /** Whether an embedding model is set up for similar items. */
-  embeddings: { configured: boolean; model: string | null };
   settings: DiscoverySettings;
 }
 /** When and how discovery reaches the owner, and what Dots may do. */

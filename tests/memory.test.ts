@@ -211,9 +211,6 @@ it('prunes only distilled items past the window, and nothing still waiting', asy
   ).map((row) => row.id);
   expect(left.sort()).toEqual([kept.id, waiting.id, undistilled.id].sort());
   expect(
-    await db.rows(sql`SELECT 1 FROM event_tags WHERE event_id=${done.id}`),
-  ).toEqual([]);
-  expect(
     await db.rows(
       sql`SELECT 1 FROM event_entity_links WHERE event_id=${done.id}`,
     ),
@@ -233,6 +230,16 @@ it('prunes only distilled items past the window, and nothing still waiting', asy
     '2026-11-14',
     '2026-11-13',
   ]);
+});
+
+it('keeps a plain name once a second item mentions it', async () => {
+  const { ingest, distill, find } = await setup();
+  await ingest({ title: 'Lunch with the Globex people' });
+  await distill();
+  expect(await find('Globex')).toBeUndefined();
+  await ingest({ title: 'Contract from Globex signed' });
+  await distill();
+  expect((await find('Globex'))?.kind).toBe('name');
 });
 
 it('merges two entities the owner says are one thing', async () => {

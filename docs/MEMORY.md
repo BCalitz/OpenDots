@@ -35,9 +35,18 @@ Invoices, orders and tickets are only ever matched exactly. `INV-2041` and `INV-
 - **Distill** every item that is ready. Items from judged sources wait for discovery's verdict, or an hour. Each item is written in one transaction that also sets `inbox_events.distilled_at`, so an item is never half-remembered.
 - **Once per local day:** prune items received before the retention window, then write the day's line. The morning brief adds that line to its push.
 
-Pruning removes an item only if it is distilled and nothing still waits on the owner: no flagged or investigating finding, no open choice and no queued push. It takes the item's tags, embeddings, links and finding with it. The 2,000-items-per-source cap stays as a safety net for a source that floods, and follows the same rules.
+Pruning removes an item only if it is distilled and nothing still waits on the owner: no flagged or investigating finding, no open choice and no queued push. It takes the item's entity links, links to other items and finding with it. The 2,000-items-per-source cap stays as a safety net for a source that floods, and follows the same rules.
 
 Nothing runs while OpenDots is paused.
+
+## Discovery reads it
+
+Discovery gathers each new item's history from memory ([DISCOVERY.md](DISCOVERY.md#1-gather-find-every-earlier-item-this-could-relate-to)):
+
+- Before judging, it distills every earlier item that isn't in memory yet, even one that arrived a minute ago.
+- It matches the new item to known entities the same way, without writing anything. The new item itself is distilled later, after its verdict, so its facts carry the outcome and an item that only closed an earlier one adds nothing new.
+- Every earlier item in those entities' facts is a candidate, including pruned ones.
+- When an item says an earlier one no longer needs the owner, every other open item about the same invoice, order or ticket closes with it, subject to the same sender rule.
 
 ## Using it
 
@@ -46,7 +55,6 @@ Nothing runs while OpenDots is paused.
 
 ## Not built yet
 
-- `event_tags` and the embeddings still run alongside entities, and discovery's history gathering still reads them. Moving discovery's `gather()` and its "update earlier items" step onto entities comes next, together with splitting `decide()`.
 - A running total per entity (for example, spend per vendor).
-- A screen for browsing and merging entities.
-- Per-entity embeddings.
+- A screen for browsing and merging entities. The Inbox **Links** tab shows entities and their items, but can't merge them.
+- Per-entity embeddings, for items that share no name, identifier or sender.

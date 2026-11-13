@@ -12,6 +12,7 @@ import type {
   Mention,
   MemoryStore,
   PendingItem,
+  Resolved,
 } from './store.js';
 
 // Entities taken from one item; the rest are left out.
@@ -109,13 +110,18 @@ export class MemoryService {
     return { distilled, pruned };
   }
 
-  /** Distills every item that is ready; returns how many. */
-  async distill(settings: DiscoverySettings) {
+  /**
+   * Distills every item that is ready; returns how many. With `before`,
+   * items that happened earlier are ready too: discovery calls this so an
+   * item is judged against everything that came before it.
+   */
+  async distill(settings: DiscoverySettings, before?: number) {
     let count = 0;
     for (;;) {
       const items = await this.store.pending(this.options.ownerId, {
         limit: 100,
         now: this.now(),
+        before,
       });
       if (!items.length) return count;
       for (const item of items) {
@@ -124,6 +130,33 @@ export class MemoryService {
       }
       if (items.length < 100) return count;
     }
+  }
+
+  /**
+   * The known entities a stored item mentions, matched the same way as
+   * when it is distilled, without writing anything. New names have no
+   * history yet, so they are left out.
+   */
+  async resolve(eventId: string, settings: DiscoverySettings) {
+    const item = await this.store.item(this.options.ownerId, eventId);
+    if (!item) return [];
+    const mentions = await this.mentions(item, extractTags(item), settings);
+    const known = new Map<string, Mention & { entityId: string }>();
+    for (const mention of mentions)
+      if ('entityId' in mention && !known.has(mention.entityId))
+        known.set(mention.entityId, mention);
+    const entities = await this.store.entities(item.ownerId, [...known.keys()]);
+    return entities.map((entity): Resolved => {
+      const mention = known.get(entity.id)!;
+      return {
+        id: entity.id,
+        kind: entity.kind,
+        name: entity.name,
+        how: mention.how,
+        role: mention.role,
+        facts: entity.facts,
+      };
+    });
   }
 
   private async distillItem(item: PendingItem, settings: DiscoverySettings) {
@@ -135,6 +168,7 @@ export class MemoryService {
       app: item.sourceName,
       title: item.title.slice(0, 200),
       from: item.from,
+      kind: item.kind,
       ...(tags.some((tag) => tag.kind === 'amount')
         ? {
             amounts: tags
@@ -285,7 +319,11 @@ export class MemoryService {
           continue;
       }
       out.push({
-        create: { kind: tag.kind as EntityKind, name: tag.value },
+        create: {
+          kind: tag.kind as EntityKind,
+          // INV-2041 however it was written; names as written.
+          name: family === 'name' ? tag.value : tag.normalized,
+        },
         aliases: [alias],
         how: 'new',
       });
@@ -319,6 +357,9 @@ export class MemoryService {
   }
 
   private judged = new Map<string, number>();
+  /** Jev's answers per item and mention, so resolving and distilling one
+   * item asks only once. */
+  private answers = new Map<string, string | undefined>();
   /** Asks Jev which known person or name a mention is; within its budget. */
   private async ask(
     item: PendingItem,
@@ -327,6 +368,8 @@ export class MemoryService {
     value: string,
     alike?: Awaited<ReturnType<MemoryStore['similar']>>,
   ) {
+    const key = `${item.id}|${family}|${normalized}`;
+    if (this.answers.has(key)) return this.answers.get(key);
     const model = this.options.judge?.();
     if (!model?.match) return undefined;
     if (
@@ -344,6 +387,7 @@ export class MemoryService {
     if (!candidates.length) return undefined;
     this.judged.set(item.id, used + 1);
     if (this.judged.size > 1000) this.judged.clear();
+    if (this.answers.size > 3000) this.answers.clear();
     const judgeItem: JudgeItem = {
       title: item.title,
       summary: item.summary,
@@ -366,7 +410,11 @@ export class MemoryService {
         judgeItem,
         this.controller.signal,
       );
-      return candidates.find((entry) => entry.normalized === picked)?.entityId;
+      const entityId = candidates.find(
+        (entry) => entry.normalized === picked,
+      )?.entityId;
+      this.answers.set(key, entityId);
+      return entityId;
     } catch (error) {
       console.error(`Memory could not match a name: ${safeError(error)}`);
       return undefined;

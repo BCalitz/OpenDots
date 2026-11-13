@@ -12,6 +12,9 @@ import {
 } from '../../shared/inbox-types.js';
 import type { NewEvents } from '../inbox/engine.js';
 import type { InboxStore } from '../inbox/store.js';
+import { extractTags } from '../inbox/tags.js';
+import type { MemoryService } from '../memory/service.js';
+import type { EntityKind, Fact, Resolved } from '../memory/store.js';
 import {
   YES,
   ruleVerdict,
@@ -22,7 +25,6 @@ import {
   type Verdict,
 } from './classifier.js';
 import type { DeliveryService } from './delivery.js';
-import { embeddingText, type Embedder } from './embeddings.js';
 import {
   importanceOf,
   quietedBySender,
@@ -62,6 +64,35 @@ type ReadyListener = (finding: FindingView, event: InboxEventView) => unknown;
 // the owner's review queue; below 0.5 they stay unlinked.
 const LINK = 0.8;
 const REVIEW = 0.5;
+// Entities that name one matter, so closing one item can close others.
+const IDENTIFIERS = new Set<EntityKind>(['invoice', 'order', 'ticket']);
+
+/** What deciding one item needs besides the verdict. */
+interface Context {
+  config: AccountSourceConfig;
+  settings: DiscoverySettings;
+  /** The known entities the item mentions. */
+  entities: Resolved[];
+}
+/** An earlier item still stored, with Jev's answers about it. */
+interface Related {
+  entry: RelatedVerdict;
+  earlier: InboxEventView;
+}
+/** The earlier item a new one is about. */
+interface Referenced {
+  entry: RelatedVerdict;
+  finding?: FindingView;
+}
+/** What is left of a pruned item, as text for Jev. */
+const noteText = (fact: Fact) =>
+  [
+    'Only a note of this item is kept.',
+    fact.amounts?.length ? `Amounts: ${fact.amounts.join(', ')}.` : '',
+    fact.status ? `Outcome: ${fact.status}.` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
 const safeError = (error: unknown) =>
   (error instanceof Error && error.message
@@ -142,13 +173,14 @@ const raise = (a: Urgency | null, b: Urgency | null): Urgency => {
 /**
  * Discovery with history. For each new item from a discovery source:
  *
- * 1. Gather earlier items it could relate to: shared tags (exact, then near
- *    spellings), the same sender lately, similar wording (embeddings), and
- *    Jev's match for names code can't settle.
+ * 1. Gather earlier items it could relate to from memory: the people,
+ *    companies, invoices and projects it mentions, and every earlier item
+ *    in them, including pruned items known only by their facts.
  * 2. Judge it with that history in one Jev call.
- * 3. Update earlier items: link the same thing, resolve what the new item
- *    says is done (from trusted senders only), escalate what it makes more
- *    urgent.
+ * 3. Decide, in code: link the same thing, save the finding, and update
+ *    earlier items: resolve what the new item says is done (from trusted
+ *    senders only, and every open item about the same invoice, order or
+ *    ticket with it), escalate what it makes more urgent.
  * 4. Route it: tell, draft, propose, inform or decide.
  * 5. Investigate it read-only when the route calls for it, then deliver by
  *    the delivery table: now, after a short hold, or in the morning brief.
@@ -166,8 +198,8 @@ export class DiscoveryService {
     private options: {
       judge: () => Judge | undefined;
       investigate: Investigate;
-      /** Similar items by wording; off when undefined. */
-      embedder?: () => Embedder | undefined;
+      /** Entities and their facts, for history; none when left out. */
+      memory?: MemoryService;
       /** Sends the push for a finding; tests may leave it out. */
       delivery?: DeliveryService;
       /** Offers the owner's three choices on what a Dot looked into. */
@@ -203,19 +235,13 @@ export class DiscoveryService {
   }
   /** For InboxEngine.onEvents. Returns at once; the work is queued. */
   readonly listener = (batch: NewEvents) => {
-    if (!batch.events.length) return;
-    const embedder = this.options.embedder?.();
-    const judged = batch.source.type === 'account';
-    if (!embedder && !judged) return;
-    const work = this.classifying.then(async () => {
-      if (embedder) await this.embed(embedder, batch.events);
-      if (judged) await this.judge(batch);
-    });
+    if (!batch.events.length || batch.source.type !== 'account') return;
+    const work = this.classifying.then(() => this.judge(batch));
     this.classifying = work.catch((error: unknown) => {
       console.error(`Discovery could not judge new items: ${safeError(error)}`);
     });
   };
-  /** Picks up work a restart interrupted, and embeds earlier items. */
+  /** Picks up work a restart interrupted. */
   async start() {
     for (const finding of await this.store.findings('investigating'))
       await this.store.updateFinding(finding.id, {
@@ -223,13 +249,6 @@ export class DiscoveryService {
         error:
           'OpenDots restarted during this investigation. Start it again from the Inbox.',
       });
-    const embedder = this.options.embedder?.();
-    if (embedder) {
-      const work = this.classifying.then(() => this.backfill(embedder));
-      this.classifying = work.catch(() => {
-        console.error('Could not embed earlier inbox items.');
-      });
-    }
   }
   stop() {
     this.controller.abort(new Error('Server stopped.'));
@@ -257,138 +276,106 @@ export class DiscoveryService {
     return finding;
   }
 
-  private async embed(embedder: Embedder, events: InboxEventView[]) {
-    const missing: InboxEventView[] = [];
-    for (const event of events)
-      if (!(await this.store.discovery.hasEmbedding(event.id, embedder.model)))
-        missing.push(event);
-    for (let i = 0; i < missing.length; i += 32) {
-      const chunk = missing.slice(i, i + 32);
-      try {
-        const vectors = await embedder.embed(
-          chunk.map(embeddingText),
-          this.controller.signal,
-        );
-        for (const [index, event] of chunk.entries())
-          await this.store.discovery.saveEmbedding(
-            event.id,
-            embedder.model,
-            vectors[index],
-          );
-      } catch (error) {
-        // Similar items are a help, not a requirement; judging goes on.
-        console.error(`Could not embed inbox items: ${safeError(error)}`);
-        return;
-      }
-    }
-  }
-  private async backfill(embedder: Embedder) {
-    for (;;) {
-      if (this.controller.signal.aborted) return;
-      const rows = await this.store.discovery.unembedded(embedder.model, 32);
-      if (!rows.length) return;
-      const vectors = await embedder.embed(
-        rows.map(embeddingText),
-        this.controller.signal,
-      );
-      for (const [index, row] of rows.entries())
-        await this.store.discovery.saveEmbedding(
-          row.id,
-          embedder.model,
-          vectors[index],
-        );
-    }
-  }
-
   /**
    * Earlier items this one could relate to, strongest first, and why each
-   * was picked. Code only, apart from Jev's match for names it can't settle.
+   * was picked: every earlier item in the entities it mentions, including
+   * items already pruned, which are known by their facts alone. Code only,
+   * apart from Jev's match for names memory can't settle.
    */
   async gather(
     event: InboxEventView,
-    item: JudgeItem,
-    model: Judge | undefined,
     settings: DiscoverySettings,
-  ): Promise<HistoryItem[]> {
-    const signal = this.controller.signal;
-    if (model?.match)
-      for (const entity of (
-        await this.store.discovery.unsettled(event.id)
-      ).slice(0, 3)) {
-        try {
-          const matched = await model.match(entity, item, signal);
-          if (matched)
-            await this.store.discovery.alias(
-              event.id,
-              entity.kind,
-              matched,
-              entity.value,
-            );
-        } catch (error) {
-          console.error(
-            `Discovery could not match a name: ${safeError(error)}`,
-          );
-        }
-      }
-    const found = new Map<string, { score: number; why: string[] }>();
-    const add = (id: string, score: number, why: string) => {
-      const entry = found.get(id) ?? { score: 0, why: [] };
-      entry.score += score;
-      if (!entry.why.includes(why)) entry.why.push(why);
-      found.set(id, entry);
-    };
-    const size = this.options.historySize ?? 12;
-    const ignoreDomains = settings.trusted
-      .map((entry) => entry.trim().toLowerCase().replace(/^@/, ''))
-      .filter((entry) => entry && !entry.includes('@'));
-    for (const match of await this.store.discovery.related(event.id, {
-      limit: size,
-      ignoreDomains,
-      // History is what came before; never a later item.
-      before: event.occurredAt,
-    }))
-      for (const [index, shared] of match.shared.entries())
-        add(match.eventId, index ? 0 : match.score, `both mention ${shared}`);
-    if (event.from)
-      for (const earlier of await this.store.recentFrom(
-        event.from,
-        event.occurredAt,
-        this.windowMs,
-        event.id,
-      ))
-        add(earlier.id, 1, 'same sender in the last few days');
-    const embedder = this.options.embedder?.();
-    if (embedder)
-      try {
-        if (
-          !(await this.store.discovery.hasEmbedding(event.id, embedder.model))
-        )
-          await this.embed(embedder, [event]);
-        for (const near of await this.store.discovery.nearest(
-          event.id,
-          embedder.model,
-          { limit: size, before: event.occurredAt },
-        ))
-          add(near.eventId, (1 - near.distance) * 2, 'similar wording');
-      } catch (error) {
-        console.error(`Could not find similar items: ${safeError(error)}`);
+  ): Promise<{ history: HistoryItem[]; entities: Resolved[] }> {
+    const memory = this.options.memory;
+    if (!memory) return { history: [], entities: [] };
+    // Everything that came before is in its entities first. Best effort:
+    // what is already in memory still counts.
+    try {
+      await memory.distill(settings, event.occurredAt);
+    } catch (error) {
+      console.error(`Memory could not catch up: ${safeError(error)}`);
+    }
+    const entities = await memory.resolve(event.id, settings);
+    const found = new Map<
+      string,
+      { score: number; why: Map<string, number>; fact: Fact }
+    >();
+    for (const entity of entities)
+      for (const fact of entity.facts) {
+        // History is what came before; never a later item.
+        if (fact.eventId === event.id || fact.at > event.occurredAt) continue;
+        const { score, why } = this.weigh(entity, fact, event);
+        const entry = found.get(fact.eventId) ?? {
+          score: 0,
+          why: new Map<string, number>(),
+          fact,
+        };
+        entry.score += score;
+        entry.why.set(why, Math.max(entry.why.get(why) ?? 0, score));
+        found.set(fact.eventId, entry);
       }
     const rejected = await this.store.discovery.rejected(event.id);
     const history: HistoryItem[] = [];
     for (const [id, entry] of [...found]
       .filter(([id]) => !rejected.has(id))
-      .sort((a, b) => b[1].score - a[1].score)
-      .slice(0, size)) {
+      .sort((a, b) => b[1].score - a[1].score || b[1].fact.at - a[1].fact.at)
+      .slice(0, this.options.historySize ?? 12)) {
       const earlier = await this.store.event(id);
-      if (earlier)
-        history.push({
-          event: earlier,
-          app: earlier.sourceName,
-          fromOwner: ownerFact(earlier.from, settings.trusted),
-          why: entry.why,
-        });
+      const { fact } = entry;
+      // The strongest reason first.
+      const why = [...entry.why]
+        .sort((a, b) => b[1] - a[1])
+        .map(([reason]) => reason);
+      history.push(
+        earlier
+          ? {
+              event: earlier,
+              app: earlier.sourceName,
+              fromOwner: ownerFact(earlier.from, settings.trusted),
+              why,
+            }
+          : {
+              event: {
+                id,
+                title: fact.title,
+                summary: noteText(fact),
+                from: fact.from,
+                kind: fact.kind ?? 'item',
+                occurredAt: fact.at,
+              },
+              app: fact.app,
+              fromOwner: ownerFact(fact.from, settings.trusted),
+              why,
+              pruned: true,
+            },
+      );
     }
-    return history;
+    return { history, entities };
+  }
+  /** How much one shared entity says about an earlier item, and why. */
+  private weigh(entity: Resolved, fact: Fact, event: InboxEventView) {
+    switch (entity.kind) {
+      case 'invoice':
+      case 'order':
+      case 'ticket':
+        return { score: 3, why: `both mention ${entity.kind} ${entity.name}` };
+      case 'project':
+      case 'place':
+      case 'name':
+        return { score: 1.5, why: `both mention ${entity.name}` };
+      case 'person':
+        if (entity.role !== 'sender')
+          return { score: 1, why: `both mention ${entity.name}` };
+        return address(fact.from) === address(event.from)
+          ? {
+              // A sender's recent items say more than old ones.
+              score: event.occurredAt - fact.at <= this.windowMs ? 1 : 0.5,
+              why: 'same sender',
+            }
+          : { score: 1, why: `about ${entity.name}, who sent this` };
+      default:
+        return { score: 0.5, why: `both involve ${entity.name}` };
+    }
   }
 
   private async judge(batch: NewEvents) {
@@ -403,6 +390,7 @@ export class DiscoveryService {
         await this.store.payload(event.id),
       );
       let judgedBy = 'rules';
+      let entities: Resolved[] = [];
       if (!verdict) {
         const model = this.options.judge();
         if (!model) return;
@@ -412,7 +400,9 @@ export class DiscoveryService {
           fromOwner: ownerFact(event.from, settings.trusted),
         };
         try {
-          const history = await this.gather(event, item, model, settings);
+          const gathered = await this.gather(event, settings);
+          const history = gathered.history;
+          entities = gathered.entities;
           verdict = await model.judge(item, history, this.controller.signal);
           judgedBy = model.name;
           // Why each earlier item was gathered, kept with Jev's answers so
@@ -436,6 +426,7 @@ export class DiscoveryService {
       const finding = await this.decide(event, verdict, judgedBy, {
         config,
         settings,
+        entities,
       });
       if (finding.state !== 'flagged') continue;
       if (finding.route === 'tell') await this.deliver(finding, event);
@@ -452,18 +443,41 @@ export class DiscoveryService {
       await this.investigate(finding.id);
   }
 
-  /** Code's half: maps Jev's answers to a finding and to earlier items. */
+  /**
+   * Code's half: maps Jev's answers to a finding and to earlier items, in
+   * three steps.
+   */
   private async decide(
     event: InboxEventView,
     verdict: Verdict,
     judgedBy: string,
-    context: { config: AccountSourceConfig; settings: DiscoverySettings },
+    context: Context,
   ) {
-    const rejected = await this.store.discovery.rejected(event.id);
-    const related = verdict.related.filter(
-      (entry) => !rejected.has(entry.eventId),
+    const { related, referenced } = await this.linkEarlier(event, verdict);
+    const finding = await this.saveVerdict(
+      event,
+      verdict,
+      judgedBy,
+      referenced,
+      context,
     );
-    for (const entry of related)
+    await this.followUp(event, finding, related, verdict, context);
+    return finding;
+  }
+
+  /**
+   * Step 1: links the earlier items Jev says are the same thing, and picks
+   * the one this item is about. Items already pruned can't be linked.
+   */
+  private async linkEarlier(event: InboxEventView, verdict: Verdict) {
+    const rejected = await this.store.discovery.rejected(event.id);
+    const related: Related[] = [];
+    for (const entry of verdict.related) {
+      if (rejected.has(entry.eventId)) continue;
+      const earlier = await this.store.event(entry.eventId);
+      if (earlier) related.push({ entry, earlier });
+    }
+    for (const { entry } of related)
       if (entry.same >= REVIEW)
         await this.store.discovery.link(
           event.id,
@@ -471,14 +485,12 @@ export class DiscoveryService {
           entry.same,
           entry.same >= LINK ? 'linked' : 'review',
         );
-    const linked = related
-      .filter((entry) => entry.same >= LINK)
-      .sort((a, b) => b.same - a.same);
     // The item this one is about: the strongest link that was itself
     // flagged, so a follow-up joins the conversation already under way.
-    let referenced:
-      { entry: RelatedVerdict; finding?: FindingView } | undefined;
-    for (const entry of linked) {
+    let referenced: Referenced | undefined;
+    for (const { entry } of related
+      .filter(({ entry }) => entry.same >= LINK)
+      .sort((a, b) => b.entry.same - a.entry.same)) {
       const finding = await this.store.findingForEvent(entry.eventId);
       if (finding?.attention) {
         referenced = { entry, finding };
@@ -486,6 +498,17 @@ export class DiscoveryService {
       }
       referenced ??= { entry, finding };
     }
+    return { related, referenced };
+  }
+
+  /** Step 2: whether the item needs the owner, and the route if so. */
+  private async saveVerdict(
+    event: InboxEventView,
+    verdict: Verdict,
+    judgedBy: string,
+    referenced: Referenced | undefined,
+    context: Context,
+  ) {
     const asksSomething = !!verdict.asked && verdict.asked !== 'nothing';
     // The triage rule the owner's dismissals feed: a sender they keep
     // dismissing is no longer flagged.
@@ -504,7 +527,7 @@ export class DiscoveryService {
           asksSomething &&
           referenced.entry.resolves < YES));
     const canAct = context.settings.allowedApps.includes(context.config.app);
-    const finding = await this.store.saveFinding({
+    return this.store.saveFinding({
       eventId: event.id,
       attention,
       category: verdict.category,
@@ -525,35 +548,36 @@ export class DiscoveryService {
         : null,
       answers: verdict.answers,
     });
+  }
+
+  /**
+   * Step 3: notes for the investigating Dot, and what the item changes
+   * about the earlier items it is the same thing as.
+   */
+  private async followUp(
+    event: InboxEventView,
+    finding: FindingView,
+    related: Related[],
+    verdict: Verdict,
+    context: Context,
+  ) {
     const notes: HistoryNote[] = [];
     const foundBy = (verdict.answers as { found_by?: Record<string, string[]> })
       ?.found_by;
-    for (const entry of related) {
-      const earlier = await this.store.event(entry.eventId);
-      if (!earlier) continue;
+    for (const { entry, earlier } of related) {
+      const found = foundBy?.[earlier.id] ?? [];
       if (entry.useful >= YES)
         notes.push({
           event: earlier,
           note: 'holds facts useful for answering',
-          found: foundBy?.[earlier.id] ?? [],
+          found,
         });
       if (entry.contradicts >= YES)
-        notes.push({
-          event: earlier,
-          note: 'contradicts the new item',
-          found: foundBy?.[earlier.id] ?? [],
-        });
+        notes.push({ event: earlier, note: 'contradicts the new item', found });
       if (entry.same >= LINK)
-        await this.updateEarlier(
-          event,
-          earlier,
-          entry,
-          verdict,
-          context.settings,
-        );
+        await this.updateEarlier(event, earlier, entry, verdict, context);
     }
     if (notes.length) this.notes.set(finding.id, notes);
-    return finding;
   }
 
   /**
@@ -590,76 +614,132 @@ export class DiscoveryService {
     earlier: InboxEventView,
     entry: RelatedVerdict,
     verdict: Verdict,
-    settings: DiscoverySettings,
+    context: Context,
   ) {
     const finding = await this.store.findingForEvent(earlier.id);
     if (!finding || finding.state === 'resolved') return;
     if (entry.resolves >= YES) {
       if (
         !verdict.injection &&
-        mayDowngrade(event.from, earlier.from, settings.trusted)
+        mayDowngrade(event.from, earlier.from, context.settings.trusted)
       ) {
-        await this.store.updateFinding(finding.id, {
-          state: 'resolved',
-          note: `A later item says this no longer needs you: ${event.title}`,
-          resolvedBy: event.id,
-        });
-        await this.store.discovery.proposals.close(finding.id);
-        await this.options.delivery?.cancel(finding.id, {
-          title: 'No longer needed',
-          body: this.previews()
-            ? `A later item says "${earlier.title}" no longer needs you.`.slice(
-                0,
-                160,
-              )
-            : 'A later item says something you were told about no longer needs you.',
-        });
+        await this.close(finding, earlier, event);
+        await this.closeSiblings(event, earlier, context);
       } else
         await this.store.updateFinding(finding.id, {
           note: `${event.from ?? 'Someone'} says this can be ignored, but isn't its sender or in your organisation, so it stays flagged.`,
         });
       return;
     }
-    if (entry.escalates >= YES) {
-      const next =
-        URGENCIES[
-          Math.min(URGENCIES.indexOf(finding.urgency ?? 'tomorrow') + 1, 3)
-        ];
-      const urgency = raise(next, verdict.urgency);
-      const updated = await this.store.updateFinding(finding.id, {
-        attention: true,
-        urgency,
-        note: `Made more urgent by a later item: ${event.title}`,
-        ...(finding.state === 'ignored'
-          ? {
-              state: 'flagged' as const,
-              route:
-                finding.route ??
-                routeFor(finding.asked, {
-                  injection: finding.injection,
-                  canAct: false,
-                }),
-            }
-          : {}),
-      });
-      if (!updated) return;
-      await this.store.discovery.proposals.escalate(
-        updated.id,
-        urgency,
-        importanceOf(urgency, updated.confidence),
+    if (entry.escalates >= YES)
+      await this.escalate(finding, earlier, event, verdict);
+  }
+
+  /** A later item says an earlier one no longer needs the owner. */
+  private async close(
+    finding: FindingView,
+    earlier: InboxEventView,
+    event: InboxEventView,
+  ) {
+    await this.store.updateFinding(finding.id, {
+      state: 'resolved',
+      note: `A later item says this no longer needs you: ${event.title}`,
+      resolvedBy: event.id,
+    });
+    await this.store.discovery.proposals.close(finding.id);
+    await this.options.delivery?.cancel(finding.id, {
+      title: 'No longer needed',
+      body: this.previews()
+        ? `A later item says "${earlier.title}" no longer needs you.`.slice(
+            0,
+            160,
+          )
+        : 'A later item says something you were told about no longer needs you.',
+    });
+  }
+
+  /**
+   * Closing works through the entity: once an item is done, other open
+   * items about the same invoice, order or ticket, which both it and the
+   * new item mention, are done too. The sender rule applies to each.
+   */
+  private async closeSiblings(
+    event: InboxEventView,
+    earlier: InboxEventView,
+    context: Context,
+  ) {
+    const mentioned = new Set(
+      context.entities
+        .filter((entity) => IDENTIFIERS.has(entity.kind))
+        .map((entity) => entity.id),
+    );
+    if (!mentioned.size) return;
+    const memory = this.store.memory;
+    const shared = (await memory.entitiesOf(earlier.id)).filter((id) =>
+      mentioned.has(id),
+    );
+    for (const id of await memory.eventsFor(shared)) {
+      if (id === event.id || id === earlier.id) continue;
+      const other = await this.store.event(id);
+      const finding = await this.store.findingForEvent(id);
+      if (
+        !other ||
+        !finding ||
+        other.occurredAt > event.occurredAt ||
+        finding.state === 'resolved' ||
+        finding.state === 'ignored' ||
+        !mayDowngrade(event.from, other.from, context.settings.trusted)
+      )
+        continue;
+      await this.close(finding, other, event);
+    }
+  }
+
+  /** A later item makes an earlier one more urgent. */
+  private async escalate(
+    finding: FindingView,
+    earlier: InboxEventView,
+    event: InboxEventView,
+    verdict: Verdict,
+  ) {
+    const next =
+      URGENCIES[
+        Math.min(URGENCIES.indexOf(finding.urgency ?? 'tomorrow') + 1, 3)
+      ];
+    const urgency = raise(next, verdict.urgency);
+    const updated = await this.store.updateFinding(finding.id, {
+      attention: true,
+      urgency,
+      note: `Made more urgent by a later item: ${event.title}`,
+      ...(finding.state === 'ignored'
+        ? {
+            state: 'flagged' as const,
+            route:
+              finding.route ??
+              routeFor(finding.asked, {
+                injection: finding.injection,
+                canAct: false,
+              }),
+          }
+        : {}),
+    });
+    if (!updated) return;
+    await this.store.discovery.proposals.escalate(
+      updated.id,
+      urgency,
+      importanceOf(urgency, updated.confidence),
+    );
+    if (updated.state === 'flagged' && updated.route !== 'tell') {
+      if (this.options.autoInvestigate !== false)
+        await this.investigate(updated.id);
+    } else if (updated.state === 'ready' || updated.route === 'tell') {
+      // Already delivered or waiting: deliver again at the new urgency.
+      await this.options.delivery?.cancel(updated.id);
+      await this.deliver(
+        updated,
+        earlier,
+        await this.store.discovery.proposals.forFinding(updated.id),
       );
-      if (updated.state === 'flagged' && updated.route !== 'tell') {
-        if (this.options.autoInvestigate !== false)
-          await this.investigate(updated.id);
-      } else if (updated.state === 'ready' || updated.route === 'tell') {
-        // Already delivered or waiting: deliver again at the new urgency.
-        await this.options.delivery?.cancel(updated.id);
-        await this.deliver(
-          updated,
-          earlier,
-          await this.store.discovery.proposals.forFinding(updated.id),
-        );
-      }
     }
   }
 
@@ -715,7 +795,12 @@ export class DiscoveryService {
           existingThreadId,
           history:
             this.notes.get(finding.id) ?? (await this.storedNotes(finding.id)),
-          tags: await this.store.discovery.tags(event.id),
+          tags: extractTags(event)
+            .map(({ kind, value }) => ({ kind, value }))
+            .sort(
+              (a, b) =>
+                a.kind.localeCompare(b.kind) || a.value.localeCompare(b.value),
+            ),
         },
         AbortSignal.any([
           this.controller.signal,
