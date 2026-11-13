@@ -66,7 +66,7 @@ it('retains review receipts and their original draft after restart', async () =>
   });
   // A receipt from before drafts were stored has no draft.
   await db.run(
-    sql`INSERT INTO page_reviews (thread_id, tool_call_id, page_id, space_id) VALUES ('earlier-thread', 'earlier-call', ${olderPage.id}, ${space})`,
+    sql`INSERT INTO tool_calls (thread_id, tool_call_id, kind, tool, status, result, created_at) VALUES ('earlier-thread', 'earlier-call', 'page_review', 'review_space_page', 'done', ${JSON.stringify({ pageId: olderPage.id, spaceId: space, draft: null })}, 0)`,
   );
   store = await WorkspaceStore.open(db, 'owner');
   expect(

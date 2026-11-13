@@ -4,6 +4,7 @@ import type { ApprovalKind, ApprovalStatus } from '../../shared/approvals.js';
 import type { GrantedTool } from '../../shared/connection-types.js';
 import type { ConnectorService } from './service.js';
 import type { UsageStore } from '../usage-store.js';
+import type { ToolCalls } from '../engine/tool-calls.js';
 
 /** Asks the owner to approve something and waits for the answer. */
 export type Approve = (
@@ -34,6 +35,7 @@ export async function connectorTools(
   check: () => Promise<void>,
   signal: AbortSignal,
   approve: Approve | undefined,
+  toolCalls: ToolCalls,
   log?: UsageStore,
   /** Only tools the service marks read-only and that run without asking. */
   readOnly = false,
@@ -88,26 +90,24 @@ export async function connectorTools(
           // A permission change while waiting stops the turn here.
           await check();
           if (decision !== 'approved') return notApproved(decision, 'action');
-          // One run per tool call, even if the decision arrives twice.
-          if (
-            !(await connectors.actions.claimAction({
+          // One run per tool call, even if the decision arrives twice. The
+          // claim stays if the call fails: it may have reached the service.
+          const once = await toolCalls.once(
+            {
               threadId,
               toolCallId: context.toolCallId,
-              approvalId,
-              accountId: current.account.id,
-              dotId,
+              kind: 'connector',
               tool: current.tool.name,
-            }))
-          )
-            return { approved: true, error: 'This action already ran.' };
-          const result = await connectors.call(current, input, signal);
-          await connectors.actions.finishAction(
-            threadId,
-            context.toolCallId,
-            result,
+              dotId,
+              accountId: current.account.id,
+              approvalId,
+            },
+            () => connectors.call(current, input, signal),
           );
+          if (!once.ran)
+            return { approved: true, error: 'This action already ran.' };
           await check();
-          return { approved: true, ...result };
+          return { approved: true, ...once.result };
         }
         // Approved actions keep their own receipts; ungated calls are logged here.
         const entry = await log?.beginAction({

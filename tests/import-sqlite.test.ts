@@ -164,7 +164,7 @@ it('turns legacy per-Dot connections into shared accounts and grants', async () 
   });
   expect(
     await db.row(
-      sql`SELECT account_id, dot_id FROM connector_actions WHERE tool_call_id='tc1'`,
+      sql`SELECT account_id, dot_id FROM tool_calls WHERE tool_call_id='tc1'`,
     ),
   ).toEqual({ accountId: 'c1', dotId: 'd2' });
   expect((await workspace.inbox.source('src1'))?.config).toEqual({

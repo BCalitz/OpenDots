@@ -61,7 +61,7 @@ const RENAMED: Record<string, { to: string; columns: Record<string, string> }> =
       columns: { connectionId: 'account_id' },
     },
     mcp_actions: {
-      to: 'connector_actions',
+      to: 'tool_calls',
       columns: { connectionId: 'account_id' },
     },
   };
@@ -123,7 +123,11 @@ export async function importSqlite(
           }
           continue;
         }
-        reports.push(await copyTable(db, source, table));
+        reports.push(
+          table === 'page_reviews'
+            ? await importPageReviews(db, source)
+            : await copyTable(db, source, table),
+        );
       }
       if (present.has('mcp_connections'))
         reports.push(await importConnections(db, source, userId));
@@ -137,6 +141,25 @@ export async function importSqlite(
   } finally {
     source.close();
   }
+}
+
+/** Reviewed page saves became once-only tool calls (see migration 12). */
+async function importPageReviews(
+  db: Db,
+  source: DatabaseSync,
+): Promise<ImportReport> {
+  const rows = source
+    .prepare('SELECT * FROM page_reviews ORDER BY rowid')
+    .all() as Record<string, unknown>[];
+  const field = (row: Record<string, unknown>, name: string) =>
+    row[name] ?? row[snake(name)] ?? null;
+  for (const row of rows) {
+    const draft = field(row, 'draft');
+    await db.run(
+      sql`INSERT INTO tool_calls (thread_id, tool_call_id, kind, tool, status, result, created_at, claimed_at) VALUES (${String(field(row, 'threadId'))}, ${String(field(row, 'toolCallId'))}, 'page_review', 'review_space_page', 'done', json_build_object('pageId', ${String(field(row, 'pageId'))}::text, 'spaceId', ${String(field(row, 'spaceId'))}::text, 'draft', ${draft === null ? null : String(draft)}::json)::text, ${Date.now()}, ${Date.now()}) ON CONFLICT DO NOTHING`,
+    );
+  }
+  return { table: 'page_reviews', rows: rows.length, skipped: [] };
 }
 
 async function copyTable(
@@ -258,7 +281,7 @@ async function importConnections(
       sql`UPDATE connector_approvals SET account_id=${accountId} WHERE account_id=${id}`,
     );
     await db.run(
-      sql`UPDATE connector_actions SET account_id=${accountId}, dot_id=${dotId} WHERE account_id=${id}`,
+      sql`UPDATE tool_calls SET account_id=${accountId}, dot_id=${dotId} WHERE account_id=${id}`,
     );
     await db.run(
       sql`UPDATE inbox_sources SET config=jsonb_set(config::jsonb - 'connectionId', '{accountId}', to_jsonb(${accountId}::text))::text WHERE type='mcp' AND config::jsonb->>'connectionId'=${id}`,

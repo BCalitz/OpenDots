@@ -255,18 +255,18 @@ it('lists every outside action in one audit trail', async () => {
     },
     [],
   );
-  await workspace.actions.claimAction({
-    threadId: 'thread',
-    toolCallId: 'call-1',
-    approvalId: 'approval',
-    accountId: account.id,
-    dotId: dot.id,
-    tool: 'close_ticket',
-  });
-  await workspace.actions.finishAction('thread', 'call-1', {
-    isError: false,
-    text: 'ok',
-  });
+  await workspace.toolCalls.once(
+    {
+      threadId: 'thread',
+      toolCallId: 'call-1',
+      kind: 'connector',
+      approvalId: 'approval',
+      accountId: account.id,
+      dotId: dot.id,
+      tool: 'close_ticket',
+    },
+    async () => ({ isError: false, text: 'ok' }),
+  );
   const read = await workspace.usage.beginAction({
     dotId: dot.id,
     threadId: 'thread',

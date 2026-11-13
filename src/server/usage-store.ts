@@ -130,7 +130,7 @@ export class UsageStore {
       sql`SELECT id, at, dot_id, thread_id, kind, target, action, actor, approved, outcome FROM (
           SELECT 'mcp:' || a.thread_id || ':' || a.tool_call_id AS id, a.created_at AS at, a.dot_id, a.thread_id, 'mcp' AS kind, COALESCE(c.name, 'Removed connection') AS target, a.tool AS action, 'agent' AS actor, true AS approved, false AS read_only,
             CASE WHEN a.status<>'done' THEN 'pending' WHEN ${failed} THEN 'failed' ELSE 'succeeded' END AS outcome
-          FROM connector_actions a LEFT JOIN accounts c ON c.id=a.account_id
+          FROM tool_calls a LEFT JOIN accounts c ON c.id=a.account_id WHERE a.kind='connector'
           UNION ALL
           SELECT 'log:' || id, created_at, dot_id, thread_id, kind, target, action, 'agent', false, read_only, outcome FROM action_log
           UNION ALL

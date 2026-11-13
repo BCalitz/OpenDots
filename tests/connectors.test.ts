@@ -21,9 +21,9 @@ import type { ApprovalStatus } from '../src/shared/approvals.js';
 import { connectorRoutes } from '../src/server/connectors/routes.js';
 import { OAuthFlow } from '../src/server/connectors/oauth.js';
 import {
-  ActionStore,
   INTERRUPTED_ACTION_THRESHOLD_MS,
-} from '../src/server/connectors/actions.js';
+  ToolCalls,
+} from '../src/server/engine/tool-calls.js';
 import type { Access } from '../src/server/connectors/accounts.js';
 import type { Account, Grant } from '../src/shared/connection-types.js';
 import { sql } from '../src/server/db/index.js';
@@ -110,6 +110,7 @@ async function fixture({ twin = false } = {}) {
     workspace.actions,
     [new McpConnector(transport)],
   );
+  toolCallsOf.set(connectors, workspace.toolCalls);
   const routesFor = (user: string) =>
     connectorRoutes(
       workspace,
@@ -220,6 +221,8 @@ it('derives unique, provider-safe tool names', () => {
   ]);
   for (const name of names) expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
 });
+/** Each fixture's once-only tool call record, by its connector service. */
+const toolCallsOf = new WeakMap<ConnectorService, ToolCalls>();
 const tools = (
   connectors: ConnectorService,
   dotId: string,
@@ -233,6 +236,7 @@ const tools = (
     async () => {},
     new AbortController().signal,
     approve,
+    toolCallsOf.get(connectors)!,
   );
 const toolCtx = (toolCallId = 'call') => detachedContext(undefined, toolCallId);
 /** An owner who answers every request the same way, and remembers it. */
@@ -303,14 +307,15 @@ it('runs an approved request once and records its receipt', async () => {
   ).toMatchObject({ approved: true, error: 'This action already ran.' });
   expect(sent).toHaveBeenCalledOnce();
   expect(sent.mock.calls[0][0]).toEqual({ to: 'a@example.com', body: 'Hi' });
-  expect(await workspace.actions.action('thread', 'tc1')).toMatchObject({
+  expect(await workspace.toolCalls.get('thread', 'tc1')).toMatchObject({
+    kind: 'connector',
     status: 'done',
     result: { isError: false, text: 'Sent to a@example.com' },
   });
   // The receipt records which Dot and which account, for the audit trail.
   expect(
     await workspace.db.row(
-      sql`SELECT account_id, dot_id FROM connector_actions WHERE tool_call_id='tc1'`,
+      sql`SELECT account_id, dot_id FROM tool_calls WHERE tool_call_id='tc1'`,
     ),
   ).toEqual({ accountId: account.id, dotId: dot.id });
 });
@@ -565,10 +570,10 @@ it('treats a receipt without a claim time as claimed when it was created', async
   const db = await testDb();
   // Receipts from before claim times were recorded have only created_at.
   await db.run(
-    sql`INSERT INTO connector_actions (thread_id, tool_call_id, account_id, tool, status, result, created_at, approval_id) VALUES ('thread', 'tc1', 'account', 'send mail!', 'running', NULL, ${Date.now() - INTERRUPTED_ACTION_THRESHOLD_MS}, 'approval-1')`,
+    sql`INSERT INTO tool_calls (thread_id, tool_call_id, account_id, tool, status, result, created_at, approval_id) VALUES ('thread', 'tc1', 'account', 'send mail!', 'running', NULL, ${Date.now() - INTERRUPTED_ACTION_THRESHOLD_MS}, 'approval-1')`,
   );
-  const store = new ActionStore(db);
-  expect(await store.action('thread', 'tc1')).toMatchObject({
+  const store = new ToolCalls(db);
+  expect(await store.get('thread', 'tc1')).toMatchObject({
     approvalId: 'approval-1',
     status: 'interrupted',
     result: null,

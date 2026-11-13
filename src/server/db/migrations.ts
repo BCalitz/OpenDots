@@ -23,6 +23,17 @@ UPDATE inbox_sources SET type='account', enabled=false,
     'app', CASE WHEN config::jsonb->>'toolkit'='microsoft_teams' THEN 'teams' ELSE config::jsonb->>'toolkit' END)::text
 WHERE type='composio';
 `;
+/**
+ * Copies reviewed page saves from `table` (thread_id, tool_call_id, page_id,
+ * space_id, draft) into tool_calls.
+ */
+const PAGE_REVIEW_CALLS = (table: string) => `
+INSERT INTO tool_calls (thread_id, tool_call_id, kind, tool, status, result, created_at, claimed_at)
+SELECT thread_id, tool_call_id, 'page_review', 'review_space_page', 'done',
+  json_build_object('pageId', page_id, 'spaceId', space_id, 'draft', draft::json)::text,
+  (extract(epoch from now()) * 1000)::bigint, (extract(epoch from now()) * 1000)::bigint
+FROM ${table} ON CONFLICT DO NOTHING;`;
+
 const migrations: { version: number; name: string; sql: string }[] = [
   {
     version: 1,
@@ -302,6 +313,21 @@ ALTER TABLE dots DROP COLUMN apps_allowed, DROP COLUMN composio_toolkits, DROP C
 UPDATE settings SET value=(value::jsonb - 'appsAllowed')::text;
 UPDATE discovery_settings SET value=replace(value, '"microsoft_teams"', '"teams"');
 ${RETIRE_COMPOSIO_SOURCES}
+`,
+  },
+  {
+    version: 12,
+    name: 'one record of once-only tool calls',
+    sql: `
+-- Every tool call that must run once (a gated connector call, a reviewed page
+-- save, an approval request) is claimed here, keyed by thread and tool call.
+ALTER TABLE connector_actions RENAME TO tool_calls;
+ALTER INDEX connector_actions_pkey RENAME TO tool_calls_pkey;
+ALTER INDEX connector_actions_approval RENAME TO tool_calls_approval;
+ALTER TABLE tool_calls ADD COLUMN kind TEXT NOT NULL DEFAULT 'connector';
+ALTER TABLE tool_calls ALTER COLUMN account_id DROP NOT NULL;
+${PAGE_REVIEW_CALLS('page_reviews')}
+DROP TABLE page_reviews;
 `,
   },
 ];

@@ -157,7 +157,7 @@ it('turns per-Dot connections into shared accounts, grants and policies', async 
   ).toEqual({ accountId: 'c1' });
   expect(
     await db.row(
-      sql`SELECT account_id, dot_id FROM connector_actions WHERE tool_call_id='tc'`,
+      sql`SELECT account_id, dot_id FROM tool_calls WHERE tool_call_id='tc'`,
     ),
   ).toEqual({ accountId: 'c1', dotId: 'dotB' });
   expect(

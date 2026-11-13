@@ -2,6 +2,7 @@ import { ComputerStore } from './computer-store.js';
 import { AccountStore } from './connectors/accounts.js';
 import { Sealer } from './connectors/secrets.js';
 import { ActionStore } from './connectors/actions.js';
+import { ToolCalls } from './engine/tool-calls.js';
 import { Pages } from './pages.js';
 import { UsageStore } from './usage-store.js';
 import { InboxStore } from './inbox/store.js';
@@ -48,6 +49,8 @@ export class WorkspaceStore {
   readonly computers: ComputerStore;
   readonly accounts: AccountStore;
   readonly actions: ActionStore;
+  /** Once-only tool calls: gated connector calls, reviewed pages, approvals. */
+  readonly toolCalls: ToolCalls;
   readonly usage: UsageStore;
   readonly inbox: InboxStore;
   /** A workspace with at least one Space and Dot. */
@@ -65,6 +68,7 @@ export class WorkspaceStore {
     this.computers = new ComputerStore(db);
     this.accounts = new AccountStore(db, new Sealer(secretsKey));
     this.actions = new ActionStore(db);
+    this.toolCalls = new ToolCalls(db);
     this.usage = new UsageStore(db);
     this.inbox = new InboxStore(db);
     this.pages = new Pages(db, (id) => this.spaceExists(id));

@@ -3,8 +3,10 @@ import { sql, type Db } from './db/index.js';
 import { z } from 'zod';
 import {
   pageReviewSchema,
+  pageReviewTool,
   type PageReviewDraft,
 } from '../shared/page-review.js';
+import { ToolCalls } from './engine/tool-calls.js';
 export const pageInput = z
   .object({
     title: z.string().trim().min(1).max(160),
@@ -46,10 +48,13 @@ const PAGE = sql.raw(
   'id, space_id, parent_id, title, content, revision, created_at, updated_at, source_thread_id',
 );
 export class Pages {
+  private toolCalls: ToolCalls;
   constructor(
     private db: Db,
     private spaceExists: (id: string) => Promise<boolean>,
-  ) {}
+  ) {
+    this.toolCalls = new ToolCalls(db);
+  }
   async requireSpace(spaceId: string) {
     if (!(await this.spaceExists(spaceId)))
       throw new PageError('Space not found.', 404);
@@ -108,68 +113,78 @@ export class Pages {
       return this.get(spaceId, id);
     });
   }
-  async reviewReceipt(
-    threadId: string,
-    toolCallId: string,
-  ): Promise<{
-    pageId: string;
-    spaceId: string;
-    draft: PageReviewDraft | null;
-  } | null> {
-    const row = await this.db.row<{
-      pageId: string;
-      spaceId: string;
-      draft: string | null;
-    }>(
-      sql`SELECT page_id, space_id, draft FROM page_reviews WHERE thread_id=${threadId} AND tool_call_id=${toolCallId}`,
-    );
-    return row
-      ? {
-          pageId: row.pageId,
-          spaceId: row.spaceId,
-          draft: row.draft
-            ? pageReviewSchema.parse(JSON.parse(row.draft))
-            : null,
-        }
-      : null;
-  }
-  createReviewed(
+  /**
+   * Saves a reviewed draft once per tool call: a repeated save returns the
+   * same page, and a repeat with a different draft or Space is refused.
+   */
+  async createReviewed(
     spaceId: string,
     input: Pick<PageReviewDraft, 'title' | 'content'>,
     threadId: string,
     toolCallId: string,
   ): Promise<ReviewedPage> {
     const draft = pageReviewSchema.parse({ ...input, spaceId });
-    return this.db.transaction(async () => {
-      const previous = await this.reviewReceipt(threadId, toolCallId);
-      if (previous) {
-        if (previous.spaceId !== spaceId)
-          throw new PageError(
-            'This review was already saved to another Space.',
-            409,
-          );
-        if (
-          previous.draft &&
-          (previous.draft.title !== draft.title ||
-            previous.draft.content !== draft.content)
-        )
-          throw new PageError(
-            'This review was already saved with a different draft. Start a new review for the changed draft.',
-            409,
-          );
-        const page = await this.get(spaceId, previous.pageId);
-        return { ...page, reviewDraft: previous.draft };
-      }
-      const page = await this.create(
-        spaceId,
-        { title: draft.title, content: draft.content },
+    const once = await this.toolCalls.once<{
+      pageId: string;
+      spaceId: string;
+      draft: PageReviewDraft | null;
+    }>(
+      {
         threadId,
-      );
-      await this.db.run(
-        sql`INSERT INTO page_reviews (thread_id, tool_call_id, page_id, space_id, draft) VALUES (${threadId}, ${toolCallId}, ${page.id}, ${spaceId}, ${JSON.stringify(draft)})`,
-      );
+        toolCallId,
+        kind: 'page_review',
+        tool: pageReviewTool.name,
+      },
+      async () => {
+        const page = await this.create(
+          spaceId,
+          { title: draft.title, content: draft.content },
+          threadId,
+        );
+        return { pageId: page.id, spaceId, draft };
+      },
+      { atomic: true },
+    );
+    if (once.ran) {
+      const page = await this.get(spaceId, once.result.pageId);
       return { ...page, reviewDraft: draft };
-    });
+    }
+    const previous = once.result;
+    if (!previous)
+      throw new PageError('This review is already being saved.', 409);
+    if (previous.spaceId !== spaceId)
+      throw new PageError(
+        'This review was already saved to another Space.',
+        409,
+      );
+    const saved = previous.draft
+      ? pageReviewSchema.parse(previous.draft)
+      : null;
+    if (
+      saved &&
+      (saved.title !== draft.title || saved.content !== draft.content)
+    )
+      throw new PageError(
+        'This review was already saved with a different draft. Start a new review for the changed draft.',
+        409,
+      );
+    const page = await this.get(spaceId, previous.pageId);
+    return { ...page, reviewDraft: saved };
+  }
+  /** The saved review for a tool call, if any. */
+  async reviewReceipt(threadId: string, toolCallId: string) {
+    const found = await this.toolCalls.get<{
+      pageId: string;
+      spaceId: string;
+      draft: PageReviewDraft | null;
+    }>(threadId, toolCallId);
+    if (found?.kind !== 'page_review' || !found.result) return null;
+    const { pageId, spaceId, draft } = found.result;
+    return {
+      pageId,
+      spaceId,
+      draft: draft ? pageReviewSchema.parse(draft) : null,
+    };
   }
   update(
     spaceId: string,
@@ -247,7 +262,7 @@ export class Pages {
       await this.db.run(
         sql`UPDATE pages SET parent_id=${page.parentId}, revision=revision+1, updated_at=${now} WHERE space_id=${spaceId} AND parent_id=${id}`,
       );
-      // page_reviews rows stay: a retried approval must not recreate this page.
+      // Its tool_calls record stays: a retried approval must not recreate this page.
       await this.db.run(sql`DELETE FROM page_threads WHERE page_id=${id}`);
       await this.db.run(
         sql`DELETE FROM pages WHERE id=${id} AND space_id=${spaceId}`,
