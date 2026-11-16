@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Check, Newspaper, X } from 'lucide-react';
+import type { ApprovalView } from '../shared/approvals';
 import type {
   BriefEntry,
   Delivery,
@@ -160,6 +161,155 @@ function Entries({
   );
 }
 
+/** One line saying what a waiting request will do. */
+function approvalText(approval: ApprovalView) {
+  const payload = (approval.payload ?? {}) as {
+    title?: string;
+    connection?: string;
+    description?: string;
+  };
+  const what =
+    approval.kind === 'connection_action' && payload.connection
+      ? `${payload.connection} · ${payload.title ?? 'action'}`
+      : (payload.title ??
+        (approval.kind === 'page_review' ? 'Save a page' : 'An action'));
+  return { what, detail: payload.description ?? '' };
+}
+
+/**
+ * Requests Dots are waiting on you for, with a way to answer several at once.
+ * Each answer applies to exactly what its row says; open one to read the
+ * full text first.
+ */
+function WaitingApprovals({
+  onThread,
+}: {
+  onThread: (threadId: string) => void;
+}) {
+  const [waiting, setWaiting] = useState<ApprovalView[]>([]);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(
+    () =>
+      api<ApprovalView[]>('/chat/approvals')
+        .then((list) => {
+          setWaiting(list);
+          setPicked((current) => {
+            const ids = new Set(list.map((item) => item.id));
+            return new Set([...current].filter((id) => ids.has(id)));
+          });
+        })
+        .catch(() => undefined),
+    [],
+  );
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+  if (!waiting.length) return null;
+  const toggle = (id: string) =>
+    setPicked((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const answer = async (approved: boolean) => {
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ decided: string[]; failed: unknown[] }>(
+        '/chat/approvals',
+        'POST',
+        { ids: [...picked], approved },
+      );
+      setMessage(
+        `${result.decided.length} ${approved ? 'approved' : 'declined'}` +
+          (result.failed.length
+            ? `, ${result.failed.length} no longer waiting`
+            : ''),
+      );
+      setPicked(new Set());
+      await load();
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="brief-section waiting-approvals">
+      <h3>
+        Waiting for your approval{' '}
+        <span className="muted">{waiting.length}</span>
+      </h3>
+      <ul>
+        {waiting.map((approval) => {
+          const { what, detail } = approvalText(approval);
+          return (
+            <li key={approval.id}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={picked.has(approval.id)}
+                  onChange={() => toggle(approval.id)}
+                  aria-label={`Select ${what}`}
+                />
+                <span>
+                  <strong>{what}</strong>
+                  {detail && <span className="muted"> {detail}</span>}
+                  <span className="muted">
+                    {' '}
+                    · {relative(approval.createdAt)}
+                  </span>
+                </span>
+              </label>
+              <button
+                className="text-button"
+                onClick={() => onThread(approval.threadId)}
+              >
+                Open
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="brief-bulk">
+        <button
+          type="button"
+          className="review-primary"
+          disabled={busy || !picked.size}
+          onClick={() => void answer(true)}
+        >
+          Approve selected{picked.size ? ` (${picked.size})` : ''}
+        </button>
+        <button
+          type="button"
+          disabled={busy || !picked.size}
+          onClick={() => void answer(false)}
+        >
+          Decline selected
+        </button>
+        <button
+          type="button"
+          className="text-button"
+          onClick={() =>
+            setPicked(
+              picked.size === waiting.length
+                ? new Set()
+                : new Set(waiting.map((item) => item.id)),
+            )
+          }
+        >
+          {picked.size === waiting.length ? 'Clear' : 'Select all'}
+        </button>
+        {message && <small role="status">{message}</small>}
+      </div>
+    </div>
+  );
+}
+
 /**
  * The morning brief: what waits for it and what the last one held, plus
  * links between items Jev wasn't sure of, for the owner to confirm or
@@ -196,6 +346,7 @@ export function InboxBrief({
   if (!brief) return <p className="muted">Loading the brief…</p>;
   return (
     <section className="inbox-brief">
+      <WaitingApprovals onThread={onThread} />
       <h2 className="insight-subhead">Next brief</h2>
       {brief.next.length ? (
         <Entries entries={brief.next} onThread={onThread} />

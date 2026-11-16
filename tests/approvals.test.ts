@@ -332,3 +332,34 @@ it('refuses request_approval links that are not http(s) or OpenDots pages', asyn
   await server.platform.runner!.done(turn.conversation.id);
   expect(approvalsFrom(turn.events).get('ask-1')).toBeUndefined();
 });
+
+it('lists everything waiting and answers several requests at once', async () => {
+  const server = await start();
+  const turn = await reviewTurn(server);
+  const approval = await turn.pending();
+  const waiting = await server.app.request('/api/chat/approvals');
+  expect(await waiting.json()).toEqual([
+    expect.objectContaining({ id: approval.id }),
+  ]);
+  const answered = await server.app.request(
+    '/api/chat/approvals',
+    json({ ids: [approval.id, 'missing', approval.id], approved: true }),
+  );
+  expect(await answered.json()).toEqual({
+    decided: [approval.id],
+    failed: [{ id: 'missing', error: 'Approval request not found.' }],
+  });
+  await server.platform.runner!.done(turn.conversation.id);
+  expect(await server.workspace.pages.list(turn.dot.spaceId)).toHaveLength(1);
+  // Nothing is left waiting, and deciding again fails without an error status.
+  expect(
+    await (await server.app.request('/api/chat/approvals')).json(),
+  ).toEqual([]);
+  const again = await server.app.request(
+    '/api/chat/approvals',
+    json({ ids: [approval.id], approved: true }),
+  );
+  expect(((await again.json()) as { failed: unknown[] }).failed).toHaveLength(
+    1,
+  );
+});

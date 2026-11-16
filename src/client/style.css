@@ -5612,3 +5612,17 @@ h3 {
     display: none;
   }
 }
+
+.waiting-approvals li label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  flex: 1;
+}
+.brief-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}

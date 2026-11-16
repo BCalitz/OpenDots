@@ -181,6 +181,40 @@ export function chatRoutes(platform: Platform) {
     return c.json((await platform.approvals?.pending(thread.id)) ?? []);
   });
 
+  // Everything waiting for the owner, across conversations.
+  app.get('/chat/approvals', async (c) =>
+    c.json((await platform.approvals?.pending()) ?? []),
+  );
+  // Answers several waiting requests at once. Each is its own decision on
+  // exactly what it shows; one that already closed does not hold up the rest.
+  app.post('/chat/approvals', async (c) => {
+    const { ids, approved } = z
+      .object({
+        ids: z.array(z.string().max(200)).min(1).max(50),
+        approved: z.boolean(),
+      })
+      .strict()
+      .parse(await c.req.json());
+    const approvals = platform.approvals;
+    if (!approvals) throw new Error('Approval request not found.');
+    const decided: string[] = [];
+    const failed: { id: string; error: string }[] = [];
+    for (const id of new Set(ids)) {
+      try {
+        const current = await approvals.get(id);
+        if (!current) throw new Error('Approval request not found.');
+        await platform.workspace.requireThread(current.threadId);
+        await approvals.decide(id, approved);
+        decided.push(id);
+      } catch (error) {
+        failed.push({
+          id,
+          error: error instanceof Error ? error.message : 'Could not decide.',
+        });
+      }
+    }
+    return c.json({ decided, failed });
+  });
   app.post('/chat/approvals/:id', async (c) => {
     const { approved, always, confirm } = z
       .object({
