@@ -6,6 +6,7 @@ import type {
   DiscoverySettings,
   EventLinkView,
 } from '../../shared/inbox-types.js';
+import { WaitingStore } from './waiting.js';
 
 export const DEFAULT_DISCOVERY_SETTINGS: DiscoverySettings = {
   briefTime: '07:30',
@@ -46,8 +47,11 @@ const PUSH = sql.raw(
 export class DiscoveryStore {
   /** Proposals: flagged items with the owner's three choices. */
   readonly proposals: ProposalStore;
+  /** Things the owner sent that wait on someone else. */
+  readonly waiting: WaitingStore;
   constructor(private db: Db) {
     this.proposals = new ProposalStore(db);
+    this.waiting = new WaitingStore(db);
   }
 
   async settings(): Promise<DiscoverySettings> {

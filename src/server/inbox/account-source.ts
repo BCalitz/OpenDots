@@ -52,11 +52,36 @@ export function plainText(html: string) {
     .trim();
 }
 
+/**
+ * Mail the owner sent, not received: Gmail labels it SENT. Sent mail is read
+ * only to see what the owner is waiting on, never flagged.
+ */
+export function sentByOwner(raw: unknown) {
+  const labels =
+    raw &&
+    typeof raw === 'object' &&
+    Array.isArray((raw as Record<string, unknown>).labelIds)
+      ? ((raw as Record<string, unknown>).labelIds as unknown[])
+      : [];
+  return labels.includes('SENT') && !labels.includes('INBOX');
+}
+/** Who a message was sent to, as the service names them. */
+export function recipientOf(raw: unknown) {
+  const to =
+    raw && typeof raw === 'object' ? (raw as { to?: unknown }).to : null;
+  const value = Array.isArray(to)
+    ? to.filter((x) => typeof x === 'string').join(', ')
+    : to;
+  return typeof value === 'string' && value.trim()
+    ? value.trim().slice(0, 200)
+    : null;
+}
+
 const gmail: Reader = async (read, since, source) =>
   items(
     await read('search_messages', {
       // Gmail's after: takes seconds since the epoch.
-      query: `in:inbox after:${Math.floor(since.getTime() / 1000)}`,
+      query: `(in:inbox OR in:sent) after:${Math.floor(since.getTime() / 1000)}`,
       limit: MAX_ITEMS,
     }),
   ).flatMap((item): InboxEvent[] => {

@@ -263,6 +263,31 @@ export class DeliveryService {
         now,
       );
     }
+    // Overdue replies the owner is waiting for: mentioned once, in the brief.
+    for (const wait of await this.store.waiting.due(now)) {
+      const days = Math.max(1, Math.floor((now - wait.since) / 86_400_000));
+      await this.store.queuePush(
+        {
+          findingId: null,
+          proposalId: null,
+          kind: 'finding',
+          title: 'Still waiting on a reply',
+          body: this.options.previews?.()
+            ? `${wait.who ?? 'Someone'} hasn't answered "${wait.title}" in ${days} days. Open Waiting on others to follow up.`.slice(
+                0,
+                160,
+              )
+            : 'Something you sent has no reply yet. Open Waiting on others to follow up.',
+          threadId: null,
+          section: 'updates',
+          urgent: false,
+          dueAt: null,
+          state: 'brief',
+        },
+        now,
+      );
+      await this.store.waiting.markNudged(wait.id, now);
+    }
     for (const push of await this.store.due(now)) {
       let categoryId: PushCategory | undefined;
       if (push.proposalId) {

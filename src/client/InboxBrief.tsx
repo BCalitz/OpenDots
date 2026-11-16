@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { Check, Newspaper, X } from 'lucide-react';
 import type { ApprovalView } from '../shared/approvals';
 import type { Memory } from '../shared/types';
+
 import type {
   BriefEntry,
   Delivery,
   EventLinkView,
   Route,
   Urgency,
+  WaitingView,
 } from '../shared/inbox-types';
 import { api } from './api';
 import { relative } from './TaskPresentation';
@@ -226,6 +228,80 @@ function OnYourMind() {
   );
 }
 
+/** Things you sent that someone has not answered, with a follow-up the Dot drafts. */
+function WaitingOnOthers({
+  onThread,
+}: {
+  onThread: (threadId: string) => void;
+}) {
+  const [waiting, setWaiting] = useState<WaitingView[]>([]);
+  const [error, setError] = useState('');
+  const load = useCallback(
+    () =>
+      api<WaitingView[]>('/discovery/waiting')
+        .then(setWaiting)
+        .catch(() => undefined),
+    [],
+  );
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 30000);
+    return () => clearInterval(timer);
+  }, [load]);
+  if (!waiting.length) return null;
+  const act = async (id: string, what: 'dismiss' | 'follow-up') => {
+    try {
+      const result = await api<{ threadId?: string }>(
+        `/discovery/waiting/${encodeURIComponent(id)}/${what}`,
+        'POST',
+        {},
+      );
+      setError('');
+      if (result.threadId) onThread(result.threadId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    await load();
+  };
+  const days = (since: number) =>
+    Math.max(0, Math.floor((Date.now() - since) / 86_400_000));
+  return (
+    <section className="on-your-mind">
+      <h2 className="insight-subhead">Waiting on others</h2>
+      {error && <p className="chat-error">{error}</p>}
+      <ul>
+        {waiting.map((item) => (
+          <li key={item.id}>
+            <span>
+              <strong>{item.title}</strong>
+              <small>
+                {' '}
+                {item.who ? `${item.who} · ` : ''}
+                {days(item.since) === 0
+                  ? 'asked today'
+                  : `no reply for ${days(item.since)} days`}
+              </small>
+            </span>
+            <button
+              className="text-button"
+              onClick={() => void act(item.id, 'follow-up')}
+            >
+              Draft a follow-up
+            </button>
+            <button
+              className="text-button"
+              aria-label={`Stop waiting: ${item.title}`}
+              onClick={() => void act(item.id, 'dismiss')}
+            >
+              <X size={14} /> Stop waiting
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /**
  * Requests Dots are waiting on you for, with a way to answer several at once.
  * Each answer applies to exactly what its row says; open one to read the
@@ -397,6 +473,7 @@ export function InboxBrief({
   return (
     <section className="inbox-brief">
       <OnYourMind />
+      <WaitingOnOthers onThread={onThread} />
       <WaitingApprovals onThread={onThread} />
       <h2 className="insight-subhead">Next brief</h2>
       {brief.next.length ? (

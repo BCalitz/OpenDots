@@ -312,3 +312,20 @@ export interface BriefEntry {
   section: 'decisions' | 'drafts' | 'updates';
   createdAt: number;
 }
+
+/** Something the owner sent that asks for a reply nobody has given yet. */
+export interface WaitingView {
+  id: string;
+  eventId: string;
+  /** Who was asked, when known. */
+  who: string | null;
+  title: string;
+  dotId: string | null;
+  state: 'waiting' | 'answered' | 'dismissed';
+  /** When the owner asked. */
+  since: number;
+  /** When the owner was last told it is overdue. */
+  nudgedAt: number | null;
+  /** The later item that answered it. */
+  answeredBy: string | null;
+}

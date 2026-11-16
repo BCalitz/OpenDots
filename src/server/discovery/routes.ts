@@ -56,6 +56,20 @@ export function discoveryRoutes(platform: Platform) {
       ? c.json({ ok: true })
       : c.json({ error: 'Entry not found.' }, 404),
   );
+  // Things the owner sent that wait on someone else.
+  const waiting = platform.workspace.inbox.discovery.waiting;
+  app.get('/discovery/waiting', async (c) => c.json(await waiting.list()));
+  app.post('/discovery/waiting/:id/dismiss', async (c) =>
+    (await waiting.dismiss(c.req.param('id')))
+      ? c.json({ ok: true })
+      : c.json({ error: 'Not waiting any more.' }, 404),
+  );
+  app.post('/discovery/waiting/:id/follow-up', async (c) => {
+    const threadId = await platform.followUp(c.req.param('id'));
+    return threadId
+      ? c.json({ threadId })
+      : c.json({ error: 'Not waiting any more.' }, 404);
+  });
   app.get('/discovery', async (c) => {
     const { config } = platform;
     const state: DiscoveryState = {

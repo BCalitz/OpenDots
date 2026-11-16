@@ -300,6 +300,32 @@ export class Platform {
       this.replying.delete(finding.id);
     }
   }
+  /**
+   * Opens a conversation where the Dot drafts a follow-up for something the
+   * owner sent and nobody answered. It sends only once the owner approves.
+   */
+  async followUp(waitingId: string) {
+    const wait = await this.workspace.inbox.discovery.waiting.get(waitingId);
+    if (!wait || wait.state !== 'waiting') return undefined;
+    const dotId = wait.dotId ?? (await this.workspace.dots())[0]?.id;
+    if (!dotId) return undefined;
+    const days = Math.max(
+      1,
+      Math.floor((Date.now() - wait.since) / 86_400_000),
+    );
+    const conversation = await this.createConversation(
+      dotId,
+      `Follow up: ${wait.title}`.slice(0, 80),
+      { source: 'discovery', topic: true },
+    );
+    void this.turn(
+      conversation.id,
+      `I sent "${wait.title}"${wait.who ? ` to ${wait.who}` : ''} ${days} day${days === 1 ? '' : 's'} ago and have had no reply. Find the message with search_inbox, then draft a short, polite follow-up and ask me to approve it before sending.`,
+      AbortSignal.timeout(45 * 60_000),
+      { opendotsSource: 'reply' },
+    ).catch(() => console.error('The follow-up draft did not finish.'));
+    return conversation.id;
+  }
   /** Sorts main-chat messages into topic threads: Jev, when configured. */
   topicRouter(): TopicRouter | undefined {
     return this.config.typesafeApiKey

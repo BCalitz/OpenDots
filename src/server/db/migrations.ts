@@ -400,6 +400,15 @@ ALTER TABLE memories ADD COLUMN subject TEXT;
 ALTER TABLE memories ADD COLUMN until BIGINT;
 `,
   },
+  {
+    version: 17,
+    name: 'waiting on others',
+    sql: `
+-- Things the owner sent that ask for something back, until answered or dropped.
+CREATE TABLE waiting_on(id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, who TEXT, title TEXT NOT NULL, dot_id TEXT, state TEXT NOT NULL, since BIGINT NOT NULL, nudged_at BIGINT, answered_by TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
+CREATE INDEX waiting_on_state ON waiting_on(state, since);
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

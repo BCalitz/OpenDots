@@ -392,7 +392,7 @@ describe('discovery sources', () => {
     expect(calls[0]).toMatchObject({
       accountId: 'acc_1',
       tool: 'search_messages',
-      args: { query: `in:inbox after:${since.getTime() / 1000}` },
+      args: { query: `(in:inbox OR in:sent) after:${since.getTime() / 1000}` },
     });
     expect(events).toEqual([
       expect.objectContaining({

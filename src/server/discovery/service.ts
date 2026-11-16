@@ -11,6 +11,7 @@ import {
   type Urgency,
 } from '../../shared/inbox-types.js';
 import type { NewEvents } from '../inbox/engine.js';
+import { recipientOf, sentByOwner } from '../inbox/account-source.js';
 import type { InboxStore } from '../inbox/store.js';
 import { extractTags } from '../inbox/tags.js';
 import type { MemoryService } from '../memory/service.js';
@@ -395,9 +396,13 @@ export class DiscoveryService {
       if (this.controller.signal.aborted) return;
       if (await this.store.findingForEvent(event.id)) continue;
       const settings = await this.store.discovery.settings();
-      let verdict: Verdict | undefined = ruleVerdict(
-        await this.store.payload(event.id),
-      );
+      const raw = await this.store.payload(event.id);
+      // The owner's own mail is never flagged; it may be waiting on a reply.
+      if (sentByOwner(raw)) {
+        await this.noteSent(event, raw, config, app);
+        continue;
+      }
+      let verdict: Verdict | undefined = ruleVerdict(raw);
       let judgedBy = 'rules';
       let entities: Resolved[] = [];
       if (!verdict) {
@@ -456,6 +461,47 @@ export class DiscoveryService {
           : (this.options.maxInvestigations ?? 5),
       ))
       await this.investigate(finding.id);
+  }
+
+  /**
+   * Mail the owner sent: kept out of the flags, and if it asks the recipient
+   * for something, remembered as waiting on them until a reply arrives.
+   */
+  private async noteSent(
+    event: InboxEventView,
+    raw: unknown,
+    config: AccountSourceConfig,
+    app: string,
+  ) {
+    await this.store.saveFinding({
+      eventId: event.id,
+      attention: false,
+      category: 'other',
+      confidence: 0,
+      reason: 'Sent by you.',
+      judgedBy: 'rules',
+      dotId: config.dotId,
+    });
+    const model = this.options.judge();
+    if (!model?.awaiting) return;
+    try {
+      const score = await model.awaiting(
+        { ...event, app },
+        this.controller.signal,
+      );
+      if (score >= YES)
+        await this.store.discovery.waiting.add({
+          eventId: event.id,
+          who: recipientOf(raw),
+          title: event.title,
+          dotId: config.dotId,
+          since: event.occurredAt,
+        });
+    } catch (error) {
+      console.error(
+        `Discovery could not read a sent item: ${safeError(error)}`,
+      );
+    }
   }
 
   /**
@@ -655,6 +701,8 @@ export class DiscoveryService {
     verdict: Verdict,
     context: Context,
   ) {
+    // A reply to something the owner sent ends the wait.
+    await this.store.discovery.waiting.answer(earlier.id, event.id);
     const finding = await this.store.findingForEvent(earlier.id);
     if (!finding || finding.state === 'resolved') return;
     if (entry.resolves >= YES) {
