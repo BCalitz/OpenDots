@@ -1,7 +1,10 @@
 import type { JSONSchema } from '@tanstack/ai';
 import type { Tool, ToolContext } from '../engine/tools.js';
 import type { ApprovalKind, ApprovalStatus } from '../../shared/approvals.js';
-import type { GrantedTool } from '../../shared/connection-types.js';
+import {
+  isRiskyTool,
+  type GrantedTool,
+} from '../../shared/connection-types.js';
 import type { ConnectorService } from './service.js';
 import type { UsageStore } from '../usage-store.js';
 import type { ToolCalls } from '../engine/tool-calls.js';
@@ -85,6 +88,13 @@ export async function connectorTools(
               title: current.tool.title,
               description: current.tool.description,
               arguments: input,
+              // What "Always allow" changes, and whether it needs typing.
+              rule: {
+                dotId,
+                accountId: current.account.id,
+                tool: current.tool.name,
+                risky: isRiskyTool(current.tool),
+              },
             },
           });
           // A permission change while waiting stops the turn here.

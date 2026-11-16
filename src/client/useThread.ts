@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, authHeaders } from './api';
 import { ThreadConnection, type ThreadState } from '../shared/thread-client';
 import type { BaseEvent } from '../shared/thread-events';
-import type { ApprovalView } from '../shared/approvals';
+import type { ApprovalView, DecideOptions } from '../shared/approvals';
 
 const initial: ThreadState = {
   messages: [],
@@ -80,11 +80,11 @@ export function useThread(
     [threadId],
   );
   const decide = useCallback(
-    (approvalId: string, approved: boolean) =>
+    (approvalId: string, approved: boolean, options?: DecideOptions) =>
       api<ApprovalView>(
         `/chat/approvals/${encodeURIComponent(approvalId)}`,
         'POST',
-        { approved },
+        { approved, ...options },
       ),
     [],
   );

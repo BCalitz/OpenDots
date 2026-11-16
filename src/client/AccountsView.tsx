@@ -17,6 +17,7 @@ import {
 } from '../shared/inbox-types';
 import { api } from './api';
 import { DiscoverySettingsForm } from './DiscoverySettings';
+import { RulesSection } from './RulesSection';
 
 interface SignInProvider {
   kind: string;
@@ -258,6 +259,7 @@ export function AccountsView({ dots }: { dots: Dot[] }) {
       {discovery && (
         <DiscoverySettingsForm state={discovery} onSaved={loadDiscovery} />
       )}
+      {accounts && <RulesSection dots={dots} accounts={accounts} />}
     </main>
   );
 }

@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { sql, type Db } from '../db/index.js';
 import { Sealer } from './secrets.js';
+import {
+  ALLOW_CONFIRMATION,
+  isRiskyTool,
+} from '../../shared/connection-types.js';
 import type {
   Account,
   ConnectorTool,
@@ -237,12 +241,22 @@ export class AccountStore {
     accountId: string,
     tool: string,
     policy: ToolPolicy,
+    /** What the owner typed, when letting a risky tool run unasked. */
+    confirmation?: string,
   ) {
     await this.db.transaction(async () => {
       const account = await this.get(userId, accountId);
       if (!account) throw new Error('Account not found.');
-      if (!account.tools.some((item) => item.name === tool))
-        throw new Error('Connection tool not found.');
+      const found = account.tools.find((item) => item.name === tool);
+      if (!found) throw new Error('Connection tool not found.');
+      if (
+        policy === 'allow' &&
+        isRiskyTool(found) &&
+        confirmation?.trim().toLowerCase() !== ALLOW_CONFIRMATION
+      )
+        throw new Error(
+          `"${found.title}" can send, pay or delete. Type "${ALLOW_CONFIRMATION}" to let it run without asking.`,
+        );
       const grant = await this.db.row<{ id: string }>(
         sql`SELECT id FROM grants WHERE account_id=${accountId} AND dot_id=${dotId}`,
       );

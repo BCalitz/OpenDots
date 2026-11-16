@@ -144,8 +144,16 @@ export class ConnectorService {
     accountId: string,
     tool: string,
     policy: ToolPolicy,
+    confirmation?: string,
   ) {
-    return this.accounts.setPolicy(userId, dotId, accountId, tool, policy);
+    return this.accounts.setPolicy(
+      userId,
+      dotId,
+      accountId,
+      tool,
+      policy,
+      confirmation,
+    );
   }
 
   async tools(dotId: string) {

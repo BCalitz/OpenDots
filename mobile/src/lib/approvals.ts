@@ -6,6 +6,12 @@
  */
 export const APPROVAL_EVENT = 'opendots.approval';
 export type ApprovalKind = 'page_review' | 'connection_action' | 'action';
+/** Extras on an approval: also stop asking about this tool next time. */
+export interface DecideOptions {
+  always?: boolean;
+  /** The word typed to allow a risky tool, such as one that sends mail. */
+  confirm?: string;
+}
 export type ApprovalStatus = 'pending' | 'approved' | 'declined' | 'expired';
 export interface ApprovalView {
   id: string;
@@ -14,8 +20,9 @@ export interface ApprovalView {
   kind: ApprovalKind;
   /**
    * page_review: { title, content, spaceId }.
-   * connection_action: { connection, title, description, arguments }, the
-   * server's record of exactly what will run.
+   * connection_action: { connection, title, description, arguments, rule },
+   * the server's record of exactly what will run. `rule` names the tool
+   * that "Always allow" would stop asking about.
    * action: { title, description, link? }, from the request_approval tool.
    */
   payload: unknown;

@@ -1,6 +1,6 @@
 import { Wrench } from 'lucide-react';
 import type { Message } from '../shared/thread-events';
-import type { ApprovalView } from '../shared/approvals';
+import type { ApprovalView, DecideOptions } from '../shared/approvals';
 import { pageReviewTool } from '../shared/page-review';
 import { legacyConnectionActionTool } from '../shared/connection-types';
 import { ComputerToolCard, computerToolResult } from './ComputerToolCard';
@@ -82,7 +82,11 @@ export function ToolCalls({
   dot: { id: string; name: string };
   latestBrowserCallId?: string;
   onComputer?: () => void;
-  onDecide: (approvalId: string, approved: boolean) => Promise<unknown>;
+  onDecide: (
+    approvalId: string,
+    approved: boolean,
+    options?: DecideOptions,
+  ) => Promise<unknown>;
 }) {
   return (
     <>

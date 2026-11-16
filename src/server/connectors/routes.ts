@@ -88,7 +88,7 @@ export function connectorRoutes(
   });
   app.patch('/dots/:id/grants/:accountId/tools/:name', async (c) => {
     const body = z
-      .object({ policy })
+      .object({ policy, confirm: z.string().max(40).optional() })
       .strict()
       .parse(await c.req.json());
     return c.json(
@@ -98,6 +98,7 @@ export function connectorRoutes(
         c.req.param('accountId'),
         c.req.param('name'),
         body.policy,
+        body.confirm,
       ),
     );
   });

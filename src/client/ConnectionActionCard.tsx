@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Check, PlugZap } from 'lucide-react';
-import type { ApprovalView } from '../shared/approvals';
+import type { ApprovalView, DecideOptions } from '../shared/approvals';
+import { ALLOW_CONFIRMATION } from '../shared/connection-types';
 import { computerToolResult } from './ComputerToolCard';
 
 const display = (value: unknown) =>
@@ -11,6 +12,7 @@ interface ActionPayload {
   title?: string;
   description?: string;
   arguments?: Record<string, unknown>;
+  rule?: { risky?: boolean };
 }
 
 /**
@@ -29,12 +31,18 @@ export function ConnectionActionCard({
   result?: unknown;
   approval?: ApprovalView;
   running: boolean;
-  onDecide: (approvalId: string, approved: boolean) => Promise<unknown>;
+  onDecide: (
+    approvalId: string,
+    approved: boolean,
+    options?: DecideOptions,
+  ) => Promise<unknown>;
 }) {
   const payload = (approval?.payload ?? {}) as ActionPayload;
   const outcome = result === undefined ? undefined : computerToolResult(result);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [always, setAlways] = useState(false);
+  const [typed, setTyped] = useState('');
   const waiting =
     !outcome && approval?.status === 'pending' && running && !!approval;
   const approved = outcome?.approved === true;
@@ -47,12 +55,19 @@ export function ConnectionActionCard({
     payload.description ??
     (typeof legacy.summary === 'string' ? legacy.summary : '');
   const entries = Object.entries(payload.arguments ?? {});
-  const decide = async (approve: boolean) => {
+  const risky = payload.rule?.risky === true;
+  const canAlways = !!payload.rule;
+  const decide = async (approve: boolean, remember = false) => {
     if (!approval || busy) return;
     setBusy(true);
     setError('');
     try {
-      await onDecide(approval.id, approve);
+      if (approve && remember)
+        await onDecide(approval.id, true, {
+          always: true,
+          ...(risky ? { confirm: typed } : {}),
+        });
+      else await onDecide(approval.id, approve);
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -115,6 +130,43 @@ export function ConnectionActionCard({
         )}
       </div>
       {error && <p role="alert">{error}</p>}
+      {waiting && always && (
+        <div className="connection-always">
+          <p>
+            Run this and stop asking about <strong>{payload.title}</strong> from{' '}
+            {payload.connection}. You can change it later under Rules.
+          </p>
+          {risky && (
+            <label>
+              This can send, pay or delete. Type “{ALLOW_CONFIRMATION}” to
+              confirm:
+              <input
+                value={typed}
+                onChange={(event) => setTyped(event.target.value)}
+                autoComplete="off"
+              />
+            </label>
+          )}
+          <button
+            type="button"
+            className="review-primary"
+            disabled={
+              busy ||
+              (risky && typed.trim().toLowerCase() !== ALLOW_CONFIRMATION)
+            }
+            onClick={() => void decide(true, true)}
+          >
+            Approve & always allow
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setAlways(false)}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
       <footer>
         {waiting && (
           <>
@@ -134,6 +186,15 @@ export function ConnectionActionCard({
             >
               Decline
             </button>
+            {canAlways && !always && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setAlways(true)}
+              >
+                Always allow…
+              </button>
+            )}
           </>
         )}
         <small>

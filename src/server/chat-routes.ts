@@ -182,8 +182,13 @@ export function chatRoutes(platform: Platform) {
   });
 
   app.post('/chat/approvals/:id', async (c) => {
-    const { approved } = z
-      .object({ approved: z.boolean() })
+    const { approved, always, confirm } = z
+      .object({
+        approved: z.boolean(),
+        // Also stop asking about this tool (connection actions only).
+        always: z.boolean().optional(),
+        confirm: z.string().max(40).optional(),
+      })
       .strict()
       .parse(await c.req.json());
     const approvals = platform.approvals;
@@ -191,6 +196,26 @@ export function chatRoutes(platform: Platform) {
     if (!approvals || !current) throw new Error('Approval request not found.');
     // Only for a conversation that still exists in this workspace.
     await platform.workspace.requireThread(current.threadId);
+    if (approved && always) {
+      const rule = (current.payload as { rule?: Record<string, unknown> })
+        ?.rule;
+      if (
+        current.kind !== 'connection_action' ||
+        typeof rule?.dotId !== 'string' ||
+        typeof rule.accountId !== 'string' ||
+        typeof rule.tool !== 'string'
+      )
+        throw new Error('This request cannot be allowed for next time.');
+      // Before the decision, so a missing confirmation leaves it waiting.
+      await platform.connectors.setPolicy(
+        platform.workspace.ownerId,
+        rule.dotId,
+        rule.accountId,
+        rule.tool,
+        'allow',
+        confirm,
+      );
+    }
     return c.json(await approvals.decide(current.id, approved));
   });
   return app;

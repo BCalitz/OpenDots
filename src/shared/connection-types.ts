@@ -6,6 +6,20 @@
  */
 export type ToolPolicy = 'allow' | 'ask' | 'block';
 
+/**
+ * Tools that send, pay, delete or otherwise cannot be taken back. Letting one
+ * run without asking needs a typed confirmation, in the app and on the server.
+ */
+const RISKY =
+  /send|reply|forward|delete|remove|trash|purge|pay|transfer|purchase|buy|charge|refund|cancel|decline|invite|post|publish/i;
+export const isRiskyTool = (tool: {
+  name: string;
+  title: string;
+  readOnly: boolean;
+}) => !tool.readOnly && (RISKY.test(tool.name) || RISKY.test(tool.title));
+/** The word the owner types to let a risky tool run without asking. */
+export const ALLOW_CONFIRMATION = 'allow';
+
 /** One thing a connected service offers, as the service describes it. */
 export interface ConnectorTool {
   name: string;

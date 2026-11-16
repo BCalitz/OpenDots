@@ -276,6 +276,12 @@ it('runs read-only tools directly and holds write tools for owner approval', asy
         title: 'send mail!',
         description: 'Send an email.',
         arguments: { to: 'a@example.com', body: 'Hi' },
+        rule: {
+          dotId: dot.id,
+          accountId: expect.any(String),
+          tool: 'send mail!',
+          risky: true,
+        },
       },
     },
   ]);
@@ -526,8 +532,14 @@ it('serves accounts and grants over the API', async () => {
   expect((await request(path, 'PUT', {})).status).toBe(200);
   // Granting twice changes nothing.
   expect((await request(path, 'PUT', {})).status).toBe(200);
+  // A tool that can send needs the owner to type the confirmation.
+  expect(
+    (await request(`${path}/tools/send%20mail!`, 'PATCH', { policy: 'allow' }))
+      .status,
+  ).toBeGreaterThanOrEqual(400);
   const patched = await request(`${path}/tools/send%20mail!`, 'PATCH', {
     policy: 'allow',
+    confirm: 'allow',
   });
   expect(policies((await patched.json()) as Grant)['send mail!']).toBe('allow');
   const listed = (await (
@@ -578,4 +590,32 @@ it('treats a receipt without a claim time as claimed when it was created', async
     status: 'interrupted',
     result: null,
   });
+});
+it('needs a typed confirmation to let a risky tool run without asking', async () => {
+  const { dot, connectors, connect } = await fixture();
+  const { account } = await connect();
+  await expect(
+    connectors.setPolicy(USER, dot.id, account.id, 'send mail!', 'allow'),
+  ).rejects.toThrow('Type "allow"');
+  await expect(
+    connectors.setPolicy(
+      USER,
+      dot.id,
+      account.id,
+      'send mail!',
+      'allow',
+      'yes',
+    ),
+  ).rejects.toThrow('Type "allow"');
+  const grant = await connectors.setPolicy(
+    USER,
+    dot.id,
+    account.id,
+    'send mail!',
+    'allow',
+    ' Allow ',
+  );
+  expect(grant.tools.find((tool) => tool.name === 'send mail!')?.policy).toBe(
+    'allow',
+  );
 });

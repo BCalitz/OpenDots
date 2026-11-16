@@ -8,16 +8,12 @@ interface SignInProvider {
   configured: boolean;
 }
 import { api } from './api';
+import { POLICIES, policyChange } from './policy';
 // Lives inside the Dot form, so it saves immediately through its own
 // requests and keeps Enter from submitting the surrounding form.
 const stayInSection = (event: KeyboardEvent) => {
   if (event.key === 'Enter') event.preventDefault();
 };
-const POLICIES: { value: ToolPolicy; label: string }[] = [
-  { value: 'allow', label: 'Allow' },
-  { value: 'ask', label: 'Ask first' },
-  { value: 'block', label: 'Block' },
-];
 const dotPath = (dotId: string, accountId: string) =>
   `/dots/${encodeURIComponent(dotId)}/grants/${encodeURIComponent(accountId)}`;
 export function ConnectionsSection({ dotId }: { dotId: string }) {
@@ -233,11 +229,16 @@ export function ConnectionsSection({ dotId }: { dotId: string }) {
                         value={tool.policy}
                         disabled={!!busy}
                         onChange={async (event) => {
+                          const body = policyChange(
+                            tool,
+                            event.target.value as ToolPolicy,
+                          );
+                          if (!body) return;
                           const next = await run(account.id, () =>
                             api<Grant>(
                               `${dotPath(dotId, account.id)}/tools/${encodeURIComponent(tool.name)}`,
                               'PATCH',
-                              { policy: event.target.value },
+                              body,
                             ),
                           );
                           if (next) replaceGrant(next);
