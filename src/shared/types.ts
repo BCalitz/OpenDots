@@ -51,10 +51,22 @@ export interface TaskEvent {
   text: string;
   createdAt: number;
 }
+/**
+ * What a preference does. focus and mute are about a subject and change what
+ * discovery flags; away holds pushes until `until`; note is free text only the
+ * chat Dot reads.
+ */
+export const MEMORY_KINDS = ['focus', 'mute', 'away', 'note'] as const;
+export type MemoryKind = (typeof MEMORY_KINDS)[number];
 export interface Memory {
   id: string;
   text: string;
   createdAt: number;
+  kind: MemoryKind;
+  /** What a focus or mute is about, such as "GreenBasket". */
+  subject: string | null;
+  /** When it ends, in ms; null until lifted. */
+  until: number | null;
 }
 export interface Detail {
   task: Task;

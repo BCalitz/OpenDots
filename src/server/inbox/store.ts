@@ -27,6 +27,7 @@ import type {
 import type { InboxEvent } from './source.js';
 import { DiscoveryStore } from '../discovery/store.js';
 import { MemoryStore, type Fact } from '../memory/store.js';
+import { AttentionStore } from '../discovery/attention.js';
 
 // Kinds that link on the name alone, and kinds whose spellings are compared.
 const NAME_KINDS = new Set<TagKind>(['project', 'place', 'name']);
@@ -94,9 +95,12 @@ export class InboxStore {
   readonly discovery: DiscoveryStore;
   /** Entities: what items said, kept after the items are pruned. */
   readonly memory: MemoryStore;
+  /** The owner's focus, mute and away entries. */
+  readonly attention: AttentionStore;
   constructor(private db: Db) {
     this.discovery = new DiscoveryStore(db);
     this.memory = new MemoryStore(db);
+    this.attention = new AttentionStore(db);
   }
   private row(id: string) {
     return this.db.row<SourceRow>(

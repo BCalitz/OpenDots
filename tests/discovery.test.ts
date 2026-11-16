@@ -197,6 +197,7 @@ describe('discovery model', () => {
         'asks_anything',
         'attention',
         'category',
+        'fraud',
         'injection',
         'urgency',
         'what_asked',

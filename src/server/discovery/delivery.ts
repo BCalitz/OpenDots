@@ -118,6 +118,8 @@ export class DeliveryService {
       now?: () => number;
       /** Today's line from memory's daily run, for the brief. */
       memoryLine?: (day: string) => Promise<string | undefined>;
+      /** Whether an away entry ended in (since, now], so the brief says so. */
+      awayEnded?: (since: number, now: number) => Promise<boolean>;
     } = {},
   ) {}
   private now() {
@@ -132,14 +134,29 @@ export class DeliveryService {
     this.timer = undefined;
   }
 
-  /** Plans and queues the push for a finding the owner should hear about. */
+  /**
+   * Plans and queues the push for a finding the owner should hear about.
+   * While the owner is away only a focus item or one needed within hours is
+   * pushed; the rest wait for the brief. A focus item is never left for it.
+   */
   async deliver(
     finding: FindingView,
     event: InboxEventView,
     dotName: string,
     proposal?: ProposalView,
+    attention: { focused?: boolean; away?: boolean } = {},
   ): Promise<Delivery> {
-    const { delivery, section } = planDelivery(finding);
+    const plan = planDelivery(finding);
+    const { section } = plan;
+    let delivery = plan.delivery;
+    if (attention.focused && delivery === 'brief') delivery = 'held';
+    if (
+      attention.away &&
+      !attention.focused &&
+      finding.urgency !== 'hours' &&
+      delivery !== 'brief'
+    )
+      delivery = 'brief';
     const settings = await this.store.settings();
     const now = this.now();
     const route = finding.route ?? 'tell';
@@ -306,12 +323,16 @@ export class DeliveryService {
     ]
       .filter(([n]) => Number(n) > 0)
       .map(([n, one, many]) => `${n} ${n === 1 ? one : many}`);
+    const back = await this.options.awayEnded?.(
+      last ?? briefAt - 86_400_000,
+      now,
+    );
     const brief = await this.store.queuePush(
       {
         findingId: null,
         proposalId: null,
         kind: 'brief',
-        title: 'Your morning brief',
+        title: back ? 'While you were away' : 'Your morning brief',
         body: [
           `${parts.join(', ')}. Open the OpenDots inbox to go through them.`,
           await this.options.memoryLine?.(today.date),

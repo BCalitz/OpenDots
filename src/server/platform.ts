@@ -151,6 +151,8 @@ export class Platform {
             previews: () => push.previews,
             memoryLine: (day) =>
               workspace.inbox.memory.report(workspace.ownerId, day),
+            awayEnded: (since, now) =>
+              workspace.inbox.attention.awayEndedBetween(since, now),
           },
         )
       : undefined;

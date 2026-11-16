@@ -74,6 +74,15 @@ interface Context {
   /** The known entities the item mentions. */
   entities: Resolved[];
 }
+/** Which of the owner's focus and mute subjects an item is about. */
+interface Matched {
+  focus: string[];
+  mute: string[];
+}
+const matchedOf = (answers: unknown): Matched => {
+  const found = (answers as { attention?: Partial<Matched> } | null)?.attention;
+  return { focus: found?.focus ?? [], mute: found?.mute ?? [] };
+};
 /** An earlier item still stored, with Jev's answers about it. */
 interface Related {
   entry: RelatedVerdict;
@@ -394,10 +403,16 @@ export class DiscoveryService {
       if (!verdict) {
         const model = this.options.judge();
         if (!model) return;
+        const entries = await this.store.attention.active();
+        const subjectsOf = (kind: string) =>
+          entries
+            .filter((entry) => entry.kind === kind && entry.subject)
+            .map((entry) => entry.subject!);
         const item: JudgeItem = {
           ...event,
           app,
           fromOwner: ownerFact(event.from, settings.trusted),
+          attention: { focus: subjectsOf('focus'), mute: subjectsOf('mute') },
         };
         try {
           const gathered = await this.gather(event, settings);
@@ -519,8 +534,21 @@ export class DiscoveryService {
         await this.store.discovery.proposals.senderHistory(sender),
         verdict,
       );
+    // What the owner said to focus on or mute. Safety stays here, in code:
+    // fraud, instructions aimed at the assistant and anything needed within
+    // hours get through a mute, and a focus wins over a mute.
+    const matched: Matched = verdict.matches ?? { focus: [], mute: [] };
+    const focused = matched.focus.length > 0;
+    const safe =
+      verdict.injection || !!verdict.fraud || verdict.urgency === 'hours';
+    const muted = matched.mute.length > 0 && !focused && !safe;
+    const urgency =
+      focused && verdict.urgency
+        ? URGENCIES[Math.min(URGENCIES.indexOf(verdict.urgency) + 1, 3)]
+        : verdict.urgency;
     const attention =
       !quieted &&
+      !muted &&
       ((verdict.attention && verdict.confidence >= this.threshold) ||
         verdict.injection ||
         (!!referenced?.finding?.attention &&
@@ -536,17 +564,28 @@ export class DiscoveryService {
         ? `Contains instructions aimed at an AI assistant; shown to you only. ${verdict.reason}`
         : quieted
           ? `Not flagged: you dismissed recent items from ${sender}. ${verdict.reason}`
-          : verdict.reason,
+          : muted
+            ? `Muted: you said ${matched.mute[0]} is not important. ${verdict.reason}`
+            : focused
+              ? `Focus: ${matched.focus[0]}. ${verdict.reason}`
+              : verdict.reason,
       judgedBy,
       dotId: context.config.dotId,
       referencedEventId: referenced?.entry.eventId ?? null,
-      urgency: verdict.urgency,
+      urgency,
       asked: verdict.asked,
       injection: verdict.injection,
       route: attention
         ? routeFor(verdict.asked, { injection: verdict.injection, canAct })
         : null,
-      answers: verdict.answers,
+      answers:
+        matched.focus.length || matched.mute.length || verdict.fraud
+          ? {
+              ...((verdict.answers as object | undefined) ?? {}),
+              attention: matched,
+              ...(verdict.fraud ? { fraud: true } : {}),
+            }
+          : verdict.answers,
     });
   }
 
@@ -727,7 +766,11 @@ export class DiscoveryService {
     await this.store.discovery.proposals.escalate(
       updated.id,
       urgency,
-      importanceOf(urgency, updated.confidence),
+      importanceOf(
+        urgency,
+        updated.confidence,
+        matchedOf(await this.store.findingAnswers(updated.id)).focus.length > 0,
+      ),
     );
     if (updated.state === 'flagged' && updated.route !== 'tell') {
       if (this.options.autoInvestigate !== false)
@@ -756,7 +799,15 @@ export class DiscoveryService {
     const name =
       (finding.dotId && (await this.options.dotName?.(finding.dotId))) ||
       'Your Dot';
-    const how = await delivery.deliver(finding, event, name, proposal);
+    const focused =
+      matchedOf(await this.store.findingAnswers(finding.id)).focus.length > 0;
+    const away = (await this.store.attention.active()).some(
+      (entry) => entry.kind === 'away',
+    );
+    const how = await delivery.deliver(finding, event, name, proposal, {
+      focused,
+      away,
+    });
     await this.store.updateFinding(finding.id, { delivery: how });
   }
 
@@ -835,6 +886,8 @@ export class DiscoveryService {
         reply,
         app: appName,
         sender: address(event.from),
+        focused:
+          matchedOf(await this.store.findingAnswers(done.id)).focus.length > 0,
       });
       await this.deliver(done, event, proposal);
       for (const listener of this.ready) {

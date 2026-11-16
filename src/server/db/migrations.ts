@@ -388,6 +388,18 @@ DROP TABLE IF EXISTS event_tags;
 DROP TABLE IF EXISTS item_embeddings;
 `,
   },
+  {
+    version: 16,
+    name: 'personal attention',
+    sql: `
+-- Preferences gain a kind. focus, mute and away change what discovery flags and
+-- pushes; note is free text only the chat Dot reads. subject says what a focus
+-- or mute is about; until is when it ends (null: until lifted).
+ALTER TABLE memories ADD COLUMN kind TEXT NOT NULL DEFAULT 'note';
+ALTER TABLE memories ADD COLUMN subject TEXT;
+ALTER TABLE memories ADD COLUMN until BIGINT;
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.

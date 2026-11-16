@@ -252,7 +252,7 @@ export class Store {
   }
   memories(): Promise<Memory[]> {
     return this.db.rows<Memory>(
-      sql`SELECT * FROM memories ORDER BY created_at DESC`,
+      sql`SELECT * FROM memories WHERE until IS NULL OR until > ${Date.now()} ORDER BY created_at DESC`,
     );
   }
   async saveMemory(text: string, id: string = randomUUID()): Promise<Memory> {

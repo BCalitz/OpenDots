@@ -18,6 +18,7 @@ import {
 } from '../../shared/approval-request.js';
 import type { Approvals } from './approvals.js';
 import { stopWhenStuck } from './stuck.js';
+import { attentionTools } from '../attention-tools.js';
 import { inboxTools } from '../inbox-tools.js';
 import { pageAccess, pageTools } from '../page-tools.js';
 import { browserResponse } from '../research.js';
@@ -395,6 +396,8 @@ export class DotEngine {
       const serverTools = [
         ...tools,
         ...inboxTools(workspace, check),
+        // Only a person in a chat can change what matters to them.
+        ...(source === 'chat' ? attentionTools(workspace, check) : []),
         ...pageTools(pages).filter(
           (tool) => !mode.readOnlyPages || READ_PAGE_TOOLS.has(tool.name),
         ),

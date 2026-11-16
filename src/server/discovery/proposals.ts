@@ -29,9 +29,24 @@ export function proposalOptions(route: Route | null): ProposalChoice[] {
     ? ['prepare', 'handle', 'not_now']
     : ['prepare', 'not_now'];
 }
-/** Sort key: urgency first (0 to 3), then how sure Jev was (0 to 1). */
-export function importanceOf(urgency: Urgency | null, confidence: number) {
-  return Math.max(URGENCIES.indexOf(urgency ?? 'tomorrow'), 0) + confidence;
+/**
+ * How much an item matters to the owner, apart from how urgent it is: how
+ * sure Jev was that it needs them (0 to 1), plus 1 for something they said to
+ * focus on, which puts it first among items as urgent.
+ */
+function mattersOf(confidence: number, focused = false) {
+  return confidence + (focused ? 1 : 0);
+}
+/** Sort key: urgency first (0 to 3), then how much it matters to the owner. */
+export function importanceOf(
+  urgency: Urgency | null,
+  confidence: number,
+  focused = false,
+) {
+  return (
+    Math.max(URGENCIES.indexOf(urgency ?? 'tomorrow'), 0) +
+    mattersOf(confidence, focused)
+  );
 }
 /**
  * The triage rule dismissals feed: a sender the owner dismissed at least
@@ -130,7 +145,14 @@ export class ProposalService {
   offer(
     finding: FindingView,
     event: InboxEventView,
-    input: { threadId: string; reply?: string; app: string; sender: string },
+    input: {
+      threadId: string;
+      reply?: string;
+      app: string;
+      sender: string;
+      /** The owner said to focus on what this is about. */
+      focused?: boolean;
+    },
   ) {
     const summary = (input.reply ?? '').trim() || finding.reason;
     return this.store.save({
@@ -141,7 +163,11 @@ export class ProposalService {
       title: `${input.app}: ${event.title}`,
       summary: summary.slice(0, SUMMARY_LENGTH),
       options: proposalOptions(finding.route),
-      importance: importanceOf(finding.urgency, finding.confidence),
+      importance: importanceOf(
+        finding.urgency,
+        finding.confidence,
+        input.focused,
+      ),
       urgency: finding.urgency,
       route: finding.route,
       sender: input.sender || null,
