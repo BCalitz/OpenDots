@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Check, Newspaper, X } from 'lucide-react';
 import type { ApprovalView } from '../shared/approvals';
+import type { Memory } from '../shared/types';
 import type {
   BriefEntry,
   Delivery,
@@ -176,6 +177,55 @@ function approvalText(approval: ApprovalView) {
   return { what, detail: payload.description ?? '' };
 }
 
+/** What you asked Dots to focus on, mute or be away from, with a way to lift it. */
+function OnYourMind() {
+  const [entries, setEntries] = useState<Memory[]>([]);
+  const load = useCallback(
+    () =>
+      api<Memory[]>('/discovery/attention')
+        .then(setEntries)
+        .catch(() => undefined),
+    [],
+  );
+  useEffect(() => {
+    void load();
+  }, [load]);
+  if (!entries.length) return null;
+  const lift = async (id: string) => {
+    await api(`/discovery/attention/${encodeURIComponent(id)}`, 'DELETE').catch(
+      () => undefined,
+    );
+    await load();
+  };
+  return (
+    <section className="on-your-mind">
+      <h2 className="insight-subhead">On your mind</h2>
+      <ul>
+        {entries.map((entry) => (
+          <li key={entry.id}>
+            <span>
+              <strong>{entry.kind}</strong> {entry.text}
+              {entry.until && (
+                <small>
+                  {' '}
+                  until {new Date(entry.until).toLocaleDateString()}
+                </small>
+              )}
+            </span>
+            <button
+              className="text-button"
+              aria-label={`Lift ${entry.kind}: ${entry.text}`}
+              onClick={() => void lift(entry.id)}
+            >
+              <X size={14} /> Lift
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /**
  * Requests Dots are waiting on you for, with a way to answer several at once.
  * Each answer applies to exactly what its row says; open one to read the
@@ -346,6 +396,7 @@ export function InboxBrief({
   if (!brief) return <p className="muted">Loading the brief…</p>;
   return (
     <section className="inbox-brief">
+      <OnYourMind />
       <WaitingApprovals onThread={onThread} />
       <h2 className="insight-subhead">Next brief</h2>
       {brief.next.length ? (

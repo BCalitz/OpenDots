@@ -5626,3 +5626,20 @@ h3 {
   align-items: center;
   margin-top: 10px;
 }
+
+.on-your-mind ul {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.on-your-mind li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.on-your-mind strong {
+  text-transform: capitalize;
+}

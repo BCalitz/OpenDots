@@ -46,6 +46,16 @@ const settingsSchema = z
 export function discoveryRoutes(platform: Platform) {
   const app = new Hono();
   const store = platform.inbox.store;
+  // What the owner asked to focus on, mute or be away from, and lifting it.
+  const attention = platform.workspace.inbox.attention;
+  app.get('/discovery/attention', async (c) =>
+    c.json(await attention.active()),
+  );
+  app.delete('/discovery/attention/:id', async (c) =>
+    (await attention.lift(c.req.param('id')))
+      ? c.json({ ok: true })
+      : c.json({ error: 'Entry not found.' }, 404),
+  );
   app.get('/discovery', async (c) => {
     const { config } = platform;
     const state: DiscoveryState = {
