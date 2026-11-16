@@ -17,6 +17,7 @@ import {
   approvalRequestTool,
 } from '../../shared/approval-request.js';
 import type { Approvals } from './approvals.js';
+import { stopWhenStuck } from './stuck.js';
 import { inboxTools } from '../inbox-tools.js';
 import { pageAccess, pageTools } from '../page-tools.js';
 import { browserResponse } from '../research.js';
@@ -439,7 +440,11 @@ export class DotEngine {
         runId: run.runId,
         modelOptions: { max_completion_tokens: 2200 },
         agentLoopStrategy: maxIterations(connected.length ? 10 : 5),
-        tools: toTanStackTools(serverTools, { signal, emit, hold }),
+        tools: toTanStackTools(stopWhenStuck(serverTools), {
+          signal,
+          emit,
+          hold,
+        }),
       });
       await streamEvents(
         stream,
