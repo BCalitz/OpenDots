@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Check, Newspaper, X } from 'lucide-react';
 import type { ApprovalView } from '../shared/approvals';
 import type { Memory } from '../shared/types';
+import type { MuteSuggestion } from '../server/discovery/attention';
 
 import type {
   BriefEntry,
@@ -182,17 +183,29 @@ function approvalText(approval: ApprovalView) {
 /** What you asked Dots to focus on, mute or be away from, with a way to lift it. */
 function OnYourMind() {
   const [entries, setEntries] = useState<Memory[]>([]);
+  const [offers, setOffers] = useState<MuteSuggestion[]>([]);
   const load = useCallback(
     () =>
-      api<Memory[]>('/discovery/attention')
-        .then(setEntries)
-        .catch(() => undefined),
+      Promise.all([
+        api<Memory[]>('/discovery/attention').then(setEntries),
+        api<MuteSuggestion[]>('/discovery/attention/suggestions').then(
+          setOffers,
+        ),
+      ]).catch(() => undefined),
     [],
   );
   useEffect(() => {
     void load();
   }, [load]);
-  if (!entries.length) return null;
+  const answer = async (category: string, what: 'accept' | 'decline') => {
+    await api(
+      `/discovery/attention/suggestions/${encodeURIComponent(category)}/${what}`,
+      'POST',
+      {},
+    ).catch(() => undefined);
+    await load();
+  };
+  if (!entries.length && !offers.length) return null;
   const lift = async (id: string) => {
     await api(`/discovery/attention/${encodeURIComponent(id)}`, 'DELETE').catch(
       () => undefined,
@@ -202,6 +215,26 @@ function OnYourMind() {
   return (
     <section className="on-your-mind">
       <h2 className="insight-subhead">On your mind</h2>
+      {offers.map((offer) => (
+        <p key={offer.category} className="attention-offer">
+          <span>
+            Stop flagging <strong>{offer.subject}</strong>? {offer.why} Fraud
+            and urgent ones would still reach you.
+          </span>
+          <button
+            className="text-button"
+            onClick={() => void answer(offer.category, 'accept')}
+          >
+            Yes, mute them
+          </button>
+          <button
+            className="text-button"
+            onClick={() => void answer(offer.category, 'decline')}
+          >
+            Keep flagging
+          </button>
+        </p>
+      ))}
       <ul>
         {entries.map((entry) => (
           <li key={entry.id}>

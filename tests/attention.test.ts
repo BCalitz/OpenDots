@@ -346,11 +346,88 @@ describe('chat tools', () => {
     expect(
       await run(link, { itemId: one.id, otherItemId: one.id }),
     ).toMatchObject({ error: expect.any(String) });
-    expect(
-      await run(link, { itemId: one.id, otherItemId: two.id }),
-    ).toEqual({ linked: ['Invoice one', 'Invoice two'] });
+    expect(await run(link, { itemId: one.id, otherItemId: two.id })).toEqual({
+      linked: ['Invoice one', 'Invoice two'],
+    });
     const links = await inbox.discovery.links(one.id);
     expect(links).toHaveLength(1);
     expect(links[0].status).toBe('confirmed');
+  });
+});
+
+describe('learned mute suggestions', () => {
+  async function dismissed(category: string, count: number, acted = 0) {
+    const { store, source } = await fixture();
+    const events = await store.ingest(
+      Array.from({ length: count + acted }, (_, i) => ({
+        sourceId: source.id,
+        externalId: `${category}-${i}`,
+        kind: 'mail.received',
+        title: `${category} ${i}`,
+        summary: 'body',
+        from: `s${i}@example.com`,
+        raw: {},
+        occurredAt: Date.now(),
+      })),
+    );
+    for (const [i, event] of events.entries()) {
+      const finding = await store.saveFinding({
+        eventId: event.id,
+        attention: true,
+        category,
+        confidence: 0.9,
+        reason: 'x',
+        judgedBy: 'fake',
+        dotId: 'books',
+        route: 'inform',
+      });
+      const proposal = await store.discovery.proposals.save({
+        findingId: finding.id,
+        eventId: event.id,
+        dotId: 'books',
+        threadId: `thread-${category}-${i}`,
+        title: event.title,
+        summary: 's',
+        options: ['prepare', 'not_now'],
+        importance: 1,
+        urgency: 'tomorrow',
+        route: 'inform',
+        sender: `s${i}@example.com`,
+      });
+      await store.discovery.proposals.transition(
+        proposal.id,
+        ['open'],
+        'dismissed',
+        { decision: i < count ? 'dismiss' : 'prepare' },
+      );
+    }
+    return store;
+  }
+
+  it('offers a mute after three dismissals and no action, and mutes on yes', async () => {
+    const store = await dismissed('payment', 3);
+    const [offer] = await store.attention.suggestions();
+    expect(offer).toMatchObject({
+      category: 'payment',
+      subject: 'payment notifications',
+      dismissed: 3,
+    });
+    await store.attention.acceptSuggestion('payment');
+    expect(await store.attention.suggestions()).toEqual([]);
+    expect((await store.attention.active()).map((e) => e.subject)).toEqual([
+      'payment notifications',
+    ]);
+  });
+
+  it('stays quiet when the owner acted on one, after a no, and for security mail', async () => {
+    expect(
+      await (await dismissed('payment', 3, 1)).attention.suggestions(),
+    ).toEqual([]);
+    const declined = await dismissed('invoice', 3);
+    await declined.attention.declineSuggestion('invoice');
+    expect(await declined.attention.suggestions()).toEqual([]);
+    expect(
+      await (await dismissed('security', 5)).attention.suggestions(),
+    ).toEqual([]);
   });
 });

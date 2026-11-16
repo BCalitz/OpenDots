@@ -2,6 +2,30 @@ import { randomUUID } from 'node:crypto';
 import { sql, type Db } from '../db/index.js';
 import type { Memory, MemoryKind } from '../../shared/types.js';
 
+/** How the owner talks about each kind of item. Security and personal mail are never offered. */
+const MUTABLE: Record<string, string> = {
+  payment: 'payment notifications',
+  invoice: 'invoices',
+  bill: 'bills and statements',
+  request: 'requests',
+  question: 'questions',
+  meeting: 'meeting invites',
+  deadline: 'deadline reminders',
+  newsletter: 'newsletters',
+  notification: 'automatic notifications',
+};
+const SUGGEST_WINDOW_MS = 30 * 86_400_000;
+/** Dismissals of one kind, with none acted on, before a mute is offered. */
+const SUGGEST_AFTER = 3;
+export interface MuteSuggestion {
+  category: string;
+  /** What the mute would be about, in the owner's words. */
+  subject: string;
+  dismissed: number;
+  /** Why it is offered. */
+  why: string;
+}
+
 /** A focus lasts a week when the owner doesn't say. */
 export const DEFAULT_FOCUS_MS = 7 * 86_400_000;
 
@@ -48,6 +72,57 @@ export class AttentionStore {
   }
   async lift(id: string): Promise<boolean> {
     return (await this.db.run(sql`DELETE FROM memories WHERE id=${id}`)) > 0;
+  }
+  /**
+   * Kinds of item the owner keeps dismissing and never acts on, as mutes to
+   * offer. Never for security or personal mail; never for one already muted
+   * or turned down.
+   */
+  async suggestions(now = Date.now()): Promise<MuteSuggestion[]> {
+    const rows = await this.db.rows<{ category: string; dismissed: number }>(
+      sql`SELECT f.category AS category,
+          COUNT(*) FILTER (WHERE p.decision='dismiss' AND p.counted)::int AS dismissed
+        FROM proposals p JOIN discovery_findings f ON f.id=p.finding_id
+        WHERE p.decided_at>=${now - SUGGEST_WINDOW_MS}
+          AND f.category NOT IN (SELECT category FROM attention_declined)
+        GROUP BY f.category
+        HAVING COUNT(*) FILTER (WHERE p.decision='dismiss' AND p.counted)>=${SUGGEST_AFTER}
+          AND COUNT(*) FILTER (WHERE p.decision IN ('prepare','handle'))=0
+        ORDER BY dismissed DESC`,
+    );
+    const muted = (await this.active(now))
+      .filter((entry) => entry.kind === 'mute')
+      .map((entry) => entry.subject?.toLowerCase() ?? '');
+    return rows.flatMap((row) => {
+      const subject = MUTABLE[row.category];
+      if (!subject || muted.includes(subject)) return [];
+      return [
+        {
+          category: row.category,
+          subject,
+          dismissed: row.dismissed,
+          why: `You dismissed ${row.dismissed} of these in the last 30 days and acted on none.`,
+        },
+      ];
+    });
+  }
+  /** Turns a suggestion into a mute. Fraud and urgent items still get through. */
+  async acceptSuggestion(category: string) {
+    const subject = MUTABLE[category];
+    if (!subject) return undefined;
+    return this.save({
+      kind: 'mute',
+      text: `Not flagging ${subject}`,
+      subject,
+    });
+  }
+  /** The owner said no: don't offer this kind again. */
+  async declineSuggestion(category: string) {
+    if (!MUTABLE[category]) return false;
+    await this.db.run(
+      sql`INSERT INTO attention_declined VALUES (${category}, ${Date.now()}) ON CONFLICT (category) DO NOTHING`,
+    );
+    return true;
   }
   /** Whether an away entry ended in (since, now]: the owner is back. */
   async awayEndedBetween(since: number, now: number) {

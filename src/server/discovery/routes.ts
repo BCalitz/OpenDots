@@ -51,6 +51,18 @@ export function discoveryRoutes(platform: Platform) {
   app.get('/discovery/attention', async (c) =>
     c.json(await attention.active()),
   );
+  app.get('/discovery/attention/suggestions', async (c) =>
+    c.json(await attention.suggestions()),
+  );
+  app.post('/discovery/attention/suggestions/:category/accept', async (c) => {
+    const mute = await attention.acceptSuggestion(c.req.param('category'));
+    return mute ? c.json(mute) : c.json({ error: 'Not a suggestion.' }, 404);
+  });
+  app.post('/discovery/attention/suggestions/:category/decline', async (c) =>
+    (await attention.declineSuggestion(c.req.param('category')))
+      ? c.json({ ok: true })
+      : c.json({ error: 'Not a suggestion.' }, 404),
+  );
   app.delete('/discovery/attention/:id', async (c) =>
     (await attention.lift(c.req.param('id')))
       ? c.json({ ok: true })

@@ -5675,3 +5675,14 @@ h3 {
   background: #9aa0a6;
   flex: none;
 }
+
+.attention-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+}
+.attention-offer span {
+  flex: 1 1 260px;
+}

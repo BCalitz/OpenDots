@@ -409,6 +409,14 @@ CREATE TABLE waiting_on(id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, who 
 CREATE INDEX waiting_on_state ON waiting_on(state, since);
 `,
   },
+  {
+    version: 18,
+    name: 'learned attention suggestions',
+    sql: `
+-- Kinds of item the owner said no to suggestions about.
+CREATE TABLE attention_declined(category TEXT PRIMARY KEY, declined_at BIGINT NOT NULL);
+`,
+  },
 ];
 
 // Held while migrating so two app instances never migrate at once.
