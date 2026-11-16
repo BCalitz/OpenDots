@@ -890,7 +890,7 @@ describe('discovery routes', () => {
 
   it('turns discovery on per account and reports whether Jev is configured', async () => {
     const f = await routes();
-    const on = await f.put(f.gmail.id, { dotId: f.dot.id, enabled: true });
+    const on = await f.put(f.gmail.id, { enabled: true });
     expect(on.status).toBe(200);
     // The Dot has no grant on the account, so it could only read the item itself.
     expect((await on.json()).warning).toMatch(/Use in this Dot/);
@@ -910,10 +910,10 @@ describe('discovery routes', () => {
       f.dot.id,
       f.gmail.id,
     );
-    const granted = await f.put(f.gmail.id, { dotId: f.dot.id, enabled: true });
+    const granted = await f.put(f.gmail.id, { enabled: true });
     expect((await granted.json()).warning).toBeUndefined();
     // Turning it off keeps the one source, disabled.
-    await f.put(f.gmail.id, { dotId: f.dot.id, enabled: false });
+    await f.put(f.gmail.id, { enabled: false });
     const after = await (await f.app.request('/discovery')).json();
     expect(after.accounts).toEqual([
       expect.objectContaining({ enabled: false }),
@@ -922,16 +922,13 @@ describe('discovery routes', () => {
     expect((await f.platform.inbox.store.sources())[0].notify).toBe('off');
   });
 
-  it('refuses apps it cannot read, unknown accounts and unknown Dots', async () => {
+  it('refuses apps it cannot read, unknown accounts and a Dot choice', async () => {
     const f = await routes();
+    expect((await f.put(f.mcp.id, { enabled: true })).status).toBe(400);
+    expect((await f.put('ca_other', { enabled: true })).status).toBe(404);
+    // The assistant looks into what discovery flags; there is no other choice.
     expect(
-      (await f.put(f.mcp.id, { dotId: f.dot.id, enabled: true })).status,
-    ).toBe(400);
-    expect(
-      (await f.put('ca_other', { dotId: f.dot.id, enabled: true })).status,
-    ).toBe(404);
-    expect(
-      (await f.put(f.gmail.id, { dotId: 'nope', enabled: true })).status,
+      (await f.put(f.gmail.id, { dotId: f.dot.id, enabled: true })).status,
     ).toBe(400);
     expect(
       (

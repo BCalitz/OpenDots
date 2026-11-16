@@ -5,6 +5,7 @@ import {
   type AccountSourceConfig,
   type DiscoveryState,
 } from '../../shared/inbox-types.js';
+import { ensureAssistant } from '../assistant.js';
 import type { Platform } from '../platform.js';
 import { DISMISSALS_TO_QUIET, ProposalClosedError } from './proposals.js';
 
@@ -163,16 +164,15 @@ export function discoveryRoutes(platform: Platform) {
     const accountId = c.req.param('accountId');
     const body = z
       .object({
-        dotId: z.string().min(1).max(200),
         enabled: z.boolean(),
         intervalSeconds: z.number().int().min(60).max(86_400).optional(),
       })
       .strict()
       .safeParse(await c.req.json().catch(() => null));
     if (!body.success || !/^[A-Za-z0-9_-]{1,100}$/.test(accountId))
-      return c.json({ error: 'Choose a Dot to look into what it finds.' }, 400);
-    const dot = await platform.workspace.dot(body.data.dotId);
-    if (!dot) return c.json({ error: 'Dot not found.' }, 400);
+      return c.json({ error: 'Check the discovery settings.' }, 400);
+    // The assistant looks into everything discovery flags.
+    const dot = await ensureAssistant(platform.store, platform.workspace);
     // Discovery reads the owner's accounts, as the owner.
     const userId = platform.workspace.ownerId;
     const account = await platform.connectors.accounts.get(userId, accountId);

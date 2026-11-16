@@ -5,6 +5,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { Store } from './store.js';
+import { followAssistant } from './assistant.js';
 import { Runner } from './runner.js';
 import { configured, type Config } from './research.js';
 import type { Platform } from './platform.js';
@@ -209,12 +210,21 @@ export function createApp({
         paused: z.boolean().optional(),
         researchAllowed: z.boolean().optional(),
         memoryAllowed: z.boolean().optional(),
+        assistantDotId: z.string().min(1).max(200).optional(),
       })
       .strict()
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'Invalid settings.' }, 400);
+    const { assistantDotId } = parsed.data;
+    if (
+      assistantDotId !== undefined &&
+      !(platform && (await platform.workspace.dot(assistantDotId)))
+    )
+      return c.json({ error: 'Dot not found.' }, 400);
     const previous = await store.settings();
     const settings = await store.updateSettings(parsed.data);
+    if (platform && assistantDotId)
+      await followAssistant(platform.workspace, assistantDotId);
     if (
       settings.paused ||
       !settings.researchAllowed ||

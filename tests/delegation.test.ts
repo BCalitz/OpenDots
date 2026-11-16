@@ -151,7 +151,7 @@ it('lets a coordinator Dot hand work to a specialist and use its answer', async 
   ))!;
   expect(
     (await workspace.requireThread(delegateThread, researcher.id)).title,
-  ).toMatch(/^(From Dot: How much did revenue grow\?|Named)$/);
+  ).toMatch(/^(From Assistant: How much did revenue grow\?|Named)$/);
   const runs = (await (
     await app.request(`/api/runs?dotId=${researcher.id}`)
   ).json()) as RunSummary[];

@@ -84,7 +84,7 @@ export function AccountsView({ dots }: { dots: Dot[] }) {
   };
   const setDiscoveryFor = async (
     account: Account,
-    value: { enabled: boolean; dotId: string },
+    value: { enabled: boolean },
   ) => {
     setBusy(account.id);
     try {
@@ -205,7 +205,6 @@ export function AccountsView({ dots }: { dots: Dot[] }) {
               {DISCOVERY_APPS[account.connector] && !account.error && (
                 <DiscoveryControls
                   account={account}
-                  dots={dots}
                   current={discovery?.accounts.find(
                     (item) => item.accountId === account.id,
                   )}
@@ -264,21 +263,18 @@ export function AccountsView({ dots }: { dots: Dot[] }) {
   );
 }
 
-/** Turns discovery on or off for one account and picks the Dot that investigates. */
+/** Turns discovery on or off for one account. The assistant looks into what it flags. */
 function DiscoveryControls({
   account,
-  dots,
   current,
   disabled,
   onChange,
 }: {
   account: Account;
-  dots: Dot[];
   current?: DiscoveryAccountView;
   disabled: boolean;
-  onChange: (value: { enabled: boolean; dotId: string }) => void;
+  onChange: (value: { enabled: boolean }) => void;
 }) {
-  const dotId = current?.dotId ?? dots[0]?.id ?? '';
   const enabled = !!current?.enabled;
   const id = `discovery-${account.id}`;
   return (
@@ -288,27 +284,10 @@ function DiscoveryControls({
           id={id}
           type="checkbox"
           checked={enabled}
-          disabled={disabled || !dotId}
-          onChange={(event) =>
-            onChange({ enabled: event.target.checked, dotId })
-          }
+          disabled={disabled}
+          onChange={(event) => onChange({ enabled: event.target.checked })}
         />
         <span>Flag what needs me</span>
-      </label>
-      <label className="discovery-dot">
-        <span>Looked into by</span>
-        <select
-          value={dotId}
-          disabled={disabled || !dots.length}
-          aria-label={`Dot that looks into what ${account.name} discovery flags`}
-          onChange={(event) => onChange({ enabled, dotId: event.target.value })}
-        >
-          {dots.map((dot) => (
-            <option key={dot.id} value={dot.id}>
-              {dot.name}
-            </option>
-          ))}
-        </select>
       </label>
       {current?.lastError && (
         <small className="chat-error" role="alert">

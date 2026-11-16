@@ -11,6 +11,8 @@ export interface Settings {
   paused: boolean;
   researchAllowed: boolean;
   memoryAllowed: boolean;
+  /** The Dot the owner talks to: discovery, the home screen and calls use it. */
+  assistantDotId?: string;
 }
 export interface Task {
   id: string;

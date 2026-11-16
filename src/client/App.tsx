@@ -1,24 +1,15 @@
 import { openPageLink } from './page-navigation';
-import { SpaceNav } from './SpaceNav';
 import { SpaceWorkspace } from './SpaceWorkspace';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import {
   ArrowUp,
   ArrowUpRight,
-  Activity,
   BookOpen,
   Clock3,
-  Code2,
-  Folder,
-  Gauge,
-  Inbox,
-  Plug,
-  Menu,
   MessageCircle,
   Monitor,
   MoreHorizontal,
   Pause,
-  PanelLeft,
   Play,
   Plus,
   Search,
@@ -48,6 +39,10 @@ import { ActivityView } from './ActivityView';
 import { InsightsView } from './InsightsView';
 import { InboxView } from './InboxView';
 import { AccountsView } from './AccountsView';
+import { PeopleView } from './PeopleView';
+import { PermissionsView } from './PermissionsView';
+import { SettingsView } from './SettingsView';
+import { WatchingStatus } from './WatchingStatus';
 import { Chat } from './Chat';
 import { ResultPane } from './ResultPane';
 import { TaskRow } from './TaskPresentation';
@@ -88,6 +83,9 @@ export function App() {
     | 'inbox'
     | 'accounts'
     | 'activity'
+    | 'people'
+    | 'permissions'
+    | 'settings'
   >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
@@ -119,12 +117,10 @@ export function App() {
       // Inbox push notifications link here.
       if (location.hash === '#/inbox' && !dirtyPage.current) {
         rawSetView('inbox');
-        setMobile(false);
         return;
       }
       if (location.hash === '#/accounts' && !dirtyPage.current) {
         rawSetView('accounts');
-        setMobile(false);
         return;
       }
       const match = location.hash.match(
@@ -144,7 +140,6 @@ export function App() {
       setSpaceId(match[1]);
       setPageId(match[2]);
       rawSetView('space');
-      setMobile(false);
     };
     navigate();
     window.addEventListener('hashchange', navigate);
@@ -179,8 +174,6 @@ export function App() {
   const [auth, setAuth] = useState('');
   const [needsAuth, setNeedsAuth] = useState(false);
   const [dialog, setDialog] = useState<Dialog>();
-  const [mobile, setMobile] = useState(false);
-  const [navCollapsed, setNavCollapsed] = useState(false);
   const [pane, setPane] = useState(false);
   const [capture, setCapture] = useState<Result>();
   const [prompt, setPrompt] = useState('');
@@ -197,7 +190,14 @@ export function App() {
       setState(s);
       setWorkspace(w);
       setNeedsAuth(false);
-      setSelectedDot((previous) => previous || w.dots[0]?.id || '');
+      // The app opens on the assistant, the one Dot the owner talks to.
+      setSelectedDot(
+        (previous) =>
+          previous ||
+          w.dots.find((item) => item.id === s.settings.assistantDotId)?.id ||
+          w.dots[0]?.id ||
+          '',
+      );
       setNotices((current) => applyRefreshResult(current, { ok: true }));
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) setNeedsAuth(true);
@@ -324,7 +324,6 @@ export function App() {
     setSelectedDot(next.id);
     setSelectedThread(undefined);
     setView('chat');
-    setMobile(false);
     setPendingPrompt(undefined);
   };
   const startConversation = async (text?: string) => {
@@ -341,7 +340,6 @@ export function App() {
       setPendingPrompt(text);
       setPrompt('');
       setView('chat');
-      setMobile(false);
     } catch (e) {
       setError(
         e instanceof Error ? e.message : 'Could not create the conversation.',
@@ -406,273 +404,62 @@ export function App() {
         )}
       </main>
     );
+  const assistant =
+    workspace.dots.find((item) => item.id === state.settings.assistantDotId) ??
+    workspace.dots[0];
+  const goTo = (next: typeof view) => {
+    if (next === 'chat') {
+      setSelectedDot(assistant.id);
+      setSelectedThread(undefined);
+      setPendingPrompt(undefined);
+    }
+    setView(next);
+  };
+  const tab = (next: typeof view, label: string, active: boolean) => (
+    <button
+      className={`top-tab ${active ? 'active' : ''}`}
+      aria-current={active ? 'page' : undefined}
+      onClick={() => goTo(next)}
+    >
+      {label}
+    </button>
+  );
   const content = (
-    <div className={`app template-app ${navCollapsed ? 'nav-collapsed' : ''}`}>
-      <nav className="icon-rail" aria-label="Workspace navigation">
-        <button
-          className="rail-brand"
-          aria-label="OpenDots home"
-          onClick={() => {
-            setView('chat');
-            setSelectedThread(undefined);
-          }}
-        >
-          o<span>·</span>
-        </button>
-        <button
-          aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          onClick={() => setNavCollapsed(!navCollapsed)}
-        >
-          <PanelLeft size={18} />
-        </button>
-        <button
-          aria-label="Open Spaces"
-          onClick={() => {
-            if (workspace.spaces[0]) openPage(workspace.spaces[0].id);
-          }}
-        >
-          <Folder size={18} />
-        </button>
-        <button aria-label="Open activity" onClick={() => setView('tasks')}>
-          <Clock3 size={18} />
-        </button>
-        <button aria-label="Open inbox" onClick={() => setView('inbox')}>
-          <Inbox size={18} />
-        </button>
-        <button aria-label="Open insights" onClick={() => setView('insights')}>
-          <Gauge size={18} />
-        </button>
-        <button
-          className="rail-settings"
-          aria-label="Open settings"
-          onClick={() => setDialog({ type: 'settings' })}
-        >
-          <Settings2 size={18} />
-        </button>
-      </nav>
-      <button
-        className="mobile-menu icon-button"
-        aria-label="Open navigation"
-        aria-expanded={mobile}
-        aria-controls="workspace-sidebar"
-        onClick={() => setMobile(true)}
-      >
-        <Menu size={21} />
-      </button>
-      {mobile && (
-        <button
-          className="nav-scrim"
-          aria-label="Close navigation"
-          onClick={() => setMobile(false)}
-        />
-      )}
-      <aside
-        id="workspace-sidebar"
-        className={`sidebar ${mobile ? 'open' : ''}`}
-      >
-        <button
-          className="wordmark"
-          onClick={() => {
-            setView('chat');
-            setSelectedThread(undefined);
-          }}
-        >
-          <span className="dotted-logo">
-            <i />
-            <i />
-            <i />
-            <i />
-          </span>
-          OpenDots<span className="wordmark-dot">•</span>
-        </button>
-        <div className="spaces-heading nav-label">
-          DOTS
-          <button
-            className="icon-button"
-            aria-label="Create Dot"
-            onClick={() =>
-              setDialog({ type: 'dot', spaceId: workspace.spaces[0].id })
-            }
-          >
-            <Plus size={14} />
-          </button>
-        </div>
-        <nav className="dots-nav" aria-label="Dots">
-          {workspace.dots.map((item) => (
-            <div className="dot-nav-row" key={item.id}>
-              <button
-                className={`dot-nav ${dot.id === item.id && view === 'chat' ? 'active' : ''}`}
-                aria-current={
-                  dot.id === item.id && view === 'chat' ? 'page' : undefined
-                }
-                onClick={() => chooseDot(item)}
-              >
-                <Mascot identity={item.id} name={item.name} small decorative />
-                <span>{item.name}</span>
-              </button>
-              <button
-                className="icon-button dot-settings"
-                aria-label={`Edit ${item.name} settings`}
-                onClick={() =>
-                  setDialog({ type: 'dot', dot: item, spaceId: item.spaceId })
-                }
-              >
-                <MoreHorizontal size={15} />
-              </button>
-            </div>
-          ))}
-        </nav>
-        <div className="spaces-heading nav-label">
-          SPACES
-          <button
-            className="icon-button"
-            aria-label="Create Space"
-            onClick={() => setDialog({ type: 'space' })}
-          >
-            <Plus size={14} />
-          </button>
-        </div>
-        <nav className="spaces-nav" aria-label="Spaces">
-          {workspace.spaces.map((space) => (
-            <SpaceNav
-              key={space.id}
-              space={space}
-              active={view === 'space' && spaceId === space.id}
-              pageId={pageId}
-              onOpen={(id) => openPage(space.id, id)}
-            />
-          ))}
-        </nav>
-        {!configured && (
-          <div className="sidebar-empty">
-            Set up text chat to begin a persistent conversation.
-          </div>
-        )}
-        <div className="sidebar-bottom">
-          <button
-            className={`nav-item ${view === 'tasks' ? 'active' : ''}`}
-            onClick={() => {
-              setView('tasks');
-              setMobile(false);
-            }}
-          >
-            <Clock3 size={17} />
-            <span>Scheduled & activity</span>
-            {state.tasks.length > 0 && <small>{state.tasks.length}</small>}
-          </button>
-          <button
-            className={`nav-item ${view === 'inbox' ? 'active' : ''}`}
-            onClick={() => {
-              setView('inbox');
-              setMobile(false);
-            }}
-          >
-            <Inbox size={17} />
-            <span>Inbox</span>
-          </button>
-          <button
-            className={`nav-item ${view === 'accounts' ? 'active' : ''}`}
-            onClick={() => {
-              setView('accounts');
-              setMobile(false);
-            }}
-          >
-            <Plug size={17} />
-            <span>Accounts</span>
-          </button>
-          <button
-            className={`nav-item ${view === 'activity' ? 'active' : ''}`}
-            onClick={() => {
-              setView('activity');
-              setMobile(false);
-            }}
-          >
-            <Activity size={17} />
-            <span>Activity</span>
-          </button>
-          <button
-            className={`nav-item ${view === 'insights' ? 'active' : ''}`}
-            onClick={() => {
-              setView('insights');
-              setMobile(false);
-            }}
-          >
-            <Gauge size={17} />
-            <span>Insights</span>
-          </button>
-          <button
-            className={`nav-item ${view === 'memories' ? 'active' : ''}`}
-            onClick={() => {
-              setView('memories');
-              setMobile(false);
-            }}
-          >
-            <BookOpen size={17} />
-            <span>Memories</span>
-            {state.memories.length > 0 && (
-              <small>{state.memories.length}</small>
-            )}
-          </button>
-          <button
-            className="nav-item"
-            onClick={() => setDialog({ type: 'settings' })}
-          >
-            <Settings2 size={17} />
-            <span>Settings & setup</span>
-          </button>
-          <a
-            className="nav-item"
-            href="https://github.com/CopilotKit/OpenDots"
-            target="_blank"
-            rel="noreferrer"
-          >
-            <Code2 size={17} />
-            <span>Make it your own</span>
-            <ArrowUpRight size={13} />
-          </a>
-          <div className="version">
-            OPEN SOURCE TEMPLATE <span>v0.1</span>
-          </div>
-        </div>
-      </aside>
-      <div className="workspace">
+    <div className="app template-app top-nav">
+      <div className={`workspace ${view === 'chat' ? 'chat-mode' : ''}`}>
         <header className="topbar">
-          <button
-            className="desktop-nav-toggle document-icon"
-            aria-label={navCollapsed ? 'Show navigation' : 'Hide navigation'}
-            onClick={() => setNavCollapsed(!navCollapsed)}
-          >
-            <PanelLeft size={18} />
-          </button>
-          <div className="breadcrumbs">
-            <span>
-              {view === 'space'
-                ? workspace.spaces.find((space) => space.id === spaceId)?.name
-                : 'Dots'}
-            </span>
-            <span>/</span>
-            <strong>
-              {view === 'chat'
-                ? dot.name
-                : view === 'tasks'
-                  ? 'Activity'
-                  : view === 'space'
-                    ? 'Pages'
-                    : view === 'activity'
-                      ? 'Activity'
-                      : view === 'insights'
-                        ? 'Insights'
-                        : view === 'inbox'
-                          ? 'Inbox'
-                          : view === 'accounts'
-                            ? 'Accounts'
-                            : 'Memories'}
-            </strong>
-          </div>
+          <nav className="top-tabs" aria-label="Main">
+            <button
+              className="rail-brand"
+              aria-label="OpenDots home"
+              onClick={() => goTo('chat')}
+            >
+              o<span>·</span>
+            </button>
+            {tab('chat', 'Today', view === 'chat' && dot.id === assistant.id)}
+            {tab('inbox', 'Inbox', view === 'inbox')}
+            {tab('people', 'People', view === 'people')}
+          </nav>
           <div className="top-actions">
-            <span className="mode-badge">
-              {configured ? 'SELF-HOSTED' : 'SETUP REQUIRED'}
-            </span>
+            <WatchingStatus
+              paused={state.settings.paused}
+              onAccounts={() => goTo('accounts')}
+            />
+            {tab('permissions', 'What it may do', view === 'permissions')}
+            {tab(
+              'settings',
+              'Settings',
+              view === 'settings' ||
+                (view === 'chat' && dot.id !== assistant.id) ||
+                [
+                  'space',
+                  'accounts',
+                  'tasks',
+                  'activity',
+                  'insights',
+                  'memories',
+                ].includes(view),
+            )}
             <button
               className="pause-button"
               aria-label={
@@ -687,14 +474,16 @@ export function App() {
               {state.settings.paused ? <Play size={14} /> : <Pause size={14} />}
               <span>{state.settings.paused ? 'Resume' : 'Pause'}</span>
             </button>
-            <button
-              className="icon-button"
-              aria-label={pane ? 'Hide computer' : 'Show computer'}
-              aria-expanded={pane}
-              onClick={() => setPane(!pane)}
-            >
-              <Monitor size={18} />
-            </button>
+            {view === 'chat' && (
+              <button
+                className="icon-button"
+                aria-label={pane ? 'Hide computer' : 'Show computer'}
+                aria-expanded={pane}
+                onClick={() => setPane(!pane)}
+              >
+                <Monitor size={18} />
+              </button>
+            )}
           </div>
         </header>
         {error && (
@@ -710,11 +499,51 @@ export function App() {
           </div>
         )}
         {state.settings.paused && (
-          <div className="notice">
-            All Dots are paused. Active compute stops and scheduled tasks wait.
+          <div className="notice paused-banner" role="status">
+            <span>
+              OpenDots is paused. It is not watching your accounts, and
+              scheduled tasks wait.
+            </span>
+            <button
+              onClick={() =>
+                void mutate('/settings', 'PATCH', { paused: false })
+              }
+            >
+              <Play size={14} />
+              Resume
+            </button>
           </div>
         )}
-        {view === 'activity' ? (
+        {view === 'people' ? (
+          <PeopleView />
+        ) : view === 'permissions' ? (
+          <PermissionsView
+            onEdit={() =>
+              setDialog({
+                type: 'dot',
+                dot: assistant,
+                spaceId: assistant.spaceId,
+              })
+            }
+          />
+        ) : view === 'settings' ? (
+          <SettingsView
+            state={state}
+            workspace={workspace}
+            assistant={assistant}
+            onAssistant={(assistantDotId) => {
+              void mutate('/settings', 'PATCH', { assistantDotId }).then(
+                (saved) => {
+                  if (saved) setSelectedDot(assistantDotId);
+                },
+              );
+            }}
+            onDot={chooseDot}
+            onSpace={openPage}
+            onPlace={setView}
+            onDialog={setDialog}
+          />
+        ) : view === 'activity' ? (
           <ActivityView
             dots={workspace.dots}
             tasks={state.tasks}

@@ -8,12 +8,12 @@ Specs are written one phase ahead, not for the whole roadmap, because a spec wri
 
 Build in this order. Each one works on its own.
 
-| Spec                                                | Depends on | Status      |
-| --------------------------------------------------- | ---------- | ----------- |
-| [1.2 One assistant](1.2-one-assistant.md)           |            | Not started |
-| [1.1 Home](1.1-home.md)                             | 1.2        | Not started |
-| [1.3 Call through today](1.3-call-through-today.md) | 1.1        | Not started |
-| [1.4 Spoken decisions](1.4-spoken-decisions.md)     | 1.3        | Not started |
+| Spec                                                | Depends on | Status          |
+| --------------------------------------------------- | ---------- | --------------- |
+| [1.2 One assistant](1.2-one-assistant.md)           |            | Steps 1–2 built |
+| [1.1 Home](1.1-home.md)                             | 1.2        | Not started     |
+| [1.3 Call through today](1.3-call-through-today.md) | 1.1        | Not started     |
+| [1.4 Spoken decisions](1.4-spoken-decisions.md)     | 1.3        | Not started     |
 
 ## Ready to build beside phase 1
 
