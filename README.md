@@ -193,34 +193,42 @@ OpenDots records bounded browser setup stages and first successful assistant act
 
 ## Features
 
-| Area                       | Included                                                                                                                               |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Spaces and Specialist Dots | Saved names, role instructions, and per-Dot research and memory permissions                                                            |
-| Pages                      | Searchable library, visual editor, slash commands, autosave, and revision checks                                                       |
-| Conversations              | Stored locally; live streaming across devices, resume after refresh, page-specific conversations, and source links                     |
-| Slack                      | Socket Mode adapter, one OpenDots thread per Slack thread, workspace and user allowlists                                               |
-| Calls                      | WebRTC speech, delegated compute, bounded sessions, hangup, and timeline receipts                                                      |
-| Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                                              |
-| Browser                    | Separate read-only public-page service with page capture and navigation limits                                                         |
-| Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                                      |
-| Connections                | Accounts shared across Dots, per-Dot tool policies, Gmail, Outlook and Teams sign-in, and server-side owner approval for write actions |
-| Appearance                 | System, light, and dark themes; dark colors are derived at build time from the light styles                                            |
-| Memory                     | User-managed preferences that permitted Dots can use                                                                                   |
-| Deployment                 | Local Node setup and separate application/browser containers                                                                           |
+| Area                       | Included                                                                                                                                              |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spaces and Specialist Dots | Saved names, role instructions, and per-Dot research and memory permissions                                                                           |
+| Pages                      | Searchable library, visual editor, slash commands, autosave, and revision checks                                                                      |
+| Conversations              | Stored locally; live streaming across devices, resume after refresh, page-specific conversations, and source links                                    |
+| Slack                      | Socket Mode adapter, one OpenDots thread per Slack thread, workspace and user allowlists                                                              |
+| Calls                      | WebRTC speech, delegated compute, bounded sessions, hangup, and timeline receipts                                                                     |
+| Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                                                             |
+| Browser                    | Separate read-only public-page service with page capture and navigation limits                                                                        |
+| Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                                                     |
+| Connections                | Accounts shared across Dots, per-Dot tool policies, Gmail, Outlook and Teams sign-in, and server-side owner approval for write actions                |
+| Appearance                 | System, light, and dark themes; dark colors are derived at build time from the light styles                                                           |
+| Discovery                  | Watches Gmail, Outlook and Teams, judges each item with its history, and has a Dot prepare a reply or an action. See [Discovery](docs/DISCOVERY.md)   |
+| Inbox                      | Morning brief, proposals (prepare, handle, not now), waiting on others, links between items, and approving several requests at once                   |
+| Personal attention         | Focus, mute and away entries you give in chat, shown with a Lift button; an offer to mute what you keep dismissing                                    |
+| Memory                     | Notes that permitted Dots can use, and entities (people, companies, projects, invoices) built from what discovery reads. See [Memory](docs/MEMORY.md) |
+| Delegation                 | A Dot can hand work to your specialist Dots. See [Delegation](docs/DELEGATION.md)                                                                     |
+| Activity and Insights      | What each Dot is doing, with a blocked status; a run inspector, cost meter and audit                                                                  |
+| Deployment                 | Local Node setup and separate application/browser containers                                                                                          |
 
 Scheduled tasks run in their original conversation. If a worker stops or its lease expires during a run, OpenDots marks that run **Interrupted** and waits for an explicit retry. Review its pages and computer actions, then use **Retry after review** when appropriate. Completed effects may already be present even when a run has no final result.
 
 Local checks cover setup, persistence, streaming and resume, approvals, permissions, failure handling, and browser isolation. Automated tests use service fixtures. **Live model responses and page-context chat were verified on September 29, 2026, before phase 4 moved chat onto the OpenDots engine.** Live OpenBot computer browsing, file creation, shell verification, and file persistence across stop/start were also verified locally. Live Realtime speech, call controls, and receipt persistence were verified locally on September 30, 2026. The Slack adapter and spoken compute delegation still need connected-service verification. See [recording notes](docs/demos/README.md) for the demonstrated flows and limits.
 
-This is a single-owner starting point. Shared editing, invitations, file uploads, and interactive page embeds are not included. Schedules are recurring instructions, not a complete goal or event-trigger system. Specialist Dots have separate roles and conversations; multi-Dot group conversations and automatic delegation are further work.
+Today there is one owner per install. Sign-in and separate users are planned in the [roadmap](docs/ROADMAP.md). File uploads, interactive page embeds, shared editing and group conversations with several Dots are not included. Schedules are recurring instructions, not event triggers.
 
-### Extending the template
+### What comes next
 
-- Add identity, Space membership, and shared page editing for multi-user deployments.
-- Add file attachments and richer page content.
-- Add event triggers and a persistent responsibility lifecycle.
-- Extend tools and approval flows for your own workflows.
-- Add richer artifacts, connected-app context, and specialist coordination.
+The [roadmap](docs/ROADMAP.md) plans each feature. In order:
+
+- Home and call: one assistant, a home screen for the day, a call that walks you through it, and decisions by voice. Build specs are in [docs/specs](docs/specs/README.md).
+- The shape of your day: calendar, meeting prep, promises you made, quick capture and reminders.
+- It comes to you: a desktop app with notifications, and connection health.
+- A useful first five minutes: a 60-day look back and onboarding.
+- People and trust: client pages, "why this?", measuring accuracy, learned importance, and drafts in your voice.
+- Many users, and shipping version 1: sign-in, separate users, install, and data control.
 
 ## Contributing
 

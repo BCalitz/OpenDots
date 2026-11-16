@@ -256,7 +256,7 @@ The site is only up while the PC is on and awake.
 
 ## Automatic Learning
 
-Automatic Learning was a CopilotKit Intelligence feature and is not available now that conversations are stored locally. An OpenDots learning loop that drafts skills for your review is planned (see [ROADMAP.md](ROADMAP.md#learning-later)).
+Automatic Learning was a CopilotKit Intelligence feature and is not available now that conversations are stored locally. An OpenDots learning loop that drafts skills for your review is planned (see [ROADMAP.md](ROADMAP.md#later-version-1x)).
 
 ## Development checks
 
