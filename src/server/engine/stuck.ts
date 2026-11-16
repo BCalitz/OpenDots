@@ -19,14 +19,21 @@ function failed(result: unknown) {
  * the tool answers with an instruction to stop and report instead of running
  * again, so the turn ends with what blocked it. A success starts the count
  * over. Counts are per turn: call this once for each turn's tools.
+ * `onBlocked` hears of each tool that stopped, so the run can end as blocked.
  */
-export function stopWhenStuck(tools: Tool[]): Tool[] {
+export function stopWhenStuck(
+  tools: Tool[],
+  onBlocked?: (tool: string) => void,
+): Tool[] {
   const streak = new Map<string, number>();
+  const block = (name: string) => {
+    onBlocked?.(name);
+    return { status: 'blocked', message: BLOCKED };
+  };
   return tools.map((tool) => ({
     ...tool,
     execute: async (input, context) => {
-      if ((streak.get(tool.name) ?? 0) >= STUCK_AFTER)
-        return { status: 'blocked', message: BLOCKED };
+      if ((streak.get(tool.name) ?? 0) >= STUCK_AFTER) return block(tool.name);
       let result: unknown;
       try {
         result = await tool.execute(input, context);
@@ -35,8 +42,7 @@ export function stopWhenStuck(tools: Tool[]): Tool[] {
         if (context.signal.aborted) throw error;
         const count = (streak.get(tool.name) ?? 0) + 1;
         streak.set(tool.name, count);
-        if (count >= STUCK_AFTER)
-          return { status: 'blocked', message: BLOCKED };
+        if (count >= STUCK_AFTER) return block(tool.name);
         throw error;
       }
       if (!failed(result)) {
@@ -45,9 +51,9 @@ export function stopWhenStuck(tools: Tool[]): Tool[] {
       }
       const count = (streak.get(tool.name) ?? 0) + 1;
       streak.set(tool.name, count);
-      return count >= STUCK_AFTER
-        ? { ...(result as object), blocked: true, message: BLOCKED }
-        : result;
+      if (count < STUCK_AFTER) return result;
+      onBlocked?.(tool.name);
+      return { ...(result as object), blocked: true, message: BLOCKED };
     },
   }));
 }

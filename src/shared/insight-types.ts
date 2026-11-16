@@ -1,5 +1,6 @@
 /** Run inspector, cost meter and audit view (roadmap phase 2). */
-type RunStatus = 'running' | 'finished' | 'error' | 'stopped' | 'interrupted';
+type RunStatus =
+  'running' | 'finished' | 'error' | 'stopped' | 'interrupted' | 'blocked';
 export interface RunSummary {
   id: string;
   threadId: string;

@@ -443,11 +443,16 @@ export class DotEngine {
         runId: run.runId,
         modelOptions: { max_completion_tokens: 2200 },
         agentLoopStrategy: maxIterations(connected.length ? 10 : 5),
-        tools: toTanStackTools(stopWhenStuck(serverTools), {
-          signal,
-          emit,
-          hold,
-        }),
+        tools: toTanStackTools(
+          stopWhenStuck(serverTools, (name) =>
+            run.blocked(`${name} kept failing, so I stopped.`),
+          ),
+          {
+            signal,
+            emit,
+            hold,
+          },
+        ),
       });
       await streamEvents(
         stream,

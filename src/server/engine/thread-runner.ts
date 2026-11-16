@@ -9,7 +9,9 @@ import {
   type Message,
 } from '../../shared/thread-events.js';
 
-type RunStatus = 'running' | 'finished' | 'error' | 'stopped' | 'interrupted';
+/** blocked: the Dot stopped on purpose because a tool kept failing; `error` says what. */
+type RunStatus =
+  'running' | 'finished' | 'error' | 'stopped' | 'interrupted' | 'blocked';
 export interface LocalThread {
   id: string;
   agentId: string;
@@ -53,6 +55,8 @@ export interface RunContext {
   messages: Message[];
   signal: AbortSignal;
   emit(event: BaseEvent): void;
+  /** Marks the run blocked: it ends as finished work that could not be completed. */
+  blocked(reason: string): void;
   /** Reports model tokens; summed onto RUN_FINISHED and the run record. */
   usage(entries: TokenUsage[]): void;
 }
@@ -72,6 +76,8 @@ interface ActiveRun {
   events: BaseEvent[];
   usage: TokenUsage[];
   stopRequested: boolean;
+  /** Why the Dot stopped on purpose, once a tool kept failing. */
+  blocked?: string;
   done: Promise<FinishedRun>;
   /** Event writes, in order; the run's final save waits for them. */
   writes: Promise<void>;
@@ -644,6 +650,9 @@ export class ThreadRunner {
             record(event);
           },
           usage: (entries) => active.usage.push(...entries),
+          blocked: (reason) => {
+            active.blocked ??= reason.slice(0, 500);
+          },
         });
       } catch (error) {
         failure =
@@ -784,11 +793,15 @@ export class ThreadRunner {
       ? 'stopped'
       : runError
         ? 'error'
-        : 'finished';
+        : active.blocked
+          ? 'blocked'
+          : 'finished';
     const error =
       status === 'error'
         ? (failure ?? runError?.message ?? 'The run failed.')
-        : null;
+        : status === 'blocked'
+          ? active.blocked!
+          : null;
     const messages = reduceEvents(active.events, stored);
     const result: FinishedRun = {
       threadId,

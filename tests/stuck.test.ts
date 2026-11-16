@@ -42,3 +42,14 @@ it('keeps a separate count for each turn', async () => {
   const [second] = stopWhenStuck([failing]);
   expect(await run(second)).toEqual({ isError: true });
 });
+
+it('tells the run which tool blocked it', async () => {
+  const blocked: string[] = [];
+  const [wrapped] = stopWhenStuck([tool([() => ({ isError: true })])], (name) =>
+    blocked.push(name),
+  );
+  await run(wrapped);
+  expect(blocked).toEqual([]);
+  await run(wrapped);
+  expect(blocked).toEqual(['search']);
+});

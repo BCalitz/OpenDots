@@ -41,6 +41,7 @@ const statusClass: Record<RunSummary['status'], string> = {
   error: 'failed',
   stopped: 'paused',
   interrupted: 'interrupted',
+  blocked: 'failed',
 };
 const statusName: Record<RunSummary['status'], string> = {
   running: 'Running',
@@ -48,6 +49,7 @@ const statusName: Record<RunSummary['status'], string> = {
   error: 'Error',
   stopped: 'Stopped',
   interrupted: 'Interrupted',
+  blocked: 'Blocked',
 };
 const sourceName = {
   chat: 'Chat',

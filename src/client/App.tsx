@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import {
   ArrowUp,
   ArrowUpRight,
+  Activity,
   BookOpen,
   Clock3,
   Code2,
@@ -43,6 +44,7 @@ import {
   type Notices,
 } from './poll-notice';
 import { Mascot } from './Mascot';
+import { ActivityView } from './ActivityView';
 import { InsightsView } from './InsightsView';
 import { InboxView } from './InboxView';
 import { AccountsView } from './AccountsView';
@@ -78,7 +80,14 @@ export function App() {
   }>();
   const [undoError, setUndoError] = useState('');
   const [view, rawSetView] = useState<
-    'chat' | 'tasks' | 'memories' | 'space' | 'insights' | 'inbox' | 'accounts'
+    | 'chat'
+    | 'tasks'
+    | 'memories'
+    | 'space'
+    | 'insights'
+    | 'inbox'
+    | 'accounts'
+    | 'activity'
   >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
@@ -572,6 +581,16 @@ export function App() {
             <span>Accounts</span>
           </button>
           <button
+            className={`nav-item ${view === 'activity' ? 'active' : ''}`}
+            onClick={() => {
+              setView('activity');
+              setMobile(false);
+            }}
+          >
+            <Activity size={17} />
+            <span>Activity</span>
+          </button>
+          <button
             className={`nav-item ${view === 'insights' ? 'active' : ''}`}
             onClick={() => {
               setView('insights');
@@ -639,13 +658,15 @@ export function App() {
                   ? 'Activity'
                   : view === 'space'
                     ? 'Pages'
-                    : view === 'insights'
-                      ? 'Insights'
-                      : view === 'inbox'
-                        ? 'Inbox'
-                        : view === 'accounts'
-                          ? 'Accounts'
-                          : 'Memories'}
+                    : view === 'activity'
+                      ? 'Activity'
+                      : view === 'insights'
+                        ? 'Insights'
+                        : view === 'inbox'
+                          ? 'Inbox'
+                          : view === 'accounts'
+                            ? 'Accounts'
+                            : 'Memories'}
             </strong>
           </div>
           <div className="top-actions">
@@ -693,7 +714,22 @@ export function App() {
             All Dots are paused. Active compute stops and scheduled tasks wait.
           </div>
         )}
-        {view === 'insights' ? (
+        {view === 'activity' ? (
+          <ActivityView
+            dots={workspace.dots}
+            tasks={state.tasks}
+            onThread={(id) => {
+              const target = workspace.conversations.find((t) => t.id === id);
+              if (!target) return;
+              setSelectedDot(target.dotId);
+              setSelectedThread(id);
+              setView('chat');
+            }}
+            onTaskAction={(taskId, action) =>
+              mutate(`/tasks/${taskId}/actions`, 'POST', { action })
+            }
+          />
+        ) : view === 'insights' ? (
           <InsightsView
             dots={workspace.dots}
             onThread={(id) => {
