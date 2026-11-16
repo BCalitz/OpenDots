@@ -76,11 +76,11 @@ interface Context {
   entities: Resolved[];
 }
 /** Which of the owner's focus and mute subjects an item is about. */
-interface Matched {
+export interface Matched {
   focus: string[];
   mute: string[];
 }
-const matchedOf = (answers: unknown): Matched => {
+export const matchedOf = (answers: unknown): Matched => {
   const found = (answers as { attention?: Partial<Matched> } | null)?.attention;
   return { focus: found?.focus ?? [], mute: found?.mute ?? [] };
 };

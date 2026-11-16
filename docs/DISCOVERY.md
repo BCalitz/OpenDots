@@ -96,6 +96,19 @@ The Dot stays read-only until the owner approves. Replies are drafted in the Ope
 - **Quiet hours:** during quiet hours, "today" items wait for the morning brief, and only "within hours" breaks through.
 - **Hold window:** non-urgent pushes wait a few minutes so a quick follow-up can cancel them.
 
+## 5. Today: the list on the home screen
+
+`GET /api/today` gives the home screen its list. Code builds it from what discovery stored; no model is called.
+
+- **Needs you now:** open proposals, and pending approvals, needed within hours or today. At most two; the rest are counted in `moreNow` and listed first under decide.
+- **Decide:** every other open proposal and pending approval. A proposal and an approval in the same conversation appear once, as the approval.
+- **Waiting on others:** things you sent that nobody answered after three days.
+- **Left out:** snoozed, dismissed, closed or handled proposals, ones being prepared or handled, and items from senders you kept dismissing.
+- **Order:** by urgency, then importance, then oldest first.
+- **Why:** one sentence from stored facts: a focus it matched, how often the person asked in that conversation, a decision only you can make, or how soon it is needed. The templates are in `src/server/today-why.ts`.
+- **Quiet line:** since local midnight in the discovery time zone, how many items were read, how many were not flagged, and how many actions that changed something finished.
+- **Status:** paused, no accounts, no Jev key, or an account error, checked in that order.
+
 ## Jev calls per item
 
 | Situation                                         | Jev calls                                             |
@@ -122,6 +135,7 @@ Tags (`event_tags`) and per-item embeddings (`item_embeddings`) were dropped in 
 - Gathering history, judging in context, and deciding in three steps (link earlier items, save the finding, follow up on earlier items): `src/server/discovery/service.ts`
 - Routing, delivery, quiet hours, hold window, morning brief and corrections: `src/server/discovery/delivery.ts`
 - Proposals (prepare, handle, not now): `src/server/discovery/proposals.ts`, `proposal-store.ts`
+- The list for today: `src/server/today.ts` (built in code), `today-why.ts` (the why sentences), `today-routes.ts` (reading it from storage)
 
 The thresholds are starting values and have not been tuned on real items yet.
 
