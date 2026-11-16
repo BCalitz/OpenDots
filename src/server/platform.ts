@@ -6,6 +6,7 @@ import type { Connector } from './connectors/connector.js';
 import { OAuthFlow } from './connectors/oauth.js';
 import { PageService } from './page-service.js';
 import { Store } from './store.js';
+import { ensureAssistant } from './assistant.js';
 import { WorkspaceStore } from './workspace.js';
 import {
   setupStatus,
@@ -114,6 +115,7 @@ export class Platform {
       slackDotId,
       options,
     );
+    await ensureAssistant(store, workspace);
     await platform.runner.recoverInterruptedRuns();
     await platform.approvals.expireStale();
     return platform;

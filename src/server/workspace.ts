@@ -73,7 +73,7 @@ export class WorkspaceStore {
     this.inbox = new InboxStore(db);
     this.pages = new Pages(db, (id) => this.spaceExists(id));
   }
-  /** Creates the first Space and Dot on a new install. */
+  /** Creates the first Space and the assistant Dot on a new install. */
   async seed() {
     await this.db.transaction(async () => {
       if ((await this.spaces()).length) return;
@@ -83,7 +83,7 @@ export class WorkspaceStore {
       );
       await this.createDot(
         space.id,
-        'Dot',
+        'Assistant',
         'Be thoughtful, practical, and concise. Help the user think clearly and follow through.',
         true,
         true,

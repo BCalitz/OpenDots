@@ -58,9 +58,13 @@ OpenDots is a starting point for building your own agent workspace. Clone it, de
 
 **A template, not a hosted product.** You run the application and configure its infrastructure. The template is in early development; the Features section below describes what's included and distinguishes local verification from connected-service testing.
 
+### One assistant
+
+You talk to one assistant. A new install creates it, named Assistant; an existing install makes its discovery Dot the assistant, or else its oldest Dot. Discovery and the day are handled by the assistant, and you can choose a different Dot under **Settings**. The top bar has **Today**, **Inbox** and **People**, the accounts OpenDots is watching, **What it may do**, **Settings** and **Pause**. Spaces, other Dots, Accounts, Activity, Insights and Memories are under **Settings** and work as before.
+
 ### Spaces
 
-A Space is a home for working documents. Dots appear separately in navigation and can be granted access to multiple Spaces in their settings. Each Dot has a default destination for saved pages; existing installations retain their original Space access. Browse pages in a searchable library, switch between grid and list views, and organize documents as nested subpages. Open a page in a focused visual editor with formatting, slash commands, and undo/redo. Write directly, save a conversation as a page, or ask a specialist to create and revise content.
+A Space is a home for working documents. Dots are listed under Settings and can be granted access to multiple Spaces in their settings. Each Dot has a default destination for saved pages; existing installations retain their original Space access. Browse pages in a searchable library, switch between grid and list views, and organize documents as nested subpages. Open a page in a focused visual editor with formatting, slash commands, and undo/redo. Write directly, save a conversation as a page, or ask a specialist to create and revise content.
 
 Pages stay in the local workspace database. Each page and specialist pair has its own conversation. Page links connect the document workspace to Dot chat. Manual editing works before you configure conversation services. Autosave reports its progress, failed saves retain your draft, and revision checks prevent stale edits from overwriting newer content. Markdown source mode remains available.
 

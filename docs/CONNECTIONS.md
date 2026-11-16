@@ -14,7 +14,7 @@ Connecting the same service to five Dots is one account and five grants, so a to
 
 ## Add a connection
 
-1. Open a Dot's settings (**Edit specialist**).
+1. Open a Dot's settings: **Settings**, then the **⋯** button beside the Dot.
 2. Under **Connections**, enter a name, the server's Streamable HTTP endpoint (for example `https://example.com/mcp`), and an optional bearer token.
 3. Select **Connect**. OpenDots lists the server's tools, saves the account and lets this Dot use it.
 
